@@ -1,0 +1,52 @@
+# deploy/docker-compose.yml
+# V1：postgres + control-plane + admin-web；不引入 Redis。
+# 设计依据：§71。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aie-postgres
+    environment:
+      POSTGRES_USER: aie
+      POSTGRES_PASSWORD: aie
+      POSTGRES_DB: aie
+    ports:
+      - "5432:5432"
+    volumes:
+      - aie_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aie -d aie"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  control-plane:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    container_name: aie-control-plane
+    environment:
+      AIE_ENV: development
+      AIE_HTTP_ADDR: ":8080"
+      AIE_GRPC_ADDR: ":9090"
+      AIE_DATABASE_URL: postgres://aie:aie@postgres:5432/aie?sslmode=disable
+      AIE_SEED_DEMO: "1"
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  admin-web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.admin
+    container_name: aie-admin
+    ports:
+      - "8088:80"
+    depends_on:
+      - control-plane
+
+volumes:
+  aie_pg_data:

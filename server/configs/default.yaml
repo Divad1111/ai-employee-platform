@@ -1,0 +1,6 @@
+# Control Plane 默认配置（勿在生产直接修改本文件）
+# 使用 production.yaml 或环境变量 AIE_* 覆盖。设计依据：§80。
+
+env: development
+http_addr: ":8080"
+grpc_addr: ":9090"

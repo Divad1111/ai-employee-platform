@@ -1,0 +1,29 @@
+# Control Plane 镜像（多阶段构建）
+# 设计依据：§71、§72
+
+FROM golang:1.22-bookworm AS build
+ENV GOTOOLCHAIN=auto
+WORKDIR /src
+# gen 为 replace 依赖，需一并拷贝
+COPY gen/go.mod gen/go.sum* ./gen/
+COPY server/go.mod server/go.sum ./server/
+WORKDIR /src/server
+RUN go mod download
+WORKDIR /src
+COPY gen ./gen
+COPY server ./server
+COPY migrations ./migrations
+WORKDIR /src/server
+RUN CGO_ENABLED=0 go build -o /out/server ./cmd/server \
+ && CGO_ENABLED=0 go build -o /out/migrate ./cmd/migrate
+
+FROM gcr.io/distroless/static-debian12:nonroot
+WORKDIR /app
+COPY --from=build /out/server /app/server
+COPY --from=build /out/migrate /app/migrate
+COPY --from=build /src/migrations /migrations
+ENV AIE_HTTP_ADDR=:8080
+ENV AIE_GRPC_ADDR=:9090
+# migrate 示例: /app/migrate -dir /migrations up
+USER nonroot:nonroot
+ENTRYPOINT ["/app/server"]

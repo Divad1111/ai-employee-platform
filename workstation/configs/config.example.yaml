@@ -1,0 +1,22 @@
+# Workstation 示例配置（敏感信息不放此文件）
+# 复制到平台 ConfigDir 后按需修改。设计依据：§124。
+
+workstation:
+  name: local-dev
+
+control_plane:
+  endpoint: "localhost:9090"
+
+runtime:
+  # V1 决策 Q-03：有效并发 Session 强制为 1
+  max_sessions: 1
+  idle_timeout: 600
+
+providers:
+  cursor:
+    enabled: true
+  codex:
+    enabled: true
+
+security:
+  require_mtls: true

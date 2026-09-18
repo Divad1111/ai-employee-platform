@@ -1,0 +1,62 @@
+// Control Plane ↔ Workstation gRPC 服务。
+// Workstation 主动出站连接（NAT 友好），不暴露公网执行端口。
+// 设计依据：§20、§64、§24、§22。
+syntax = "proto3";
+
+package aie.v1;
+
+option go_package = "github.com/ai-employee-platform/gen/go/aie/v1;aiev1";
+
+import "aie/v1/command.proto";
+import "aie/v1/event.proto";
+import "aie/v1/heartbeat.proto";
+
+// WorkerService Workstation 作为客户端调用的服务。
+service WorkerService {
+  // Connect 建立双向流：Server 下发 Command，Workstation 上报 Event / Heartbeat / Ack。
+  // 首帧应由 Workstation 发送 Resume 信息（见 WorkerHello）。
+  rpc Connect(stream WorkerToServer) returns (stream ServerToWorker);
+
+  // Ping 探测连通性与 mTLS（亦可用于 aew ping）。
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+// WorkerHello 连接建立后的首包：Resume 语义。
+message WorkerHello {
+  string workstation_id = 1;
+  // 本端最后确认的 Server→Worker command sequence。
+  uint64 last_acked_command_sequence = 2;
+  string agent_version = 3;
+}
+
+// WorkerToServer 上行帧。
+message WorkerToServer {
+  oneof body {
+    WorkerHello hello = 1;
+    Heartbeat heartbeat = 2;
+    Event event = 3;
+    CommandAck command_ack = 4;
+  }
+}
+
+// ServerToWorker 下行帧。
+message ServerToWorker {
+  oneof body {
+    Command command = 1;
+    HeartbeatAck heartbeat_ack = 2;
+    EventAck event_ack = 3;
+  }
+}
+
+// PingRequest 连通性探测。
+message PingRequest {
+  string workstation_id = 1;
+  string nonce = 2;
+}
+
+// PingResponse 探测结果。
+message PingResponse {
+  string nonce = 1;
+  int64 server_unix_ms = 2;
+  uint64 current_command_sequence = 3;
+}

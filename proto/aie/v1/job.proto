@@ -1,0 +1,50 @@
+// Job 状态与上下文。
+// 设计依据：§15、§112、§113。
+syntax = "proto3";
+
+package aie.v1;
+
+option go_package = "github.com/ai-employee-platform/gen/go/aie/v1;aiev1";
+
+// JobStatus Job 状态机。
+enum JobStatus {
+  JOB_STATUS_UNSPECIFIED = 0;
+  JOB_STATUS_CREATED = 1;
+  JOB_STATUS_QUEUED = 2;
+  JOB_STATUS_ASSIGNED = 3;
+  JOB_STATUS_STARTING = 4;
+  JOB_STATUS_RUNNING = 5;
+  JOB_STATUS_SUCCESS = 6;
+  JOB_STATUS_FAILED = 7;
+  JOB_STATUS_CANCELLED = 8;
+  JOB_STATUS_TIMEOUT = 9;
+  JOB_STATUS_BLOCKED = 10;
+  JOB_STATUS_WAITING_APPROVAL = 11;
+  JOB_STATUS_UNKNOWN = 12;
+}
+
+// JobContext Job 执行上下文（对齐 §112）。
+message JobContext {
+  string job_id = 1;
+  string employee_id = 2;
+  string workspace_id = 3;
+  string session_id = 4;
+  string prompt = 5;
+  repeated string attachments = 6;
+  string parent_job_id = 7;
+  string created_by = 8;
+  int64 created_at_unix_ms = 9;
+  int64 started_at_unix_ms = 10;
+  int64 completed_at_unix_ms = 11;
+  JobStatus status = 12;
+  string result = 13;
+  string idempotency_key = 14;
+  uint32 timeout_sec = 15;
+}
+
+// JobSnapshot 列表/详情用摘要。
+message JobSnapshot {
+  JobContext context = 1;
+  string workstation_id = 2;
+  string provider = 3;
+}

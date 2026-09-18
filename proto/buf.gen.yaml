@@ -1,0 +1,13 @@
+# buf 代码生成配置
+# 生成物输出到仓库 gen/go，供 server / workstation 共同依赖
+# 对应任务：T-0107
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: ../gen/go
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: ../gen/go
+    opt:
+      - paths=source_relative
+      - require_unimplemented_servers=false

@@ -1,0 +1,46 @@
+// Workstation → Server 事件。
+// 设计依据：§66、§113。
+syntax = "proto3";
+
+package aie.v1;
+
+option go_package = "github.com/ai-employee-platform/gen/go/aie/v1;aiev1";
+
+import "aie/v1/common.proto";
+
+// EventType 事件类型枚举。
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_SESSION_STARTED = 1;
+  EVENT_TYPE_SESSION_READY = 2;
+  EVENT_TYPE_SESSION_ERROR = 3;
+  EVENT_TYPE_SESSION_STOPPED = 4;
+  EVENT_TYPE_JOB_STARTED = 10;
+  EVENT_TYPE_JOB_PROGRESS = 11;
+  EVENT_TYPE_JOB_SUCCESS = 12;
+  EVENT_TYPE_JOB_FAILED = 13;
+  EVENT_TYPE_PROVIDER_INSTALLED = 20;
+  EVENT_TYPE_PROVIDER_UPDATED = 21;
+  EVENT_TYPE_WORKSPACE_CHANGED = 30;
+  EVENT_TYPE_SYSTEM_ALERT = 40;
+}
+
+// Event Workstation 上报的事件。
+message Event {
+  EnvelopeMeta meta = 1;
+  string event_id = 2;
+  string workstation_id = 3;
+  string employee_id = 4;
+  string job_id = 5;
+  string session_id = 6;
+  EventType type = 7;
+  string payload_json = 8;
+}
+
+// EventAck Server 对事件的确认（幂等）。
+message EventAck {
+  string event_id = 1;
+  uint64 sequence = 2;
+  bool accepted = 3;
+  string error_message = 4;
+}

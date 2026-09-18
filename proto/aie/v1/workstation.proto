@@ -1,0 +1,36 @@
+// Workstation 状态与能力描述。
+// 设计依据：§18、§94、§103。
+syntax = "proto3";
+
+package aie.v1;
+
+option go_package = "github.com/ai-employee-platform/gen/go/aie/v1;aiev1";
+
+// WorkstationStatus Workstation 生命周期状态。
+enum WorkstationStatus {
+  WORKSTATION_STATUS_UNSPECIFIED = 0;
+  WORKSTATION_STATUS_PROVISIONING = 1;
+  WORKSTATION_STATUS_ONLINE = 2;
+  WORKSTATION_STATUS_BUSY = 3;
+  WORKSTATION_STATUS_DRAINING = 4;
+  WORKSTATION_STATUS_OFFLINE = 5;
+  WORKSTATION_STATUS_ERROR = 6;
+}
+
+// Capability 描述节点能力（Provider、特性开关等）。
+message Capability {
+  string key = 1;
+  string value = 2;
+}
+
+// WorkstationInfo Workstation 信息快照。
+message WorkstationInfo {
+  string workstation_id = 1;
+  string name = 2;
+  string os = 3;
+  string arch = 4;
+  string version = 5;
+  WorkstationStatus status = 6;
+  repeated Capability capabilities = 7;
+  int64 last_heartbeat_unix_ms = 8;
+}

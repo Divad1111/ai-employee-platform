@@ -1,0 +1,26 @@
+// 公共类型：防重放、幂等与时间戳约定。
+// 设计依据：§21、§65、§66、§103、§128。
+// 时间戳：使用 UTC unix 毫秒（int64）。校验以 Server 时间为准，允许合理 clock skew（建议 ±5 分钟，可配置）。
+syntax = "proto3";
+
+package aie.v1;
+
+option go_package = "github.com/ai-employee-platform/gen/go/aie/v1;aiev1";
+
+// EnvelopeMeta 是 Command / Event 共用的传输元数据。
+message EnvelopeMeta {
+  // 全局唯一消息 ID；重复投递时用于幂等。
+  string message_id = 1;
+  // 单调递增序号（按连接方向各自维护）。
+  uint64 sequence = 2;
+  // 发送方声称的时间（unix 毫秒，UTC）。
+  int64 timestamp_unix_ms = 3;
+  // 一次性随机数，配合 timestamp 防重放。
+  string nonce = 4;
+}
+
+// ResourceRef 引用平台内资源。
+message ResourceRef {
+  string id = 1;
+  string type = 2;
+}

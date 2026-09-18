@@ -1,0 +1,36 @@
+// 心跳：Workstation → Control Plane。
+// 设计依据：§67、§94、§115。
+syntax = "proto3";
+
+package aie.v1;
+
+option go_package = "github.com/ai-employee-platform/gen/go/aie/v1;aiev1";
+
+import "aie/v1/common.proto";
+import "aie/v1/workstation.proto";
+
+// ResourceUsage 资源占用摘要。
+message ResourceUsage {
+  double cpu_percent = 1;
+  double memory_percent = 2;
+  double disk_percent = 3;
+}
+
+// Heartbeat 周期上报。
+message Heartbeat {
+  EnvelopeMeta meta = 1;
+  string workstation_id = 2;
+  int64 timestamp_unix_ms = 3;
+  string version = 4;
+  ResourceUsage resources = 5;
+  uint32 employees = 6;
+  uint32 sessions = 7;
+  repeated Capability capabilities = 8;
+}
+
+// HeartbeatAck Server 确认，可带回 server_time 供校时。
+message HeartbeatAck {
+  string message_id = 1;
+  int64 server_unix_ms = 2;
+  uint32 next_interval_sec = 3;
+}
