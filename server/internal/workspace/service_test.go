@@ -32,7 +32,7 @@ func TestWorkspaceExclusiveBind(t *testing.T) {
 			return empStore.Save(ctx, e)
 		},
 	})
-	ws, err := svc.Create(ctx, workspace.CreateInput{Path: "/repo", Repository: "r", Branch: "main"}, "u", "")
+	ws, err := svc.Create(ctx, workspace.CreateInput{WorkstationID: "WSN-1", Path: "/repo", Repository: "r", Branch: "main"}, "u", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,5 +41,12 @@ func TestWorkspaceExclusiveBind(t *testing.T) {
 	}
 	if _, err := svc.BindEmployee(ctx, ws.ID, e2.ID, "u", ""); err != workspace.ErrLocked {
 		t.Fatalf("应独占锁定: %v", err)
+	}
+}
+
+func TestWorkspaceCreateRequiresWorkstation(t *testing.T) {
+	svc := workspace.NewService(workspace.NewMemoryStore(), audit.NewMemory())
+	if _, err := svc.Create(context.Background(), workspace.CreateInput{Path: "/repo"}, "u", ""); err != workspace.ErrInvalidInput {
+		t.Fatalf("缺少 workstation_id 应拒绝: %v", err)
 	}
 }

@@ -24,7 +24,8 @@ type Event struct {
 // Session ACP 会话。
 type Session interface {
 	Start(ctx context.Context) error
-	Send(ctx context.Context, input []byte) error
+	// Send 向 Agent 发送 prompt，返回聚合后的助手回复文本。
+	Send(ctx context.Context, input []byte) (reply string, err error)
 	Events() <-chan Event
 	Stop(ctx context.Context) error
 	Ready() bool
@@ -69,19 +70,20 @@ func (s *FakeSession) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *FakeSession) Send(_ context.Context, input []byte) error {
+func (s *FakeSession) Send(_ context.Context, input []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.ready || s.stopped {
-		return ErrNotStarted
+		return "", ErrNotStarted
 	}
 	cp := append([]byte{}, input...)
 	s.sent = append(s.sent, cp)
+	reply := "echo: " + string(cp)
 	select {
-	case s.events <- Event{Type: "ack", Payload: cp}:
+	case s.events <- Event{Type: "ack", Payload: []byte(reply)}:
 	default:
 	}
-	return nil
+	return reply, nil
 }
 
 func (s *FakeSession) Events() <-chan Event { return s.events }

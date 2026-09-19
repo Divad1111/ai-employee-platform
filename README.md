@@ -76,26 +76,35 @@ npm run build    # 生产构建
 4. 禁止启动时偷偷改生产库 schema（必须用 migrations）。
 5. 注释与公开 API 说明使用**中文**，便于团队阅读与扩展。
 
-## 本地快速验证（M2）
+## 部署与快速上手
 
+完整的生产与开发环境部署步骤，请参考：
+👉 **[安装配置中心服务器与 Workstation 部署手册](docs/DEPLOYMENT_GUIDE.md)**
+
+### 容器一键启动
 ```bash
-# 终端 1
-cd server && go run ./cmd/server
+# 启动中心服务器栈（PostgreSQL + Control Plane + Admin Web）
+cd deploy
+docker compose up --build -d
 
-# 终端 2
-curl -s -X POST http://127.0.0.1:8080/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin123"}'
-
-# 用返回的 token 创建 enrollment token，再：
-set AIE_DATA_DIR=%TEMP%\aie-dev
-aew register --server http://127.0.0.1:8080 --token <token>
-aew ping --grpc 127.0.0.1:9090
+# 浏览器访问首次部署向导，配置初始超级管理员
+open http://localhost:8088/setup
 ```
 
-或运行：`scripts/verify_mtls.ps1`（需已编译 `server/bin/server.exe` 与 `workstation/bin/aew.exe`）。
+### 工作站快速接入（以 macOS / Linux 为例）
+```bash
+# 1. 编译工作站程序
+cd workstation && go build -o bin/aew ./cmd/aew
 
-默认管理员：`admin` / `admin123`（可用 `AIE_ADMIN_PASSWORD` 覆盖）。
+# 2. 在 Web 后台生成接入 Token 后注册工作站
+AIE_DATA_DIR="$HOME/.aie" ./bin/aew register \
+  --server http://127.0.0.1:8080 \
+  --token "<ENROLL_TOKEN>" \
+  --grpc-target "127.0.0.1:9090"
+
+# 3. 启动常驻守护进程
+AIE_DATA_DIR="$HOME/.aie" ./bin/aew daemon
+```
 
 ## 当前进度
 

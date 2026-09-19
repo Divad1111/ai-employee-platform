@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +21,9 @@ var (
 	ErrUserLocked         = errors.New("账户暂时锁定，请稍后重试")
 	ErrUnauthorized       = errors.New("未登录或会话无效")
 	ErrForbidden          = errors.New("权限不足")
+	ErrAlreadyInitialized = errors.New("系统已初始化，首次部署设置已关闭")
+	ErrWeakPassword       = errors.New("密码长度至少需 8 个字符")
+	ErrInvalidUsername    = errors.New("用户名长度需在 3 至 32 个字符之间")
 )
 
 // User 表示管理员用户。
@@ -46,8 +50,11 @@ type Session struct {
 // UserStore 用户持久化抽象（M2 可用内存实现）。
 type UserStore interface {
 	FindByUsername(ctx context.Context, username string) (*User, error)
+	Create(ctx context.Context, u *User) error
 	Update(ctx context.Context, u *User) error
 	ListPermissions(ctx context.Context, roles []string) ([]string, error)
+	Count(ctx context.Context) (int, error)
+	IsInitialized(ctx context.Context) (bool, error)
 }
 
 // SessionStore 会话存储。
@@ -226,6 +233,71 @@ func (s *Service) VerifyPassword(ctx context.Context, username, password string)
 	return nil
 }
 
+// IsInitialized 检查系统是否已初始化管理员。
+func (s *Service) IsInitialized(ctx context.Context) (bool, error) {
+	return s.users.IsInitialized(ctx)
+}
+
+// InitAdmin 执行首次部署管理员注册，并返回登录会话。
+func (s *Service) InitAdmin(ctx context.Context, username, password, display, ip string) (*Session, error) {
+	username = strings.TrimSpace(username)
+	if len(username) < 3 || len(username) > 32 {
+		return nil, ErrInvalidUsername
+	}
+	if len(password) < 8 {
+		return nil, ErrWeakPassword
+	}
+	initialized, err := s.users.IsInitialized(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if initialized {
+		return nil, ErrAlreadyInitialized
+	}
+
+	hash, err := HashPassword(password)
+	if err != nil {
+		return nil, err
+	}
+	if display == "" {
+		display = "系统管理员"
+	}
+	rawToken, _ := randomToken(4)
+	userID := "user-admin-" + rawToken
+	u := &User{
+		ID:           userID,
+		Username:     username,
+		PasswordHash: hash,
+		DisplayName:  display,
+		Roles:        []string{"SUPER_ADMIN", "ADMIN"},
+	}
+	if err := s.users.Create(ctx, u); err != nil {
+		return nil, err
+	}
+
+	tok, err := randomToken(32)
+	if err != nil {
+		return nil, err
+	}
+	sess := &Session{
+		Token:     tok,
+		UserID:    u.ID,
+		Username:  u.Username,
+		Roles:     append([]string{}, u.Roles...),
+		ExpiresAt: time.Now().Add(s.sessionTTL),
+	}
+	if err := s.sessions.Save(ctx, sess); err != nil {
+		return nil, err
+	}
+
+	s.audit.Log(ctx, "USER", u.ID, "system.bootstrap", "success", ip, map[string]string{
+		"username":     u.Username,
+		"display_name": display,
+		"roles":        "SUPER_ADMIN,ADMIN",
+	})
+	return sess, nil
+}
+
 // HashPassword 使用 bcrypt 生成密码哈希。
 func HashPassword(password string) (string, error) {
 	b, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -348,6 +420,19 @@ func (m *MemoryUserStore) FindByUsername(_ context.Context, username string) (*U
 	return &cp, nil
 }
 
+// Create 新建用户。
+func (m *MemoryUserStore) Create(_ context.Context, u *User) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.users[u.Username]; exists {
+		return errors.New("用户名已存在")
+	}
+	cp := *u
+	cp.Roles = append([]string{}, u.Roles...)
+	m.users[u.Username] = &cp
+	return nil
+}
+
 // Update 更新用户。
 func (m *MemoryUserStore) Update(_ context.Context, u *User) error {
 	m.mu.Lock()
@@ -356,6 +441,27 @@ func (m *MemoryUserStore) Update(_ context.Context, u *User) error {
 	cp.Roles = append([]string{}, u.Roles...)
 	m.users[u.Username] = &cp
 	return nil
+}
+
+// Count 返回用户总数。
+func (m *MemoryUserStore) Count(_ context.Context) (int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.users), nil
+}
+
+// IsInitialized 检查系统是否已有管理员角色用户。
+func (m *MemoryUserStore) IsInitialized(_ context.Context) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, u := range m.users {
+		for _, r := range u.Roles {
+			if r == "ADMIN" || r == "SUPER_ADMIN" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // ListPermissions 汇总角色权限。

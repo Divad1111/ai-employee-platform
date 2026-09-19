@@ -12,8 +12,11 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -84,6 +87,76 @@ func NewDevAuthority() (*Authority, error) {
 		byFP:      map[string]*Record{},
 		byWS:      map[string]string{},
 	}, nil
+}
+
+// LoadOrNewAuthority 从指定目录加载已有 CA 证书与私钥；若不存在则自动生成并持久化存储。
+func LoadOrNewAuthority(dir string) (*Authority, error) {
+	if dir == "" {
+		return NewDevAuthority()
+	}
+	certPath := filepath.Join(dir, "ca.crt")
+	keyPath := filepath.Join(dir, "ca.key")
+
+	certPEM, errCert := os.ReadFile(certPath)
+	keyPEM, errKey := os.ReadFile(keyPath)
+	if errCert == nil && errKey == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
+		blockCert, _ := pem.Decode(certPEM)
+		if blockCert == nil {
+			return nil, fmt.Errorf("解析 ca.crt 失败: 无有效 PEM 数据")
+		}
+		cert, err := x509.ParseCertificate(blockCert.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("解析 CA 证书失败: %w", err)
+		}
+
+		blockKey, _ := pem.Decode(keyPEM)
+		if blockKey == nil {
+			return nil, fmt.Errorf("解析 ca.key 失败: 无有效 PEM 数据")
+		}
+		var key *ecdsa.PrivateKey
+		if blockKey.Type == "EC PRIVATE KEY" {
+			key, err = x509.ParseECPrivateKey(blockKey.Bytes)
+		} else {
+			parsedKey, errPkcs8 := x509.ParsePKCS8PrivateKey(blockKey.Bytes)
+			if errPkcs8 == nil {
+				var ok bool
+				key, ok = parsedKey.(*ecdsa.PrivateKey)
+				if !ok {
+					err = fmt.Errorf("CA 私钥非 ECDSA 类型")
+				}
+			} else {
+				err = errPkcs8
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("解析 CA 私钥失败: %w", err)
+		}
+
+		return &Authority{
+			caKey:     key,
+			caCert:    cert,
+			caCertPEM: certPEM,
+			caKeyPEM:  keyPEM,
+			byFP:      map[string]*Record{},
+			byWS:      map[string]string{},
+		}, nil
+	}
+
+	// 目录不存在或文件不完整，新建并持久化
+	auth, err := NewDevAuthority()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, fmt.Errorf("创建 CA 存储目录失败: %w", err)
+	}
+	if err := os.WriteFile(certPath, auth.caCertPEM, 0644); err != nil {
+		return nil, fmt.Errorf("持久化 ca.crt 失败: %w", err)
+	}
+	if err := os.WriteFile(keyPath, auth.caKeyPEM, 0600); err != nil {
+		return nil, fmt.Errorf("持久化 ca.key 失败: %w", err)
+	}
+	return auth, nil
 }
 
 // CAPEM 返回 CA 证书 PEM。

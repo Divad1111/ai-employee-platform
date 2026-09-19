@@ -28,6 +28,7 @@ type Options struct {
 	Commands *reliability.CommandStore
 	Events   *reliability.EventStore
 	Presence *reliability.Presence
+	OnEvent  func(wsID string, ev *aiev1.Event)
 }
 
 // Server 实现 aiev1.WorkerServiceServer。
@@ -37,6 +38,7 @@ type Server struct {
 	Commands *reliability.CommandStore
 	Events   *reliability.EventStore
 	Presence *reliability.Presence
+	OnEvent  func(wsID string, ev *aiev1.Event)
 
 	mu      sync.Mutex
 	streams map[string]*connSession // workstation_id → 当前连接
@@ -64,6 +66,7 @@ func NewServer(opt Options) *Server {
 		Commands: opt.Commands,
 		Events:   opt.Events,
 		Presence: opt.Presence,
+		OnEvent:  opt.OnEvent,
 		streams:  make(map[string]*connSession),
 	}
 }
@@ -102,6 +105,9 @@ func (s *Server) Connect(stream aiev1.WorkerService_ConnectServer) error {
 	if hello.GetWorkstationId() != "" && hello.GetWorkstationId() != wsID {
 		return status.Error(codes.PermissionDenied, "hello.workstation_id 与证书不符")
 	}
+
+	// Workstation 重连后事件序号从 1 重计，必须重置游标，否则 JOB_* 全部被乱序拒绝。
+	s.Events.ResetWorkstation(wsID)
 
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
@@ -172,6 +178,12 @@ func (s *Server) handleUpstream(wsID string, stream aiev1.WorkerService_ConnectS
 			ev.WorkstationId = wsID
 		}
 		res := s.Events.Accept(ev)
+		if !res.Accepted && res.Error != "" {
+			fmt.Printf("event rejected ws=%s id=%s seq=%d: %s\n", wsID, ev.GetEventId(), ev.GetMeta().GetSequence(), res.Error)
+		}
+		if s.OnEvent != nil && res.Accepted && !res.Duplicate {
+			go s.OnEvent(wsID, ev)
+		}
 		return stream.Send(&aiev1.ServerToWorker{
 			Body: &aiev1.ServerToWorker_EventAck{EventAck: &aiev1.EventAck{
 				EventId:      ev.GetEventId(),

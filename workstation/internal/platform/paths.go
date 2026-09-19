@@ -19,18 +19,49 @@ type Paths interface {
 }
 
 // Detect 按当前 OS 返回路径实现；可用 AIE_DATA_DIR 覆盖数据根（便于测试）。
+// 智能自适应机制：
+// 1. 若显式指定 AIE_DATA_DIR，优先使用；
+// 2. 若当前用户主目录下已存在 ~/.aie/identity/workstation-id，自动定位使用 ~/.aie；
+// 3. 若系统级标准路径已存在 workstation-id，使用系统级路径；
+// 4. 未注册状态下：普通非 root 用户默认定位至 ~/.aie，免 sudo 与权限污染。
 func Detect() Paths {
 	if root := os.Getenv("AIE_DATA_DIR"); root != "" {
 		return &devPaths{root: root}
 	}
+
+	home, _ := os.UserHomeDir()
+	userAie := ""
+	if home != "" {
+		userAie = filepath.Join(home, ".aie")
+	}
+
+	// 1. 优先检测当前用户目录下的已注册身份
+	if userAie != "" {
+		if _, err := os.Stat(filepath.Join(userAie, "identity", "workstation-id")); err == nil {
+			return &devPaths{root: userAie}
+		}
+	}
+
+	// 2. 检查系统标准路径是否存在已注册身份
+	var sysPaths Paths
 	switch runtime.GOOS {
 	case "windows":
-		return WindowsPaths{}
+		sysPaths = WindowsPaths{}
 	case "darwin":
-		return DarwinPaths{}
+		sysPaths = DarwinPaths{}
 	default:
-		return LinuxPaths{}
+		sysPaths = LinuxPaths{}
 	}
+	if _, err := os.Stat(filepath.Join(sysPaths.IdentityDir(), "workstation-id")); err == nil {
+		return sysPaths
+	}
+
+	// 3. 首次未注册场景：普通用户优先默认使用 ~/.aie
+	if userAie != "" && isNonRoot() {
+		return &devPaths{root: userAie}
+	}
+
+	return sysPaths
 }
 
 // WindowsPaths Windows 路径（§45）。

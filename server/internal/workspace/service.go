@@ -21,21 +21,23 @@ var (
 
 // Workspace 工作区。
 type Workspace struct {
-	ID         string    `json:"id"`
-	EmployeeID string    `json:"employee_id"`
-	Path       string    `json:"path"`
-	Repository string    `json:"repository"`
-	Branch     string    `json:"branch"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID            string    `json:"id"`
+	WorkstationID string    `json:"workstation_id"`
+	EmployeeID    string    `json:"employee_id"`
+	Path          string    `json:"path"`
+	Repository    string    `json:"repository"`
+	Branch        string    `json:"branch"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // CreateInput 创建。
 type CreateInput struct {
-	Path       string `json:"path"`
-	Repository string `json:"repository"`
-	Branch     string `json:"branch"`
-	EmployeeID string `json:"employee_id"`
+	WorkstationID string `json:"workstation_id"`
+	Path          string `json:"path"`
+	Repository    string `json:"repository"`
+	Branch        string `json:"branch"`
+	EmployeeID    string `json:"employee_id"`
 }
 
 // EmployeeBinder 校验独占绑定。
@@ -72,20 +74,21 @@ func NewService(store Store, audit Auditor) *Service {
 // SetBinder 注入 Employee 绑定校验。
 func (s *Service) SetBinder(b EmployeeBinder) { s.binder = b }
 
-// Create 创建 Workspace。
+// Create 创建 Workspace（须先指定工作站节点，再登记该节点上的本机路径）。
 func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string) (*Workspace, error) {
-	if in.Path == "" {
+	if in.Path == "" || in.WorkstationID == "" {
 		return nil, ErrInvalidInput
 	}
 	now := time.Now().UTC()
 	w := &Workspace{
-		ID:         idgen.New("WS"),
-		EmployeeID: in.EmployeeID,
-		Path:       in.Path,
-		Repository: in.Repository,
-		Branch:     in.Branch,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:            idgen.New("WS"),
+		WorkstationID: in.WorkstationID,
+		EmployeeID:    in.EmployeeID,
+		Path:          in.Path,
+		Repository:    in.Repository,
+		Branch:        in.Branch,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	if err := s.store.Save(ctx, w); err != nil {
 		return nil, err
@@ -136,10 +139,13 @@ func (s *Service) List(ctx context.Context) ([]*Workspace, error) {
 	return s.store.List(ctx)
 }
 
-func (s *Service) Update(ctx context.Context, id, path, repo, branch, actorID, ip string) (*Workspace, error) {
+func (s *Service) Update(ctx context.Context, id, workstationID, path, repo, branch, actorID, ip string) (*Workspace, error) {
 	w, err := s.Get(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if workstationID != "" {
+		w.WorkstationID = workstationID
 	}
 	if path != "" {
 		w.Path = path

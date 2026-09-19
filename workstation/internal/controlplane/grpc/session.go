@@ -26,6 +26,7 @@ type Session struct {
 
 	HeartbeatInterval time.Duration
 	AgentVersion      string
+	OnCommand         func(ctx context.Context, cmd *aiev1.Command) error
 
 	mu     sync.Mutex
 	stream aiev1.WorkerService_ConnectClient
@@ -145,6 +146,11 @@ func (s *Session) runOnce(ctx context.Context) error {
 				continue // COMMIT 失败不 ACK
 			}
 			_ = s.send(ctx, &aiev1.WorkerToServer{Body: &aiev1.WorkerToServer_CommandAck{CommandAck: ackMsg}})
+			if s.OnCommand != nil && ackMsg.Accepted {
+				go func(c *aiev1.Command) {
+					_ = s.OnCommand(ctx, c)
+				}(cmd)
+			}
 		}
 		// HeartbeatAck / EventAck 可忽略或记日志
 	}

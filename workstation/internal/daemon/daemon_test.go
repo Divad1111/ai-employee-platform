@@ -67,11 +67,18 @@ func TestDaemonIPCPipeline(t *testing.T) {
 	}
 	var job map[string]any
 	_ = json.Unmarshal(raw, &job)
-	if job["Status"] != "SUCCESS" && job["status"] != "SUCCESS" {
-		// json tags not on runtime.Job - fields are exported Status
-		if s, ok := job["Status"].(string); !ok || s != "SUCCESS" {
-			t.Fatalf("job=%v", job)
+	status := job["Status"]
+	if status == nil {
+		status = job["status"]
+	}
+	if nested, ok := job["job"].(map[string]any); ok {
+		status = nested["Status"]
+		if status == nil {
+			status = nested["status"]
 		}
+	}
+	if s, ok := status.(string); !ok || s != "SUCCESS" {
+		t.Fatalf("job=%v", job)
 	}
 	doc, err := cli.Call(context.Background(), "doctor", nil)
 	if err != nil || len(doc) == 0 {

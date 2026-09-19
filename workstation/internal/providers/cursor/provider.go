@@ -1,5 +1,6 @@
-// Package cursor 实现 Cursor Provider / Installer（V1：本机 Detect）。
+// Package cursor 实现 Cursor Provider / Installer（V1：本机 Detect Cursor CLI `agent`）。
 // 设计依据：设计文档 §36–§38、§98、§118、§119。
+// 官方 ACP：`agent acp`（stdio JSON-RPC）。禁止启动 Cursor.app GUI。
 package cursor
 
 import (
@@ -27,10 +28,12 @@ const (
 	StateError        = "ERROR"
 )
 
+const fakeAgentBinary = "agent-fake"
+
 // Provider Cursor AgentProvider。
 type Provider struct {
 	BinaryOverride string
-	ACP            acp.Client
+	ACP            acp.Client // 测试可注入 Fake；生产 Start 时对真实 agent 走 Stdio
 	Proc           *process.Manager
 	mu             sync.Mutex
 	sessions       map[string]*sessionRec
@@ -42,10 +45,10 @@ type sessionRec struct {
 	status  providers.SessionStatus
 }
 
-// NewProvider 创建；未注入 ACP 时用 Fake。
+// NewProvider 创建；未注入 ACP 时用 Fake（仅测试/无 agent 时）。
 func NewProvider(proc *process.Manager, binary string) *Provider {
 	if proc == nil {
-		proc = process.NewManager("cursor", "cursor.exe", "Cursor")
+		proc = process.NewManager("agent", "agent.exe", fakeAgentBinary)
 	}
 	p := &Provider{
 		BinaryOverride: binary,
@@ -59,11 +62,11 @@ func NewProvider(proc *process.Manager, binary string) *Provider {
 
 func (p *Provider) Name() string { return "cursor" }
 
-// Detect 探测本机安装。
+// Detect 探测本机 Cursor CLI `agent`（ACP Server），不探测 GUI Cursor.app。
 func (p *Provider) Detect(ctx context.Context) (*providers.InstallInfo, error) {
 	path := p.BinaryOverride
 	if path == "" {
-		path = lookupCursor()
+		path = lookupAgent()
 	}
 	if path == "" {
 		p.state = StateNotInstalled
@@ -71,24 +74,26 @@ func (p *Provider) Detect(ctx context.Context) (*providers.InstallInfo, error) {
 	}
 	p.state = StateInstalled
 	p.Proc.Allow(path)
-	return &providers.InstallInfo{Name: "cursor", Path: path, Version: "detected"}, nil
+	return &providers.InstallInfo{Name: "cursor", Path: path, Version: "agent-cli"}, nil
 }
 
-func lookupCursor() string {
-	candidates := []string{}
+// lookupAgent 查找 Cursor CLI `agent` 可执行文件。
+// 官方文档：默认路径 ~/.local/bin/agent；命令为 `agent acp`。
+func lookupAgent() string {
+	if p, err := exec.LookPath("agent"); err == nil {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".local", "bin", "agent"),
+		filepath.Join(home, ".cursor", "bin", "agent"),
+	}
 	switch runtime.GOOS {
 	case "windows":
 		candidates = append(candidates,
-			filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "cursor", "Cursor.exe"),
-			filepath.Join(os.Getenv("ProgramFiles"), "Cursor", "Cursor.exe"),
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "cursor-agent", "agent.exe"),
+			filepath.Join(home, ".local", "bin", "agent.exe"),
 		)
-	case "darwin":
-		candidates = append(candidates, "/Applications/Cursor.app/Contents/MacOS/Cursor")
-	default:
-		candidates = append(candidates, "/usr/bin/cursor", "/usr/local/bin/cursor")
-	}
-	if p, err := exec.LookPath("cursor"); err == nil {
-		return p
 	}
 	for _, c := range candidates {
 		if st, err := os.Stat(c); err == nil && !st.IsDir() {
@@ -98,17 +103,37 @@ func lookupCursor() string {
 	return ""
 }
 
-// Start 启动会话并 ACP Handshake → READY。
+// isGUICursorBinary 识别 Cursor.app / Cursor.exe GUI，禁止当作 ACP Server。
+func isGUICursorBinary(path string) bool {
+	base := filepath.Base(path)
+	switch base {
+	case "Cursor", "Cursor.exe", "cursor":
+		// /Applications/Cursor.app/.../Cursor 或 Cursor.exe
+		return true
+	}
+	return false
+}
+
+// Start 启动会话：spawn `agent acp` → ACP Handshake → READY。绝不打开 IDE GUI。
 func (p *Provider) Start(ctx context.Context, spec providers.StartSpec) (providers.AgentSession, error) {
 	info, err := p.Detect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if info.Path == "" && p.BinaryOverride == "" {
-		// V1 允许 Fake 模式：无本机安装时仍可走 ACP Fake（测试/开发）
-		info.Path = "cursor-fake"
-		p.Proc.Allow("cursor-fake")
+	useFake := false
+	switch {
+	case info.Path == "":
+		useFake = true
+		info.Path = fakeAgentBinary
+		p.Proc.Allow(fakeAgentBinary)
+	case info.Path == fakeAgentBinary || filepath.Base(info.Path) == "cursor-fake":
+		// 测试 / 开发 Fake 模式
+		useFake = true
+		p.Proc.Allow(info.Path)
+	case isGUICursorBinary(info.Path):
+		return nil, errors.New("检测到 Cursor GUI 可执行文件；ACP 必须使用 Cursor CLI `agent acp`，请安装 agent CLI 或配置 providers.cursor.path 指向 agent")
 	}
+
 	p.mu.Lock()
 	p.state = StateStarting
 	p.mu.Unlock()
@@ -117,20 +142,20 @@ func (p *Provider) Start(ctx context.Context, spec providers.StartSpec) (provide
 	if sid == "" {
 		sid = "ses-local"
 	}
-	acpSess := p.ACP.Open(sid)
+
+	var acpSess acp.Session
+	if useFake {
+		acpSess = p.ACP.Open(sid)
+	} else {
+		acpSess = acp.NewStdioSession(sid, info.Path, []string{"acp"}, spec.WorkspacePath)
+	}
 	if err := acpSess.Start(ctx); err != nil {
 		p.mu.Lock()
 		p.state = StateError
 		p.mu.Unlock()
 		return nil, err
 	}
-	// 非 fake 路径才真正拉进程
-	if info.Path != "cursor-fake" {
-		_, _ = p.Proc.Start(ctx, process.Spec{
-			ID: sid, Name: "cursor", Binary: info.Path,
-			Args: []string{"--acp"}, WorkDir: spec.WorkspacePath,
-		})
-	}
+
 	rec := &sessionRec{
 		acpSess: acpSess,
 		status:  providers.SessionStatus{SessionID: sid, State: StateReady, PID: 0},
@@ -154,7 +179,6 @@ func (p *Provider) Stop(ctx context.Context, sessionID string) error {
 		return errors.New("session 不存在")
 	}
 	_ = rec.acpSess.Stop(ctx)
-	_ = p.Proc.Stop(ctx, sessionID)
 	p.mu.Lock()
 	p.state = StateInstalled
 	p.mu.Unlock()
@@ -186,7 +210,7 @@ type agentSession struct {
 }
 
 func (a *agentSession) Start(ctx context.Context) error { return a.acp.Start(ctx) }
-func (a *agentSession) Send(ctx context.Context, input []byte) error {
+func (a *agentSession) Send(ctx context.Context, input []byte) (string, error) {
 	a.p.mu.Lock()
 	a.p.state = StateBusy
 	a.p.mu.Unlock()
@@ -204,7 +228,7 @@ func (i *Installer) Detect(ctx context.Context) (*providers.InstallInfo, error) 
 }
 
 func (i *Installer) Install(context.Context, providers.InstallSpec) error {
-	return errors.New("V1 不支持 Registry 下载安装；请本机安装 Cursor 或配置 providers.cursor.path")
+	return errors.New("V1 不支持 Registry 下载安装；请本机安装 Cursor CLI `agent`（agent acp），或配置 providers.cursor.path")
 }
 
 func (i *Installer) Update(context.Context, providers.UpdateSpec) error {

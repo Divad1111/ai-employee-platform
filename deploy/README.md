@@ -24,3 +24,8 @@ docker compose up --build
 | Admin | localhost:8088 |
 
 V1 **不包含 Redis**。
+
+---
+
+> 📖 **完整安装部署操作手册**：参见 [`docs/DEPLOYMENT_GUIDE.md`](../docs/DEPLOYMENT_GUIDE.md)，包含中心服务器容器化部署、首次配置向导、工作站 mTLS 注册与守护进程配置全流程。
+

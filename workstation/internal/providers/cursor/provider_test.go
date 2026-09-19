@@ -10,9 +10,10 @@ import (
 )
 
 func TestCursorProviderLifecycle(t *testing.T) {
-	proc := process.NewManager("cursor-fake")
+	proc := process.NewManager("agent-fake")
 	proc.SetRunner(&process.FakeRunner{})
-	p := cursor.NewProvider(proc, "cursor-fake")
+	// BinaryOverride=agent-fake → 走 Fake ACP，不拉 GUI / 不 spawn 真进程
+	p := cursor.NewProvider(proc, "agent-fake")
 	info, err := p.Detect(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -27,11 +28,20 @@ func TestCursorProviderLifecycle(t *testing.T) {
 	if p.State() != cursor.StateReady {
 		t.Fatal(p.State())
 	}
-	if err := as.Send(context.Background(), []byte("x")); err != nil {
+	if _, err := as.Send(context.Background(), []byte("x")); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.Stop(context.Background(), "SES-c"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCursorRejectsGUIBinary(t *testing.T) {
+	proc := process.NewManager("/Applications/Cursor.app/Contents/MacOS/Cursor")
+	p := cursor.NewProvider(proc, "/Applications/Cursor.app/Contents/MacOS/Cursor")
+	_, err := p.Start(context.Background(), providers.StartSpec{SessionID: "SES-gui"})
+	if err == nil {
+		t.Fatal("应拒绝 Cursor GUI 二进制")
 	}
 }
 

@@ -44,7 +44,14 @@ func TestSessionJobRecoveryUnknown(t *testing.T) {
 	if _, err := rt.StartSession(context.Background(), "SES-2", "EMP-1", ws.ID, "cursor"); err != runtime.ErrActiveSession {
 		t.Fatalf("应限制 Active Session: %v", err)
 	}
-	job, err := rt.RunJob(context.Background(), "JOB-1", "EMP-1", "SES-1", "hello")
+	job, reply, err := rt.RunJob(context.Background(), "JOB-1", "EMP-1", "SES-1", "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply == "" {
+		t.Fatal("应返回 reply")
+	}
+	_ = job
 	if err != nil || job.Status != runtime.JobSuccess {
 		t.Fatal(job, err)
 	}

@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
 	"github.com/ai-employee-platform/server/internal/api"
 	"github.com/ai-employee-platform/server/internal/approval"
 	"github.com/ai-employee-platform/server/internal/artifact"
@@ -49,14 +51,17 @@ func main() {
 	auditor := audit.NewMemory()
 	bus := eventbus.New(500)
 	users := auth.NewMemoryUserStore()
-	adminUser := getenv("AIE_ADMIN_USER", "admin")
-	adminPass := getenv("AIE_ADMIN_PASSWORD", "admin123")
-	if err := users.SeedAdmin(adminUser, adminPass, "Administrator"); err != nil {
-		fatal("初始化管理员失败: %v", err)
+	if getenv("AIE_DEV_SEED_ADMIN", "0") == "1" {
+		adminUser := getenv("AIE_ADMIN_USER", "admin")
+		adminPass := getenv("AIE_ADMIN_PASSWORD", "admin123")
+		if err := users.SeedAdmin(adminUser, adminPass, "Administrator"); err != nil {
+			fatal("初始化管理员失败: %v", err)
+		}
 	}
 	authSvc := auth.NewService(users, auth.NewMemorySessionStore(), auditor)
 
-	ca, err := certca.NewDevAuthority()
+	caDir := getenv("AIE_CA_DIR", "/var/lib/aie/ca")
+	ca, err := certca.LoadOrNewAuthority(caDir)
 	if err != nil {
 		fatal("初始化 CA 失败: %v", err)
 	}
@@ -139,6 +144,98 @@ func main() {
 	workerSvc.StartPresenceSweeper(sweepCtx, time.Second)
 
 	sched := scheduler.New(jobSvc, empSvc, wsNodeSvc, presence, workerSvc)
+	sched.SetWorkspaces(wsSvc)
+	workerSvc.OnEvent = func(wsID string, ev *aiev1.Event) {
+		ctx := context.Background()
+		jobID := ev.GetJobId()
+		sessID := ev.GetSessionId()
+		empID := ev.GetEmployeeId()
+		var payload map[string]string
+		if pJSON := ev.GetPayloadJson(); pJSON != "" {
+			_ = json.Unmarshal([]byte(pJSON), &payload)
+		}
+		if payload == nil {
+			payload = make(map[string]string)
+		}
+		if sessID == "" {
+			sessID = payload["session_id"]
+		}
+		if empID == "" {
+			empID = payload["employee_id"]
+		}
+		if empID == "" && jobID != "" {
+			if j, err := jobSvc.Get(ctx, jobID); err == nil && j != nil {
+				empID = j.EmployeeID
+			}
+		}
+
+		switch ev.GetType() {
+		case aiev1.EventType_EVENT_TYPE_SESSION_STARTED,
+			aiev1.EventType_EVENT_TYPE_SESSION_READY,
+			aiev1.EventType_EVENT_TYPE_SESSION_ERROR,
+			aiev1.EventType_EVENT_TYPE_SESSION_STOPPED:
+			st := payload["status"]
+			if st == "" {
+				switch ev.GetType() {
+				case aiev1.EventType_EVENT_TYPE_SESSION_STARTED:
+					st = session.StatusStarting
+				case aiev1.EventType_EVENT_TYPE_SESSION_READY:
+					st = session.StatusReady
+				case aiev1.EventType_EVENT_TYPE_SESSION_ERROR:
+					st = session.StatusError
+				case aiev1.EventType_EVENT_TYPE_SESSION_STOPPED:
+					st = session.StatusStopped
+				}
+			}
+			if sessID != "" && empID != "" {
+				_, _ = sessSvc.ReportFromWorkstation(ctx, sessID, empID, wsID, payload["workspace_id"], payload["provider"], st)
+			}
+			if jobID != "" {
+				_ = jobSvc.AppendEvent(ctx, jobID, "SESSION", map[string]string{
+					"session_id": sessID, "status": st, "event": ev.GetType().String(),
+				})
+				if sessID != "" {
+					_ = jobSvc.BindSession(ctx, jobID, sessID)
+				}
+			}
+
+		case aiev1.EventType_EVENT_TYPE_JOB_STARTED:
+			if jobID != "" {
+				if sessID != "" {
+					_ = jobSvc.BindSession(ctx, jobID, sessID)
+					_, _ = sessSvc.ReportFromWorkstation(ctx, sessID, empID, wsID, payload["workspace_id"], payload["provider"], session.StatusBusy)
+				}
+				_, _ = jobSvc.Transition(ctx, jobID, job.StatusRunning, "workstation", wsID, payload)
+			}
+		case aiev1.EventType_EVENT_TYPE_JOB_SUCCESS:
+			if jobID != "" {
+				if reply := payload["reply"]; reply != "" {
+					_ = jobSvc.SetResult(ctx, jobID, reply)
+					_ = jobSvc.AppendEvent(ctx, jobID, "AGENT_REPLY", map[string]string{"reply": reply})
+				}
+				uj, err := jobSvc.Transition(ctx, jobID, job.StatusSuccess, "workstation", wsID, payload)
+				sched.Release(wsID)
+				if err == nil && uj != nil {
+					if uj.Result == "" && payload["reply"] != "" {
+						uj.Result = payload["reply"]
+					}
+					_ = notifySvc.OnJobTerminal(ctx, uj)
+				}
+			}
+		case aiev1.EventType_EVENT_TYPE_JOB_FAILED:
+			if jobID != "" {
+				if reply := payload["reply"]; reply != "" {
+					_ = jobSvc.SetResult(ctx, jobID, reply)
+					_ = jobSvc.AppendEvent(ctx, jobID, "AGENT_REPLY", map[string]string{"reply": reply, "partial": "true"})
+				}
+				uj, err := jobSvc.Transition(ctx, jobID, job.StatusFailed, "workstation", wsID, payload)
+				sched.Release(wsID)
+				if err == nil && uj != nil {
+					_ = notifySvc.OnJobTerminal(ctx, uj)
+				}
+			}
+		}
+	}
 	permStore := permission.NewMemoryStore()
 	_ = permission.EnsureDefault(permStore)
 	permEng := permission.NewEngine(permStore, auditor)
@@ -165,8 +262,9 @@ func main() {
 	}
 	bridge.Wire()
 
-	// 开发环境默认注入演示数据，便于 Admin 开箱可看（可用 AIE_SEED_DEMO=0 关闭）
-	if getenv("AIE_SEED_DEMO", "1") != "0" {
+	// 生产/真实运行模式：默认不注入演示数据，只使用实际接入的工作站与业务数据
+	if getenv("AIE_SEED_DEMO", "0") == "1" && cfg.Env != "production" {
+		fmt.Println("调试模式: 正在注入开发演示数据...")
 		seedDemoData(empSvc, wsSvc, wsNodeSvc, presence, jobSvc, feishuSvc, skillSvc, knwSvc)
 		go func() {
 			t := time.NewTicker(5 * time.Second)
@@ -252,7 +350,11 @@ func main() {
 
 	fmt.Printf("AI Employee Control Plane %s\n", config.Version)
 	fmt.Printf("环境=%s gRPC(mTLS)=%s\n", cfg.Env, lis.Addr().String())
-	fmt.Printf("默认管理员: %s / (见 AIE_ADMIN_PASSWORD，默认 admin123)\n", adminUser)
+	if ok, _ := users.IsInitialized(context.Background()); ok {
+		fmt.Println("系统认证: 已就绪 (已存在管理员)")
+	} else {
+		fmt.Println("系统认证: 尚未初始化，请访问 Web 完成首次部署设置 (http://localhost:8088/setup 或 POST /api/setup/init)")
+	}
 
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)

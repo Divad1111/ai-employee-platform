@@ -1,8 +1,7 @@
-/**
- * Artifacts 列表与下载（M9）。
- */
 import { useEffect, useState } from 'react'
 import { apiGet, getToken } from '../api/client'
+import { IconPackage, IconRefresh } from '../components/Icons'
+import { EntityName } from '../components/EntityName'
 
 type Artifact = {
   id: string
@@ -14,14 +13,43 @@ type Artifact = {
   created_at: string
 }
 
+type JobItem = {
+  id: string
+  prompt: string
+}
+
+function formatBytes(bytes: number) {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`
+}
+
 export function ArtifactsPage() {
   const [items, setItems] = useState<Artifact[]>([])
+  const [jobMap, setJobMap] = useState<Record<string, string>>({})
   const [err, setErr] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const reload = () => {
+    setLoading(true)
+    Promise.all([
+      apiGet<{ items: Artifact[] }>('/artifacts').catch((e: Error) => {
+        setErr(e.message)
+        return { items: [] as Artifact[] }
+      }),
+      apiGet<{ items: JobItem[] }>('/jobs').catch(() => ({ items: [] as JobItem[] })),
+    ])
+      .then(([artData, jobsData]) => {
+        setItems(artData.items ?? [])
+        setJobMap(Object.fromEntries((jobsData.items ?? []).map((j) => [j.id, j.prompt])))
+      })
+      .finally(() => setLoading(false))
+  }
 
   useEffect(() => {
-    void apiGet<{ items: Artifact[] }>('/artifacts')
-      .then((d) => setItems(d.items ?? []))
-      .catch((e: Error) => setErr(e.message))
+    reload()
   }, [])
 
   const download = (id: string, name: string) => {
@@ -30,7 +58,7 @@ export function ArtifactsPage() {
       headers: tok ? { Authorization: `Bearer ${tok}` } : {},
     })
       .then(async (res) => {
-        if (!res.ok) throw new Error(String(res.status))
+        if (!res.ok) throw new Error(`下载失败 (状态码: ${res.status})`)
         const blob = await res.blob()
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
@@ -44,35 +72,81 @@ export function ArtifactsPage() {
 
   return (
     <section>
-      <h1>Artifacts</h1>
-      <p className="muted">Job 产物；相同 SHA256 去重。下载需鉴权。</p>
-      {err ? <p className="error">{err}</p> : null}
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Job</th>
-            <th>SHA256</th>
-            <th>Size</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((a) => (
-            <tr key={a.id}>
-              <td>{a.name}</td>
-              <td>{a.job_id}</td>
-              <td style={{ fontSize: 12 }}>{a.sha256.slice(0, 12)}…</td>
-              <td>{a.size_bytes}</td>
-              <td>
-                <button type="button" onClick={() => download(a.id, a.name)}>
-                  下载
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <header className="page-header">
+        <div>
+          <h1>任务制品产物中心 (Artifacts)</h1>
+          <p>任务执行产出的代码包、日志报表与生成物 · 基于 SHA-256 自动去重保全存储</p>
+        </div>
+        <button type="button" className="btn-ghost" onClick={() => reload()} disabled={loading}>
+          <IconRefresh size={15} />
+          <span>刷新制品</span>
+        </button>
+      </header>
+
+      {err ? <div className="error">{err}</div> : null}
+
+      <div className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>产物制品清单</h2>
+            <p>共归档 {items.length} 份任务输出产物</p>
+          </div>
+        </div>
+
+        <div className="table-wrapper">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>产物文件名</th>
+                <th>关联任务需求</th>
+                <th>SHA-256 内容校验哈希</th>
+                <th>文件大小</th>
+                <th>归档时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((a) => (
+                <tr key={a.id}>
+                  <td>
+                    <EntityName
+                      name={a.name}
+                      id={a.id}
+                      icon={<IconPackage size={16} style={{ color: 'var(--brand-600)' }} />}
+                    />
+                  </td>
+                  <td style={{ maxWidth: '240px' }}>
+                    <EntityName
+                      name={jobMap[a.job_id] || `任务 #${a.job_id.slice(0, 8)}`}
+                      id={a.job_id}
+                      to={`/jobs/${a.job_id}`}
+                    />
+                  </td>
+                  <td>
+                    <span className="mono" title={a.sha256}>
+                      {a.sha256 ? `${a.sha256.slice(0, 16)}…` : '—'}
+                    </span>
+                  </td>
+                  <td>{formatBytes(a.size_bytes)}</td>
+                  <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                    {a.created_at ? new Date(a.created_at).toLocaleString() : '—'}
+                  </td>
+                  <td>
+                    <button type="button" className="btn-ghost btn-sm" onClick={() => download(a.id, a.name)}>
+                      下载制品文件
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {items.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="empty-tip">暂无归档制品产物</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </section>
   )
 }

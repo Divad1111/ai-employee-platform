@@ -49,3 +49,13 @@ func platformManager() Manager {
 		return Unsupported{Platform: runtime.GOOS}
 	}
 }
+
+// CreateGlobalSymlink 在系统的全局 PATH 目录中为 aew 创建软链接或执行脚本。
+func CreateGlobalSymlink(binPath string) (string, error) {
+	return createGlobalSymlink(binPath)
+}
+
+// RemoveGlobalSymlink 移除全局 PATH 中的软链接。
+func RemoveGlobalSymlink() {
+	removeGlobalSymlink()
+}

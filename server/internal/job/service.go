@@ -249,6 +249,26 @@ func (s *Service) BindWorkstation(ctx context.Context, jobID, wsID string) error
 	return s.store.Save(ctx, j)
 }
 
+// BindSession 绑定运行会话。
+func (s *Service) BindSession(ctx context.Context, jobID, sessionID string) error {
+	j, err := s.store.Get(ctx, jobID)
+	if err != nil || j == nil {
+		return ErrNotFound
+	}
+	j.SessionID = sessionID
+	return s.store.Save(ctx, j)
+}
+
+// SetResult 写入 Job 结果文本（Agent 回复）。
+func (s *Service) SetResult(ctx context.Context, jobID, result string) error {
+	j, err := s.store.Get(ctx, jobID)
+	if err != nil || j == nil {
+		return ErrNotFound
+	}
+	j.Result = result
+	return s.store.Save(ctx, j)
+}
+
 func (s *Service) Timeline(ctx context.Context, id string) ([]*Event, error) {
 	if _, err := s.Get(ctx, id); err != nil {
 		return nil, err

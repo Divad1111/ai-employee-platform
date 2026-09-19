@@ -49,8 +49,8 @@ type SessionStatus struct {
 type AgentSession interface {
 	// Start 启动会话并完成握手。
 	Start(ctx context.Context) error
-	// Send 向 Agent 发送输入。
-	Send(ctx context.Context, input []byte) error
+	// Send 向 Agent 发送 prompt，返回聚合后的助手回复。
+	Send(ctx context.Context, input []byte) (reply string, err error)
 	// Stop 优雅停止会话。
 	Stop(ctx context.Context) error
 }

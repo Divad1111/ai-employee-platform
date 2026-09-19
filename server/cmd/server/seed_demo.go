@@ -32,7 +32,7 @@ func seedDemoData(
 	presence.Touch("WS-DEMO-02", "0.0.1-dev", 0, 0, 71, 82, 40)
 
 	w1, err := wsSvc.Create(ctx, workspace.CreateInput{
-		Path: "F:/Projects/unity", Repository: "unity-client", Branch: "main",
+		WorkstationID: "WS-DEMO-01", Path: "F:/Projects/unity", Repository: "unity-client", Branch: "main",
 	}, "system", "")
 	if err != nil {
 		fmt.Printf("seed workspace: %v\n", err)

@@ -14,10 +14,12 @@ import { FeishuPage } from '../pages/FeishuPage'
 import { JobDetailPage, JobsPage } from '../pages/JobsPage'
 import { KnowledgePage } from '../pages/KnowledgePage'
 import { LoginPage } from '../pages/LoginPage'
+import { SetupPage } from '../pages/SetupPage'
 import { PermissionsPage } from '../pages/PermissionsPage'
 import { SessionsPage } from '../pages/SessionsPage'
 import { SkillsPage } from '../pages/SkillsPage'
 import { WorkstationsPage } from '../pages/WorkstationsPage'
+import { WorkspacesPage } from '../pages/WorkspacesPage'
 import { isAuthenticated } from '../stores/session'
 
 function RequireAuth() {
@@ -31,6 +33,7 @@ export function AppRouter() {
   return (
     <BrowserRouter>
       <Routes>
+        <Route path="/setup" element={<SetupPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route element={<RequireAuth />}>
           <Route element={<AppShell />}>
@@ -38,6 +41,7 @@ export function AppRouter() {
             <Route path="/employees" element={<EmployeesPage />} />
             <Route path="/employees/:id" element={<EmployeeDetailPage />} />
             <Route path="/workstations" element={<WorkstationsPage />} />
+            <Route path="/workspaces" element={<WorkspacesPage />} />
             <Route path="/jobs" element={<JobsPage />} />
             <Route path="/jobs/:id" element={<JobDetailPage />} />
             <Route path="/sessions" element={<SessionsPage />} />

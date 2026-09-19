@@ -132,7 +132,7 @@ type agentSession struct {
 }
 
 func (a *agentSession) Start(ctx context.Context) error { return a.acp.Start(ctx) }
-func (a *agentSession) Send(ctx context.Context, input []byte) error {
+func (a *agentSession) Send(ctx context.Context, input []byte) (string, error) {
 	a.p.mu.Lock()
 	a.p.state = StateBusy
 	a.p.mu.Unlock()

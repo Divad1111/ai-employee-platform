@@ -26,14 +26,17 @@ services:
       dockerfile: deploy/Dockerfile.server
     container_name: aie-control-plane
     environment:
-      AIE_ENV: development
+      AIE_ENV: production
       AIE_HTTP_ADDR: ":8080"
       AIE_GRPC_ADDR: ":9090"
       AIE_DATABASE_URL: postgres://aie:aie@postgres:5432/aie?sslmode=disable
-      AIE_SEED_DEMO: "1"
+      AIE_SEED_DEMO: "0"
+      AIE_CA_DIR: "/data/ca"
     ports:
       - "8080:8080"
       - "9090:9090"
+    volumes:
+      - aie_data:/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -50,3 +53,4 @@ services:
 
 volumes:
   aie_pg_data:
+  aie_data:

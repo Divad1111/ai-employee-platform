@@ -134,7 +134,7 @@ func TestAPIEmployeeJobSessionMessageFlow(t *testing.T) {
 	empID := emp["id"].(string)
 
 	code, ws := doJSON(t, h, http.MethodPost, "/api/workspaces", tok, map[string]string{
-		"path": "/src", "repository": "demo", "branch": "main",
+		"workstation_id": "WSN-demo", "path": "/src", "repository": "demo", "branch": "main",
 	})
 	if code != 201 {
 		t.Fatal(ws)

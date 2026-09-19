@@ -16,7 +16,7 @@ func TestFakeACPHandshakeAndSend(t *testing.T) {
 	if !s.Ready() {
 		t.Fatal("应 READY")
 	}
-	if err := s.Send(context.Background(), []byte("hi")); err != nil {
+	if _, err := s.Send(context.Background(), []byte("hi")); err != nil {
 		t.Fatal(err)
 	}
 	select {

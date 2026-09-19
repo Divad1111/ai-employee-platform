@@ -17,7 +17,7 @@ func TestCodexProviderStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := as.Send(context.Background(), []byte("p")); err != nil {
+	if _, err := as.Send(context.Background(), []byte("p")); err != nil {
 		t.Fatal(err)
 	}
 	_ = p.Stop(context.Background(), "S1")

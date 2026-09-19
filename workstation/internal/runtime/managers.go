@@ -188,6 +188,18 @@ func (m *Managers) StartSession(ctx context.Context, sessID, employeeID, workspa
 	return s, nil
 }
 
+// FindActiveSession 查找员工当前活跃 Session。
+func (m *Managers) FindActiveSession(employeeID string) *Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, s := range m.sessions {
+		if s.EmployeeID == employeeID && s.Status != SessStopped && s.Status != SessUnknown {
+			return s
+		}
+	}
+	return nil
+}
+
 func (m *Managers) markSession(id, status string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -197,7 +209,8 @@ func (m *Managers) markSession(id, status string) {
 }
 
 // RunJob 在已有或按需 Session 上跑 Job；完成后不强制关 Session（可复用）。
-func (m *Managers) RunJob(ctx context.Context, jobID, employeeID, sessionID, prompt string) (*Job, error) {
+// 返回的 Job.Prompt 对应输入；回复文本通过第二返回值给出。
+func (m *Managers) RunJob(ctx context.Context, jobID, employeeID, sessionID, prompt string) (*Job, string, error) {
 	m.mu.Lock()
 	j := &Job{ID: jobID, EmployeeID: employeeID, SessionID: sessionID, Prompt: prompt, Status: JobRunning}
 	m.jobs[jobID] = j
@@ -210,17 +223,18 @@ func (m *Managers) RunJob(ctx context.Context, jobID, employeeID, sessionID, pro
 
 	if agent == nil {
 		m.setJob(jobID, JobFailed)
-		return j, fmt.Errorf("session 未就绪")
+		return j, "", fmt.Errorf("session 未就绪")
 	}
-	if err := agent.Send(ctx, []byte(prompt)); err != nil {
+	reply, err := agent.Send(ctx, []byte(prompt))
+	if err != nil {
 		m.setJob(jobID, JobFailed)
 		m.markSession(sessionID, SessReady)
-		return j, err
+		return j, reply, err
 	}
 	m.setJob(jobID, JobSuccess)
 	m.markSession(sessionID, SessReady)
 	m.emit("job.status", map[string]string{"job_id": jobID, "status": JobSuccess})
-	return j, nil
+	return j, reply, nil
 }
 
 func (m *Managers) setJob(id, status string) {

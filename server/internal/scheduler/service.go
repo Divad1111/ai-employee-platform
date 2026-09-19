@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"time"
 
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/job"
 	"github.com/ai-employee-platform/server/internal/reliability"
+	"github.com/ai-employee-platform/server/internal/workspace"
 	"github.com/ai-employee-platform/server/internal/workstation"
 )
 
@@ -33,6 +35,7 @@ type Service struct {
 	Jobs               *job.Service
 	Employees          *employee.Service
 	Workstations       *workstation.Service
+	Workspaces         *workspace.Service
 	Presence           *reliability.Presence
 	Pusher             CommandPusher
 	MaxConcurrentPerWS int
@@ -56,6 +59,9 @@ func New(jobs *job.Service, emps *employee.Service, wss *workstation.Service, pr
 	}
 }
 
+// SetWorkspaces 注入工作区查询（下发 path）。
+func (s *Service) SetWorkspaces(ws *workspace.Service) { s.Workspaces = ws }
+
 // ScheduleJob 将 CREATED/QUEUED Job 分配到可用 WS 并下发 START_JOB。
 func (s *Service) ScheduleJob(ctx context.Context, jobID string) (*job.Job, error) {
 	j, err := s.Jobs.Get(ctx, jobID)
@@ -70,6 +76,13 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (*job.Job, erro
 		return nil, ErrNotAssignable
 	}
 	wsID := emp.WorkstationID
+	if j.WorkspaceID != "" && s.Workspaces != nil {
+		if wsp, err := s.Workspaces.Get(ctx, j.WorkspaceID); err == nil && wsp != nil {
+			if wsID == "" && wsp.WorkstationID != "" {
+				wsID = wsp.WorkstationID
+			}
+		}
+	}
 	if wsID == "" {
 		for _, v := range s.Workstations.List(ctx) {
 			if v.Status == reliability.StatusOnline && s.canAssign(v.ID) {
@@ -90,6 +103,9 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (*job.Job, erro
 	if emp.WorkspaceID == "" && j.WorkspaceID == "" {
 		return nil, errors.New("Workspace Missing")
 	}
+	if j.WorkspaceID == "" {
+		j.WorkspaceID = emp.WorkspaceID
+	}
 
 	if j.Status == job.StatusCreated {
 		if _, err = s.Jobs.Transition(ctx, jobID, job.StatusQueued, "scheduler", "", nil); err != nil {
@@ -105,8 +121,17 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (*job.Job, erro
 	j, _ = s.Jobs.Get(ctx, jobID)
 
 	if s.Pusher != nil {
-		payload, _ := json.Marshal(map[string]string{"prompt": j.Prompt})
-		if _, err := s.Pusher.PushCommand(wsID, aiev1.CommandType_COMMAND_TYPE_START_JOB, j.EmployeeID, j.ID, string(payload)); err != nil {
+		payload := map[string]string{
+			"prompt":       j.Prompt,
+			"workspace_id": j.WorkspaceID,
+		}
+		if s.Workspaces != nil && j.WorkspaceID != "" {
+			if wsp, err := s.Workspaces.Get(ctx, j.WorkspaceID); err == nil && wsp != nil && wsp.Path != "" {
+				payload["workspace_path"] = wsp.Path
+			}
+		}
+		payloadJSON, _ := json.Marshal(payload)
+		if _, err := s.Pusher.PushCommand(wsID, aiev1.CommandType_COMMAND_TYPE_START_JOB, j.EmployeeID, j.ID, string(payloadJSON)); err != nil {
 			return j, err
 		}
 	}
@@ -172,13 +197,26 @@ func (s *Service) Release(wsID string) {
 	}
 }
 
-// Tick 扫描 CREATED Job 尝试调度。
+// Tick 扫描 CREATED/QUEUED Job 尝试调度，并扫描超时卡死在 STARTING 的 Job。
 func (s *Service) Tick(ctx context.Context) (scheduled int) {
 	list, err := s.Jobs.List(ctx)
 	if err != nil {
 		return 0
 	}
+	now := time.Now().UTC()
 	for _, j := range list {
+		// 检查长时间卡在 STARTING 的 Job（> 60秒）：超时失败并释放工作站并发槽位
+		if j.Status == job.StatusStarting {
+			if now.Sub(j.CreatedAt) > 60*time.Second {
+				_, _ = s.Jobs.Transition(ctx, j.ID, job.StatusFailed, "scheduler", "", map[string]string{
+					"reason": "工作站节点启动超时 (60s 无响应)",
+				})
+				if j.WorkstationID != "" {
+					s.Release(j.WorkstationID)
+				}
+			}
+		}
+
 		if j.Status == job.StatusCreated || j.Status == job.StatusQueued {
 			if _, err := s.ScheduleJob(ctx, j.ID); err == nil {
 				scheduled++

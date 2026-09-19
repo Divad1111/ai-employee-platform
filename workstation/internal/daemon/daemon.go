@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
@@ -51,6 +52,8 @@ type Daemon struct {
 	Backoff   *reconnect.Backoff
 	Ready     bool
 	Sample    monitor.Sample
+	eventSeq  atomic.Uint64 // Control Plane 事件严格递增序号（不可为 0）
+	wsID      string
 }
 
 // New 组装 Daemon。
@@ -67,7 +70,7 @@ func New(opts Options) *Daemon {
 	if opts.Journal == nil {
 		opts.Journal = ack.NewMemoryJournal()
 	}
-	proc := process.NewManager("cursor", "cursor.exe", "Cursor", "codex", "codex.exe", "cursor-fake", "codex-fake")
+	proc := process.NewManager("agent", "agent.exe", "agent-fake", "cursor-fake", "codex", "codex.exe", "codex-fake")
 	reg := providers.NewRegistry()
 	curPath, codPath := "", ""
 	if opts.Config.Providers != nil {
@@ -83,12 +86,9 @@ func New(opts Options) *Daemon {
 	rt := runtime.NewManagers(opts.Paths, reg)
 	rt.MaxSess = opts.Config.MaxSessions
 	ob := outbox.NewMemoryStore()
-	rt.Sink = func(typ string, payload map[string]string) {
-		// 本地事件经 Outbox 结构落盘语义：以 payload JSON 作为占位 Event
-		id := typ + "-" + time.Now().Format("150405.000")
-		_ = ob.Enqueue(localEvent(id, typ, payload))
-	}
-	return &Daemon{
+	// 本地 runtime 状态不走 CP Outbox：否则会污染事件序号，导致 JOB_* 被 EventStore 拒绝。
+	rt.Sink = nil
+	d := &Daemon{
 		Opts:     opts,
 		Runtime:  rt,
 		Proc:     proc,
@@ -98,19 +98,41 @@ func New(opts Options) *Daemon {
 		Outbox:   ob,
 		Backoff:  reconnect.NewBackoff(60 * time.Second),
 	}
+	if b, err := identity.Load(opts.Paths); err == nil && b != nil {
+		d.wsID = b.WorkstationID
+	}
+	return d
 }
 
-func localEvent(id, typ string, payload map[string]string) *aiev1.Event {
-	b, _ := json.Marshal(payload)
-	return &aiev1.Event{
-		EventId: id,
-		Type:    aiev1.EventType_EVENT_TYPE_SYSTEM_ALERT,
-		Meta: &aiev1.EnvelopeMeta{
-			MessageId: id, Sequence: uint64(time.Now().UnixNano()),
-			TimestampUnixMs: time.Now().UnixMilli(),
-		},
-		PayloadJson: string(b),
+// newEvent 构造带严格递增 Sequence 的事件（CP EventStore 要求 sequence > 0）。
+func (d *Daemon) newEvent(jobID, sessionID, employeeID string, typ aiev1.EventType, payload string) *aiev1.Event {
+	seq := d.eventSeq.Add(1)
+	now := time.Now()
+	idKey := jobID
+	if idKey == "" {
+		idKey = sessionID
 	}
+	if idKey == "" {
+		idKey = "sys"
+	}
+	return &aiev1.Event{
+		EventId:       fmt.Sprintf("ev-%s-%d", idKey, seq),
+		WorkstationId: d.wsID,
+		JobId:         jobID,
+		SessionId:     sessionID,
+		EmployeeId:    employeeID,
+		Type:          typ,
+		Meta: &aiev1.EnvelopeMeta{
+			MessageId:       fmt.Sprintf("msg-%s-%d", idKey, seq),
+			Sequence:        seq,
+			TimestampUnixMs: now.UnixMilli(),
+		},
+		PayloadJson: payload,
+	}
+}
+
+func (d *Daemon) newJobEvent(jobID string, typ aiev1.EventType, payload string) *aiev1.Event {
+	return d.newEvent(jobID, "", "", typ, payload)
 }
 
 // Run 阻塞运行直到 ctx 取消。
@@ -175,6 +197,9 @@ func (d *Daemon) maintainControlPlane(ctx context.Context) {
 		sess := grpcclient.NewSession(cli, d.Opts.Journal)
 		sess.Outbox = &outbox.Dispatcher{Store: d.Outbox}
 		sess.HeartbeatInterval = 5 * time.Second
+		sess.OnCommand = func(cctx context.Context, cmd *aiev1.Command) error {
+			return d.handleCommand(cctx, sess, cmd)
+		}
 		d.Backoff.MarkConnected()
 		_ = sess.Run(ctx)
 		_ = cli.Close()
@@ -184,6 +209,86 @@ func (d *Daemon) maintainControlPlane(ctx context.Context) {
 		}
 		time.Sleep(d.Backoff.BeginReconnect())
 	}
+}
+
+func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cmd *aiev1.Command) error {
+	switch cmd.GetType() {
+	case aiev1.CommandType_COMMAND_TYPE_START_JOB:
+		jobID := cmd.GetJobId()
+		empID := cmd.GetEmployeeId()
+		if jobID == "" || empID == "" {
+			return nil
+		}
+		var payload struct {
+			Prompt        string `json:"prompt"`
+			WorkspaceID   string `json:"workspace_id"`
+			WorkspacePath string `json:"workspace_path"`
+		}
+		if pJSON := cmd.GetPayloadJson(); pJSON != "" {
+			_ = json.Unmarshal([]byte(pJSON), &payload)
+		}
+
+		// 确保本地员工视图
+		_, _ = d.Runtime.EnsureEmployee(empID, empID, "cursor")
+
+		// 确保工作区视图（使用 Control Plane 下发的本机路径，禁止静默落到默认目录）
+		wsID := payload.WorkspaceID
+		if wsID != "" {
+			_, _ = d.Runtime.EnsureWorkspace(wsID, empID, payload.WorkspacePath)
+		}
+
+		// 会话复用或按需创建
+		var sessID string
+		activeSess := d.Runtime.FindActiveSession(empID)
+		if activeSess != nil {
+			sessID = activeSess.ID
+		} else {
+			sessID = "ses-" + empID
+			_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_STARTED,
+				fmt.Sprintf(`{"status":"STARTING","provider":"cursor","workspace_id":%q}`, wsID)))
+			startCtx, startCancel := context.WithTimeout(ctx, 2*time.Minute)
+			_, err := d.Runtime.StartSession(startCtx, sessID, empID, wsID, "cursor")
+			startCancel()
+			if err != nil && err != runtime.ErrActiveSession {
+				_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_ERROR,
+					fmt.Sprintf(`{"status":"ERROR","error":%q}`, err.Error())))
+				_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_FAILED,
+					fmt.Sprintf(`{"error":%q,"session_id":%q}`, err.Error(), sessID)))
+				return err
+			}
+			_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_READY,
+				fmt.Sprintf(`{"status":"READY","provider":"cursor","workspace_id":%q}`, wsID)))
+		}
+
+		_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_STARTED,
+			fmt.Sprintf(`{"status":"running","session_id":%q}`, sessID)))
+
+		go func() {
+			jobCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			_, reply, rerr := d.Runtime.RunJob(jobCtx, jobID, empID, sessID, payload.Prompt)
+			if rerr != nil {
+				pl, _ := json.Marshal(map[string]string{
+					"error": rerr.Error(), "session_id": sessID, "reply": reply,
+				})
+				_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_FAILED, string(pl)))
+				return
+			}
+			pl, _ := json.Marshal(map[string]string{
+				"status": "success", "session_id": sessID, "reply": reply, "message": "Job executed successfully",
+			})
+			_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_SUCCESS, string(pl)))
+			// Job 结束后会话回到 READY（可复用）
+			_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_READY,
+				`{"status":"READY"}`))
+		}()
+		return nil
+
+	case aiev1.CommandType_COMMAND_TYPE_STOP_JOB:
+		d.Runtime.MarkUnknown("", cmd.GetJobId())
+		return nil
+	}
+	return nil
 }
 
 func (d *Daemon) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
@@ -241,11 +346,11 @@ func (d *Daemon) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 	case "job.run":
 		var p struct{ ID, EmployeeID, SessionID, Prompt string }
 		_ = json.Unmarshal(req.Params, &p)
-		j, err := d.Runtime.RunJob(ctx, p.ID, p.EmployeeID, p.SessionID, p.Prompt)
+		j, reply, err := d.Runtime.RunJob(ctx, p.ID, p.EmployeeID, p.SessionID, p.Prompt)
 		if err != nil {
 			return errResp(err)
 		}
-		return okResult(j)
+		return okResult(map[string]any{"job": j, "reply": reply})
 	case "provider.detect":
 		var p struct{ Name string }
 		_ = json.Unmarshal(req.Params, &p)

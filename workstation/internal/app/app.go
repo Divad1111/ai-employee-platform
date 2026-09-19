@@ -74,6 +74,10 @@ func Run(args []string) error {
 		return runUpdate(args[1:])
 	case "config":
 		return runConfig(args[1:])
+	case "link":
+		return runLink(args[1:])
+	case "unlink":
+		return runUnlink()
 	default:
 		return fmt.Errorf("未知命令 %q", args[0])
 	}
@@ -84,6 +88,7 @@ func printHelp() {
 
 用法:
   aew version
+  aew link
   aew register --server https://host:8080 --token <enrollment_token>
   aew unregister
   aew ping [--grpc host:9090]
@@ -193,7 +198,12 @@ func runDoctor(args []string) error {
 	dry := fs.Bool("dry-run", true, "fix 时默认 dry-run；加 --dry-run=false 才写入")
 	_ = fs.Parse(args)
 	paths := platform.Detect()
-	r := &diagnostics.Runner{DataDir: paths.DataDir()}
+	r := &diagnostics.Runner{
+		DataDir:     paths.DataDir(),
+		IdentityDir: paths.IdentityDir(),
+		ConfigDir:   paths.ConfigDir(),
+		LogDir:      paths.LogDir(),
+	}
 	if *fix {
 		fixed, skipped, err := r.Fix(*dry)
 		if err != nil {
@@ -214,15 +224,34 @@ func runDoctor(args []string) error {
 	fmt.Print(diagnostics.Format(r.Run()))
 	raw, err := ipcCall("doctor", nil)
 	if err != nil {
-		fmt.Println("Daemon         : OFFLINE")
+		fmt.Println("Daemon         : \033[31mOFFLINE\033[0m")
 		if _, e := identity.Load(paths); e != nil {
-			fmt.Println("Identity       : MISSING")
+			fmt.Println("Identity       : \033[31mMISSING\033[0m")
 		} else {
-			fmt.Println("Identity       : OK")
+			fmt.Println("Identity       : \033[32mOK\033[0m")
 		}
 		return nil
 	}
-	fmt.Println(string(raw))
+	var doc struct {
+		Checks []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(raw, &doc); err == nil && len(doc.Checks) > 0 {
+		for _, c := range doc.Checks {
+			mark := "\033[31m[" + c.Status + "]\033[0m"
+			if c.Status == "OK" {
+				mark = "\033[32m[OK]\033[0m"
+			} else if c.Status == "WARN" {
+				mark = "\033[33m[WARN]\033[0m"
+			}
+			fmt.Printf("%s %s — %s\n", mark, c.Name, c.Detail)
+		}
+	} else {
+		fmt.Println(string(raw))
+	}
 	return nil
 }
 
@@ -541,11 +570,31 @@ func runPing(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("Control Plane : OK")
-	fmt.Println("TLS           : OK")
-	fmt.Println("mTLS          : OK")
+	fmt.Println("Control Plane : \033[32mOK\033[0m")
+	fmt.Println("TLS           : \033[32mOK\033[0m")
+	fmt.Println("mTLS          : \033[32mOK\033[0m")
 	fmt.Printf("Server Time   : %d\n", resp.ServerUnixMs)
 	fmt.Printf("Sequence      : %d\n", resp.CurrentCommandSequence)
 	fmt.Printf("Nonce         : %s\n", resp.Nonce)
+	return nil
+}
+
+func runLink(args []string) error {
+	_ = args
+	bin, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	link, err := service.CreateGlobalSymlink(bin)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("已建立全局 PATH 软链接: %s -> %s\n现在可以在任意终端目录直接运行 `aew` 命令。\n", link, bin)
+	return nil
+}
+
+func runUnlink() error {
+	service.RemoveGlobalSymlink()
+	fmt.Println("已清理全局 PATH 中的 aew 软链接。")
 	return nil
 }

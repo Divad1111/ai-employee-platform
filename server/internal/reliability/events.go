@@ -112,6 +112,20 @@ func (s *EventStore) Accept(ev *aiev1.Event) AcceptResult {
 	return AcceptResult{Accepted: true}
 }
 
+// ResetWorkstation 在 Workstation 重新 Connect/Hello 时重置事件序号游标。
+// daemon 重启后会从 sequence=1 重计；若不重置，旧的超大 lastSeq 会导致全部 JOB_* 被拒。
+func (s *EventStore) ResetWorkstation(wsID string) {
+	if wsID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.byWS[wsID] = &wsEvents{
+		byEventID: make(map[string]struct{}),
+		byMsgID:   make(map[string]struct{}),
+	}
+}
+
 // LastSequence 返回已接受最大序号。
 func (s *EventStore) LastSequence(wsID string) uint64 {
 	s.mu.Lock()

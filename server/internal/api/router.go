@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ai-employee-platform/server/internal/approval"
@@ -68,6 +69,15 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+
+	var setupMu sync.Mutex
+	mux.HandleFunc("GET /api/setup/status", d.handleSetupStatus)
+	mux.HandleFunc("POST /api/setup/init", func(w http.ResponseWriter, r *http.Request) {
+		setupMu.Lock()
+		defer setupMu.Unlock()
+		d.handleSetupInit(w, r)
+	})
+
 	mux.HandleFunc("POST /api/auth/login", d.handleLogin)
 	mux.HandleFunc("POST /api/auth/logout", d.requireAuth(d.handleLogout))
 	mux.HandleFunc("GET /api/auth/me", d.requireAuth(d.handleMe))
@@ -100,6 +110,7 @@ func NewRouter(d Deps) http.Handler {
 	// Workstations
 	mux.HandleFunc("GET /api/workstations", d.requirePerm("workstation.read", d.handleListWorkstations))
 	mux.HandleFunc("GET /api/workstations/{id}", d.requirePerm("workstation.read", d.handleGetWorkstation))
+	mux.HandleFunc("PATCH /api/workstations/{id}", d.requirePerm("workstation.write", d.handleUpdateWorkstation))
 
 	// Sessions
 	mux.HandleFunc("GET /api/sessions", d.requirePerm("session.read", d.handleListSessions))
@@ -185,9 +196,91 @@ func NewRouter(d Deps) http.Handler {
 	return mux
 }
 
+func (d Deps) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
+	if d.Auth == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"initialized": false,
+			"needs_setup": true,
+			"version":     "v1.0.0",
+		})
+		return
+	}
+	init, err := d.Auth.IsInitialized(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"initialized": init,
+		"needs_setup": !init,
+		"version":     "v1.0.0",
+	})
+}
+
+type setupInitReq struct {
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	DisplayName string `json:"display_name"`
+	SystemName  string `json:"system_name"`
+}
+
+func (d Deps) handleSetupInit(w http.ResponseWriter, r *http.Request) {
+	if d.Auth == nil {
+		writeErr(w, http.StatusServiceUnavailable, "认证服务未就绪")
+		return
+	}
+	init, err := d.Auth.IsInitialized(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if init {
+		writeErr(w, http.StatusConflict, "系统已完成首次部署设置，禁止重复初始化")
+		return
+	}
+
+	var req setupInitReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "无效请求体数据")
+		return
+	}
+	if strings.TrimSpace(req.Username) == "" || strings.TrimSpace(req.Password) == "" {
+		writeErr(w, http.StatusBadRequest, "管理员账号和密码不能为空")
+		return
+	}
+
+	sess, err := d.Auth.InitAdmin(r.Context(), req.Username, req.Password, req.DisplayName, clientIP(r))
+	if err != nil {
+		if err == auth.ErrAlreadyInitialized {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		if err == auth.ErrWeakPassword || err == auth.ErrInvalidUsername {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"status":      "ok",
+		"token":       sess.Token,
+		"expires_at":  sess.ExpiresAt,
+		"system_name": req.SystemName,
+		"user": map[string]any{
+			"id":           sess.UserID,
+			"username":     sess.Username,
+			"display_name": req.DisplayName,
+			"roles":        sess.Roles,
+		},
+	})
+}
+
 type loginReq struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+	TOTP     string `json:"totp,omitempty"`
 }
 
 func (d Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -202,9 +295,30 @@ func (d Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusLocked, err.Error())
 			return
 		}
-		writeErr(w, http.StatusUnauthorized, "登录失败")
+		writeErr(w, http.StatusUnauthorized, "登录失败: 用户名或密码错误")
 		return
 	}
+
+	// 若该账号已绑定开启 TOTP 双因子认证
+	if d.Approvals != nil && d.Approvals.TOTPEnabled(r.Context(), sess.UserID) {
+		if req.TOTP == "" {
+			_ = d.Auth.Logout(r.Context(), sess.Token, clientIP(r))
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error":      "该账号已启用 TOTP 双因子认证，请输入 6 位动态验证码",
+				"needs_totp": true,
+			})
+			return
+		}
+		if err := d.Approvals.VerifyUserTOTP(r.Context(), sess.UserID, req.TOTP, clientIP(r)); err != nil {
+			_ = d.Auth.Logout(r.Context(), sess.Token, clientIP(r))
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error":      "TOTP 动态验证码错误或已失效，请重新输入",
+				"needs_totp": true,
+			})
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":      sess.Token,
 		"expires_at": sess.ExpiresAt,
@@ -263,18 +377,55 @@ func (d Deps) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "无效请求体")
 		return
 	}
-	caPEM, certPEM, rec, err := d.Enrollment.Enroll(r.Context(), req.Token, req.WorkstationID, []byte(req.CSRPEM), clientIP(r))
+	caPEM, certPEM, rec, tokenLabel, err := d.Enrollment.Enroll(r.Context(), req.Token, req.WorkstationID, []byte(req.CSRPEM), clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
 	if d.Workstations != nil {
-		d.Workstations.EnsureRegistered(r.Context(), req.WorkstationID, req.WorkstationID)
+		wsName := strings.TrimSpace(tokenLabel)
+		if wsName == "" {
+			suffix := req.WorkstationID
+			if len(suffix) > 6 {
+				suffix = suffix[len(suffix)-6:]
+			}
+			wsName = "工作站-" + suffix
+		}
+		d.Workstations.EnsureRegistered(r.Context(), req.WorkstationID, wsName)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ca_pem": caPEM, "certificate": certPEM, "fingerprint": rec.Fingerprint,
 		"workstation_id": rec.WorkstationID, "expires_at": rec.ExpiresAt, "status": rec.Status,
 	})
+}
+
+type updateWorkstationReq struct {
+	Name string `json:"name"`
+}
+
+func (d Deps) handleUpdateWorkstation(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "缺少工作站 ID")
+		return
+	}
+	var req updateWorkstationReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "无效请求体")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeErr(w, http.StatusBadRequest, "工作站名称不能为空")
+		return
+	}
+	if d.Workstations != nil && d.Workstations.Meta != nil {
+		if err := d.Workstations.Meta.Upsert(r.Context(), id, req.Name); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "name": req.Name})
 }
 
 type revokeReq struct {
@@ -416,12 +567,13 @@ func (d Deps) handleGetWorkspace(w http.ResponseWriter, r *http.Request, _ *auth
 
 func (d Deps) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var body struct {
-		Path       string `json:"path"`
-		Repository string `json:"repository"`
-		Branch     string `json:"branch"`
+		WorkstationID string `json:"workstation_id"`
+		Path          string `json:"path"`
+		Repository    string `json:"repository"`
+		Branch        string `json:"branch"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	ws, err := d.Workspaces.Update(r.Context(), r.PathValue("id"), body.Path, body.Repository, body.Branch, sess.UserID, clientIP(r))
+	ws, err := d.Workspaces.Update(r.Context(), r.PathValue("id"), body.WorkstationID, body.Path, body.Repository, body.Branch, sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -577,6 +729,9 @@ func (d Deps) handleCancelJob(w http.ResponseWriter, r *http.Request, sess *auth
 	}
 	if d.Notify != nil {
 		_ = d.Notify.OnJobTerminal(r.Context(), j)
+	}
+	if d.Scheduler != nil && j.WorkstationID != "" {
+		d.Scheduler.Release(j.WorkstationID)
 	}
 	writeJSON(w, http.StatusOK, j)
 }

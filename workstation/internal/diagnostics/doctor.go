@@ -24,7 +24,10 @@ type Report struct {
 
 // Runner 诊断。
 type Runner struct {
-	DataDir string
+	DataDir     string
+	IdentityDir string
+	ConfigDir   string
+	LogDir      string
 }
 
 // Run 覆盖 §43 基础项。
@@ -43,16 +46,28 @@ func (r *Runner) Run() Report {
 	} else {
 		add("data_dir", true, root, false)
 	}
-	idPath := filepath.Join(root, "identity")
+	idPath := r.IdentityDir
+	if idPath == "" {
+		idPath = filepath.Join(root, "identity")
+	}
 	_, err := os.Stat(idPath)
 	add("identity", err == nil, idPath, err != nil)
-	cfg := filepath.Join(root, "config.yaml")
+
+	cfgDir := r.ConfigDir
+	if cfgDir == "" {
+		cfgDir = root
+	}
+	cfg := filepath.Join(cfgDir, "config.yaml")
 	_, err = os.Stat(cfg)
 	add("config", err == nil || os.IsNotExist(err), "config optional", false)
 	add("network_outbound", true, "仅出站连 Control Plane（架构约束）", false)
 	add("no_public_exec_port", true, "无公网执行端口", false)
 	add("ipc_loopback", true, "IPC 仅本机", false)
-	logs := filepath.Join(root, "logs")
+
+	logs := r.LogDir
+	if logs == "" {
+		logs = filepath.Join(root, "logs")
+	}
 	if err := os.MkdirAll(logs, 0o755); err == nil {
 		add("logs_dir", true, logs, false)
 	} else {
@@ -85,10 +100,18 @@ func (r *Runner) Fix(dryRun bool) (fixed []string, skipped []string, err error) 
 		}
 		switch c.Name {
 		case "logs_dir":
-			_ = os.MkdirAll(filepath.Join(root, "logs"), 0o755)
+			logs := r.LogDir
+			if logs == "" {
+				logs = filepath.Join(root, "logs")
+			}
+			_ = os.MkdirAll(logs, 0o755)
 			fixed = append(fixed, c.Name)
 		case "identity":
-			_ = os.MkdirAll(filepath.Join(root, "identity"), 0o700)
+			idPath := r.IdentityDir
+			if idPath == "" {
+				idPath = filepath.Join(root, "identity")
+			}
+			_ = os.MkdirAll(idPath, 0o700)
 			fixed = append(fixed, c.Name)
 		default:
 			skipped = append(skipped, c.Name)
@@ -97,15 +120,15 @@ func (r *Runner) Fix(dryRun bool) (fixed []string, skipped []string, err error) 
 	return fixed, skipped, nil
 }
 
-// Format 人类可读。
+// Format 人类可读（支持终端 ANSI 颜色：绿色 OK，红色 FAIL）。
 func Format(rep Report) string {
 	var b strings.Builder
 	for _, c := range rep.Checks {
-		mark := "FAIL"
+		mark := "\033[31m[FAIL]\033[0m"
 		if c.OK {
-			mark = "OK"
+			mark = "\033[32m[OK]\033[0m"
 		}
-		fmt.Fprintf(&b, "[%s] %s — %s\n", mark, c.Name, c.Detail)
+		fmt.Fprintf(&b, "%s %s — %s\n", mark, c.Name, c.Detail)
 	}
 	return b.String()
 }

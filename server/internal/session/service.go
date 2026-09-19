@@ -170,6 +170,58 @@ func (s *Service) List(ctx context.Context) ([]*Session, error) {
 	return s.store.List(ctx)
 }
 
+// ReportFromWorkstation 工作站上报会话（可指定 ID；权威状态以工作站为准）。
+func (s *Service) ReportFromWorkstation(ctx context.Context, id, employeeID, workstationID, workspaceID, provider, status string) (*Session, error) {
+	if id == "" || employeeID == "" {
+		return nil, ErrInvalidInput
+	}
+	if status == "" {
+		status = StatusStarting
+	}
+	now := time.Now().UTC()
+	existing, _ := s.store.Get(ctx, id)
+	if existing == nil {
+		sess := &Session{
+			ID:             id,
+			EmployeeID:     employeeID,
+			WorkstationID:  workstationID,
+			WorkspaceID:    workspaceID,
+			Provider:       provider,
+			Status:         status,
+			CreatedAt:      now,
+			StartedAt:      now,
+			LastActivityAt: now,
+		}
+		if status == StatusStopped || status == StatusError {
+			sess.EndedAt = now
+		}
+		if err := s.store.Save(ctx, sess); err != nil {
+			return nil, err
+		}
+		s.publish(ctx, sess)
+		return sess, nil
+	}
+	if workstationID != "" {
+		existing.WorkstationID = workstationID
+	}
+	if workspaceID != "" {
+		existing.WorkspaceID = workspaceID
+	}
+	if provider != "" {
+		existing.Provider = provider
+	}
+	existing.Status = status
+	existing.LastActivityAt = now
+	if status == StatusStopped || status == StatusError {
+		existing.EndedAt = now
+	}
+	if err := s.store.Save(ctx, existing); err != nil {
+		return nil, err
+	}
+	s.publish(ctx, existing)
+	return existing, nil
+}
+
 func (s *Service) publish(ctx context.Context, sess *Session) {
 	if s.bus == nil {
 		return

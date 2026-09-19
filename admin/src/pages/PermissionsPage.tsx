@@ -1,8 +1,10 @@
 /**
- * Permission Profiles + Rules 列表与 upsert。
+ * Permission 权限策略配置与规则清单。
  */
 import { FormEvent, useEffect, useState } from 'react'
 import { apiGet, apiPut } from '../api/client'
+import { StatusBadge } from '../components/StatusBadge'
+import { IconShield, IconPlus } from '../components/Icons'
 
 type Profile = {
   id: string
@@ -68,177 +70,182 @@ export function PermissionsPage() {
     void loadRules(selected).catch((e) => setError(String(e)))
   }, [selected])
 
-  async function upsertProfile(e: FormEvent) {
+  async function onSaveProfile(e: FormEvent) {
     e.preventDefault()
     setError('')
     setMsg('')
     try {
-      const p = await apiPut<Profile>('/permission/profiles', {
-        id: pid,
+      await apiPut(`/permission/profiles/${pid}`, {
         name: pname,
         description: pdesc,
         is_default: pisDefault,
       })
-      setMsg(`Profile ${p.id} 已保存`)
+      setMsg(`安全策略模板 ${pid} 保存成功`)
       setPid('')
       setPname('')
       setPdesc('')
       setPisDefault(false)
       await loadProfiles()
-      setSelected(p.id)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '保存失败')
+      setError(err instanceof Error ? err.message : '保存策略模板失败')
     }
   }
 
-  async function upsertRule(e: FormEvent) {
+  async function onAddRule(e: FormEvent) {
     e.preventDefault()
-    if (!selected) {
-      setError('请先选择 Profile')
-      return
-    }
+    if (!selected) return
     setError('')
     setMsg('')
     try {
-      const r = await apiPut<Rule>('/permission/rules', {
+      await apiPut('/permission/rules', {
         profile_id: selected,
         action: raction,
         effect: reffect,
         critical: rcritical,
-        priority: rpriority,
+        priority: Number(rpriority),
         description: rdesc,
       })
-      setMsg(`Rule ${r.id} 已保存`)
+      setMsg(`权限控制规则已生效`)
       setRaction('')
       setRdesc('')
-      setRcritical(false)
-      setRpriority(100)
       await loadRules(selected)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '保存失败')
+      setError(err instanceof Error ? err.message : '保存控制规则失败')
     }
-  }
-
-  function effectClass(eff: string): string {
-    const u = (eff || '').toUpperCase()
-    if (u === 'ALLOW') return 'badge badge-ok'
-    if (u === 'ASK') return 'badge badge-warn'
-    if (u === 'DENY') return 'badge badge-err'
-    return 'badge'
   }
 
   return (
     <section>
       <header className="page-header">
         <div>
-          <h1>Permissions</h1>
-          <p className="muted">Profile 与 Rule 管理；Effect = ALLOW / ASK / DENY。</p>
+          <h1>权限策略引擎配置 (Permissions)</h1>
+          <p>基于 RBAC + 细粒度操作策略 · 支持 ALLOW（放行）、DENY（阻断）、ASK（触发人工审批）</p>
         </div>
       </header>
-      {error ? <p className="error">{error}</p> : null}
-      {msg ? <p className="ok-msg">{msg}</p> : null}
+
+      {error ? <div className="error">{error}</div> : null}
+      {msg ? <div className="ok-msg">{msg}</div> : null}
 
       <div className="panel">
-        <h2>Profiles</h2>
-        <form className="inline-form" onSubmit={upsertProfile}>
-          <input placeholder="ID" value={pid} onChange={(e) => setPid(e.target.value)} required />
-          <input placeholder="Name" value={pname} onChange={(e) => setPname(e.target.value)} required />
-          <input placeholder="Description" value={pdesc} onChange={(e) => setPdesc(e.target.value)} />
+        <div className="panel-header">
+          <div>
+            <h2>创建 / 更新安全策略模板 (Profile)</h2>
+            <p>为不同职能的数字员工定制专属的权限沙箱边界</p>
+          </div>
+        </div>
+        <form className="inline-form" onSubmit={onSaveProfile}>
+          <input placeholder="模板标识 (例: dev-strict)" value={pid} onChange={(e) => setPid(e.target.value)} required />
+          <input placeholder="模板名称 (例: 严格开发权限)" value={pname} onChange={(e) => setPname(e.target.value)} required />
+          <input placeholder="描述说明" value={pdesc} onChange={(e) => setPdesc(e.target.value)} style={{ flex: 1 }} />
           <label className="check-row">
             <input type="checkbox" checked={pisDefault} onChange={(e) => setPisDefault(e.target.checked)} />
-            Default
+            <span>设为全局默认模板</span>
           </label>
-          <button type="submit">Upsert Profile</button>
+          <button type="submit">
+            <IconPlus size={15} />
+            <span>保存策略模板</span>
+          </button>
         </form>
-        <table className="table">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Name</th>
-              <th>Default</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {profiles.map((p) => (
-              <tr key={p.id} className={selected === p.id ? 'row-active' : undefined}>
-                <td className="mono">{p.id}</td>
-                <td>{p.name}</td>
-                <td>{p.is_default ? 'Y' : ''}</td>
-                <td>
-                  <button type="button" className="btn-ghost" onClick={() => setSelected(p.id)}>
-                    查看 Rules
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       </div>
 
       <div className="panel">
-        <h2>Rules{selected ? ` · ${selected}` : ''}</h2>
-        <form className="inline-form" onSubmit={upsertRule}>
-          <input
-            placeholder="Action（如 git.push）"
-            value={raction}
-            onChange={(e) => setRaction(e.target.value)}
-            required
-          />
-          <select value={reffect} onChange={(e) => setReffect(e.target.value)}>
-            <option value="ALLOW">ALLOW</option>
-            <option value="ASK">ASK</option>
-            <option value="DENY">DENY</option>
-          </select>
-          <input
-            type="number"
-            placeholder="Priority"
-            value={rpriority}
-            onChange={(e) => setRpriority(Number(e.target.value))}
-            style={{ width: 90 }}
-          />
-          <label className="check-row">
-            <input type="checkbox" checked={rcritical} onChange={(e) => setRcritical(e.target.checked)} />
-            Critical
-          </label>
-          <input placeholder="Description" value={rdesc} onChange={(e) => setRdesc(e.target.value)} />
-          <button type="submit" disabled={!selected}>
-            Upsert Rule
-          </button>
-        </form>
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Action</th>
-              <th>Effect</th>
-              <th>Critical</th>
-              <th>Priority</th>
-              <th>Description</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rules.length === 0 ? (
-              <tr>
-                <td colSpan={5} className="muted">
-                  {selected ? '该 Profile 暂无 Rule' : '请选择 Profile'}
-                </td>
-              </tr>
-            ) : (
-              rules.map((r) => (
-                <tr key={r.id || `${r.profile_id}:${r.action}`}>
-                  <td className="mono">{r.action}</td>
-                  <td>
-                    <span className={effectClass(r.effect)}>{r.effect}</span>
-                  </td>
-                  <td>{r.critical ? 'Y' : ''}</td>
-                  <td>{r.priority}</td>
-                  <td className="muted">{r.description || '—'}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+        <div className="panel-header">
+          <div>
+            <h2>当前配置的安全模板</h2>
+            <p>点击选择模板即可维护下属的规则清单</p>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap' }}>
+          {profiles.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              className={selected === p.id ? '' : 'btn-ghost'}
+              onClick={() => setSelected(p.id)}
+            >
+              <IconShield size={15} />
+              <span>{p.name} ({p.id})</span>
+              {p.is_default ? <span className="badge badge-ok" style={{ marginLeft: '4px' }}>默认</span> : null}
+            </button>
+          ))}
+        </div>
       </div>
+
+      {selected ? (
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <h2>维护规则清单 (模板: {selected})</h2>
+              <p>动作命中规则后，按优先级数值进行最终判定</p>
+            </div>
+          </div>
+
+          <form className="inline-form" onSubmit={onAddRule}>
+            <input
+              placeholder="动作 Action (例: command.exec 或 file.write)"
+              value={raction}
+              onChange={(e) => setRaction(e.target.value)}
+              required
+              style={{ width: '220px' }}
+            />
+            <select value={reffect} onChange={(e) => setReffect(e.target.value)}>
+              <option value="ALLOW">ALLOW (允许放行)</option>
+              <option value="ASK">ASK (人工审核)</option>
+              <option value="DENY">DENY (强行阻断)</option>
+            </select>
+            <input
+              type="number"
+              placeholder="优先级 (数值越大越先判定)"
+              value={rpriority}
+              onChange={(e) => setRpriority(Number(e.target.value))}
+              style={{ width: '130px' }}
+            />
+            <input
+              placeholder="规则原因或风控提示"
+              value={rdesc}
+              onChange={(e) => setRdesc(e.target.value)}
+              style={{ flex: 1, minWidth: '180px' }}
+            />
+            <label className="check-row">
+              <input type="checkbox" checked={rcritical} onChange={(e) => setRcritical(e.target.checked)} />
+              <span>标记为高风险动作</span>
+            </label>
+            <button type="submit">保存规则</button>
+          </form>
+
+          <div className="table-wrapper" style={{ marginTop: '1rem' }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>操作动作 (Action)</th>
+                  <th>策略判定 (Effect)</th>
+                  <th>高风险标记</th>
+                  <th>优先级</th>
+                  <th>风控说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rules.map((r) => (
+                  <tr key={r.id}>
+                    <td><span className="mono">{r.action}</span></td>
+                    <td><StatusBadge status={r.effect} /></td>
+                    <td>
+                      {r.critical ? <StatusBadge status="CRITICAL" /> : <span style={{ color: 'var(--text-muted)' }}>普通</span>}
+                    </td>
+                    <td><span className="badge">{r.priority}</span></td>
+                    <td style={{ color: 'var(--text-muted)' }}>{r.description || '—'}</td>
+                  </tr>
+                ))}
+                {rules.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="empty-tip">该模板下尚未添加任何权限规则</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
     </section>
   )
 }

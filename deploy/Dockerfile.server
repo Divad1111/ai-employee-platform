@@ -1,7 +1,7 @@
 # Control Plane 镜像（多阶段构建）
 # 设计依据：§71、§72
 
-FROM golang:1.22-bookworm AS build
+FROM golang:1.24-bookworm AS build
 ENV GOTOOLCHAIN=auto
 WORKDIR /src
 # gen 为 replace 依赖，需一并拷贝
@@ -16,14 +16,18 @@ COPY migrations ./migrations
 WORKDIR /src/server
 RUN CGO_ENABLED=0 go build -o /out/server ./cmd/server \
  && CGO_ENABLED=0 go build -o /out/migrate ./cmd/migrate
+# 预创建数据目录并赋予 nonroot 用户 (UID 65532) 写权限
+RUN mkdir -p /data/ca && chown -R 65532:65532 /data
 
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
 COPY --from=build /out/server /app/server
 COPY --from=build /out/migrate /app/migrate
 COPY --from=build /src/migrations /migrations
+COPY --from=build --chown=nonroot:nonroot /data /data
 ENV AIE_HTTP_ADDR=:8080
 ENV AIE_GRPC_ADDR=:9090
+ENV AIE_CA_DIR=/data/ca
 # migrate 示例: /app/migrate -dir /migrations up
 USER nonroot:nonroot
 ENTRYPOINT ["/app/server"]

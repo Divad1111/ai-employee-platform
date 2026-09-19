@@ -31,6 +31,7 @@ build-server:
 
 build-workstation:
 	cd workstation && go build -o bin/aew$(EXE) ./cmd/aew
+	mkdir -p bin && cp -f workstation/bin/aew$(EXE) bin/aew$(EXE)
 
 build-admin:
 	cd admin && npm run build
