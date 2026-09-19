@@ -140,8 +140,12 @@ func NewRouter(d Deps) http.Handler {
 	// Feishu / Secrets / Scheduler
 	mux.HandleFunc("GET /api/integrations/feishu/config", d.requirePerm("system.read", d.handleFeishuGetConfig))
 	mux.HandleFunc("PUT /api/integrations/feishu/config", d.requirePermStepUp("system.write", d.handleFeishuPutConfig))
+	mux.HandleFunc("GET /api/integrations/feishu/status", d.requireAuth(d.handleFeishuStatus))
+	mux.HandleFunc("POST /api/integrations/feishu/test-message", d.requirePerm("system.write", d.handleFeishuTestMessage))
 	mux.HandleFunc("GET /api/integrations/feishu/bindings", d.requirePerm("employee.read", d.handleListFeishuBindings))
 	mux.HandleFunc("POST /api/integrations/feishu/bindings", d.requirePerm("employee.write", d.handleFeishuBinding))
+	mux.HandleFunc("PUT /api/integrations/feishu/bindings", d.requirePerm("employee.write", d.handleFeishuBinding))
+	mux.HandleFunc("DELETE /api/integrations/feishu/bindings", d.requirePerm("employee.write", d.handleDeleteFeishuBinding))
 	mux.HandleFunc("POST /api/integrations/feishu/events", d.handleFeishuEvents) // 公开 Webhook
 
 	// Skills / Knowledge / Permissions 写入

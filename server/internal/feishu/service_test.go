@@ -4,24 +4,28 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 
+	"github.com/ai-employee-platform/server/internal/audit"
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/feishu"
 	"github.com/ai-employee-platform/server/internal/job"
 	"github.com/ai-employee-platform/server/internal/message"
 	"github.com/ai-employee-platform/server/internal/notification"
-	"github.com/ai-employee-platform/server/internal/audit"
 	"github.com/ai-employee-platform/server/internal/secret"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 type fakeJobs struct {
 	created []string
+	prompts []string
 }
 
 func (f *fakeJobs) CreateFromFeishu(_ context.Context, employeeID, prompt, idem, chat, msg string) (string, error) {
 	f.created = append(f.created, employeeID+"|"+idem)
+	f.prompts = append(f.prompts, prompt)
 	return "JOB-1", nil
 }
 
@@ -29,6 +33,7 @@ type fakeEmp struct{}
 
 func (fakeEmp) ResolveAlias(context.Context, string) (string, error) { return "", feishu.ErrNoEmployee }
 func (fakeEmp) IsAssignable(context.Context, string) error           { return nil }
+func (fakeEmp) GetEmployeeName(context.Context, string) string       { return "AI员工" }
 
 func TestParseTargetAliasAndEmpID(t *testing.T) {
 	v, _ := secret.NewMemoryVault()
@@ -92,8 +97,8 @@ func TestHandleMessageIdempotentAndNotify(t *testing.T) {
 	if err := s.NotifyJobResult(context.Background(), "c1", "JOB-1", "SUCCESS", "done"); err != nil {
 		t.Fatal(err)
 	}
-	if len(sender.Sent) != 1 {
-		t.Fatal(sender.Sent)
+	if len(sender.Sent) < 2 {
+		t.Fatal("缺少即时确认或终态回执", sender.Sent)
 	}
 }
 
@@ -130,7 +135,185 @@ func TestBridgeCreatesJob(t *testing.T) {
 	j.Status = job.StatusSuccess
 	j.Result = "ok"
 	_ = notify.OnJobTerminal(ctx, j)
-	if len(sender.Sent) != 1 {
-		t.Fatal("应回复飞书")
+	if len(sender.Sent) < 2 {
+		t.Fatal("缺少即时确认或终态回执", sender.Sent)
+	}
+}
+
+func TestUpsertReplacesAndDeleteBinding(t *testing.T) {
+	v, _ := secret.NewMemoryVault()
+	fs := feishu.NewService(v)
+	fs.UpsertBinding(feishu.Binding{EmployeeID: "e1", FeishuAlias: "dev"})
+	if got := fs.ListBindings(); len(got) != 1 || got[0].EmployeeID != "e1" {
+		t.Fatal("初始绑定失败", got)
+	}
+	// 同一员工改别名：旧别名应失效
+	fs.UpsertBinding(feishu.Binding{EmployeeID: "e1", FeishuAlias: "ops", FeishuOpenID: "ou_1"})
+	if id, _, err := fs.ParseTarget("@dev hello"); err == nil && id == "e1" {
+		t.Fatal("旧别名应已清除")
+	}
+	id, prompt, err := fs.ParseTarget("@ops hello")
+	if err != nil || id != "e1" || prompt == "" {
+		t.Fatal("新别名未生效", id, prompt, err)
+	}
+	b := fs.BindingByEmployee("e1")
+	if b == nil || b.FeishuAlias != "ops" || b.FeishuOpenID != "ou_1" {
+		t.Fatal("BindingByEmployee 不符", b)
+	}
+	if !fs.DeleteBinding("e1", "ops") {
+		t.Fatal("删除应成功")
+	}
+	if fs.BindingByEmployee("e1") != nil || len(fs.ListBindings()) != 0 {
+		t.Fatal("删除后仍存在绑定")
+	}
+	if fs.DeleteBinding("e1", "ops") {
+		t.Fatal("重复删除应返回 false")
+	}
+}
+
+func ptr(s string) *string {
+	return &s
+}
+
+func TestResolveMentionsAndCleanPrompt(t *testing.T) {
+	v, _ := secret.NewMemoryVault()
+	s := feishu.NewService(v)
+	s.UpsertBinding(feishu.Binding{EmployeeID: "EMP-83cb1d1ec3307770", FeishuAlias: "AI员工"})
+
+	// 1. 验证 @_user_x 占位符被正确解析为真实姓名/别名
+	raw := "@_user_1 @_user_2 把这个类容写入helloworld.txt中"
+	mentions := []*larkim.MentionEvent{
+		{Key: ptr("@_user_1"), Name: ptr("AI员工")},
+		{Key: ptr("@_user_2"), Name: ptr("合并")},
+	}
+	resolved := s.ResolveMentions(raw, mentions)
+	expectedResolved := "@AI员工 @合并 把这个类容写入helloworld.txt中"
+	if resolved != expectedResolved {
+		t.Fatalf("ResolveMentions 不符合预期: 得到 %q, 期望 %q", resolved, expectedResolved)
+	}
+
+	// 2. 验证 CleanPrompt 正确剥离开头的全部 @提及
+	cleaned := s.CleanPrompt(resolved)
+	expectedCleaned := "把这个类容写入helloworld.txt中"
+	if cleaned != expectedCleaned {
+		t.Fatalf("CleanPrompt 不符合预期: 得到 %q, 期望 %q", cleaned, expectedCleaned)
+	}
+
+	// 3. 验证 ParseTarget 识别目标数字员工并返回纯净指令
+	empID, prompt, err := s.ParseTarget(resolved)
+	if err != nil || empID != "EMP-83cb1d1ec3307770" {
+		t.Fatalf("ParseTarget 失败: empID=%s, err=%v", empID, err)
+	}
+	if prompt != expectedCleaned {
+		t.Fatalf("ParseTarget prompt 包含残留 @ 标记: %q", prompt)
+	}
+}
+
+func TestQuotedMessageContextInjection(t *testing.T) {
+	v, _ := secret.NewMemoryVault()
+	s := feishu.NewService(v)
+	s.UpsertBinding(feishu.Binding{EmployeeID: "EMP-100", FeishuAlias: "AI员工"})
+	fj := &fakeJobs{}
+	s.Jobs = fj
+	s.Employees = fakeEmp{}
+	sender := &feishu.MemorySender{}
+	s.Sender = sender
+
+	ev := feishu.IncomingEvent{
+		EventID:       "ev-quote-1",
+		MessageID:     "msg-child",
+		ParentID:      "msg-parent-jira",
+		ChatID:        "chat-grp",
+		SenderOpenID:  "ou_test",
+		Text:          "@AI员工 @合并 把这个类容写入helloworld.txt中",
+		QuotedContent: "[JIRA] 【环境单位】环境单位漂移行走 链接: http://jira.example.com/SG-70971",
+	}
+
+	jobID, dup, err := s.HandleMessage(context.Background(), ev)
+	if err != nil || dup || jobID != "JOB-1" {
+		t.Fatalf("HandleMessage 失败: %v, dup=%v, jobID=%s", err, dup, jobID)
+	}
+
+	// 验证透传给 Workstation 的完整 Prompt 包含了引用父消息与纯净指令
+	if len(fj.prompts) == 0 {
+		t.Fatal("未创建 Job")
+	}
+	actualPrompt := fj.prompts[0]
+	if !strings.Contains(actualPrompt, "【引用/上下文内容如下】：") ||
+		!strings.Contains(actualPrompt, "[JIRA] 【环境单位】环境单位漂移行走") {
+		t.Fatalf("透传工作站的 prompt 缺失引用上下文:\n%s", actualPrompt)
+	}
+	if !strings.Contains(actualPrompt, "【任务指令】：\n把这个类容写入helloworld.txt中") {
+		t.Fatalf("透传工作站的 prompt 任务指令不正确:\n%s", actualPrompt)
+	}
+	if strings.Contains(actualPrompt, "@_user_1") || strings.Contains(actualPrompt, "@合并") {
+		t.Fatalf("透传工作站的 prompt 依然残留 @ 标记:\n%s", actualPrompt)
+	}
+
+	// 验证回复到飞书用户的即时确认使用了消息卡片，并使用员工姓名而非 ID
+	if len(sender.Sent) == 0 {
+		t.Fatal("未发送飞书确认消息")
+	}
+	ackMsg := sender.Sent[0].Content
+	if !feishu.IsCardJSON(ackMsg) {
+		t.Fatalf("飞书确认回复应为消息卡片 JSON: %s", ackMsg)
+	}
+	if !strings.Contains(ackMsg, "AI员工") || strings.Contains(ackMsg, "EMP-100") {
+		t.Fatalf("飞书确认回复中未正确展示员工姓名或残留了 EMP- ID: %s", ackMsg)
+	}
+	if !strings.Contains(ackMsg, "把这个类容写入helloworld.txt中") {
+		t.Fatalf("飞书确认回复内容不符合预期: %s", ackMsg)
+	}
+	if !strings.Contains(ackMsg, "已带入引用的上下文内容") {
+		t.Fatalf("飞书确认回复未标注引用上下文: %s", ackMsg)
+	}
+}
+
+func TestParseMessageBodyFormats(t *testing.T) {
+	// 1. 纯文本格式
+	textRaw := `{"text":"hello world"}`
+	if got := feishu.ParseMessageBody("text", textRaw); got != "hello world" {
+		t.Fatalf("text parse failed: %s", got)
+	}
+
+	// 2. 富文本 post 格式 (含标题、链接、@)
+	postRaw := `{
+		"zh_cn": {
+			"title": "[JIRA] 环境单位通知",
+			"content": [
+				[
+					{"tag": "text", "text": "任务变更: "},
+					{"tag": "a", "text": "SG-70971", "href": "http://jira.example.com/SG-70971"}
+				],
+				[
+					{"tag": "text", "text": "抄送: "},
+					{"tag": "at", "user_name": "周利俊"}
+				]
+			]
+		}
+	}`
+	postParsed := feishu.ParseMessageBody("post", postRaw)
+	if !strings.Contains(postParsed, "[JIRA] 环境单位通知") ||
+		!strings.Contains(postParsed, "[SG-70971](http://jira.example.com/SG-70971)") ||
+		!strings.Contains(postParsed, "@周利俊") {
+		t.Fatalf("post parse failed:\n%s", postParsed)
+	}
+
+	// 3. interactive 消息卡片格式
+	cardRaw := `{
+		"header": {
+			"title": {"content": "JIRA 告警"}
+		},
+		"elements": [
+			{
+				"tag": "div",
+				"text": {"content": "状态从 (空) -> Auto bottom up"}
+			}
+		]
+	}`
+	cardParsed := feishu.ParseMessageBody("interactive", cardRaw)
+	if !strings.Contains(cardParsed, "JIRA 告警") ||
+		!strings.Contains(cardParsed, "状态从 (空) -> Auto bottom up") {
+		t.Fatalf("card parse failed:\n%s", cardParsed)
 	}
 }

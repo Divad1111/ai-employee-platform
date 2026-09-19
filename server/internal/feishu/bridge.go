@@ -46,6 +46,18 @@ func (b *Bridge) IsAssignable(ctx context.Context, employeeID string) error {
 	return nil
 }
 
+// GetEmployeeName 实现 EmployeeChecker：获取员工真实名称
+func (b *Bridge) GetEmployeeName(ctx context.Context, employeeID string) string {
+	if b.Employees == nil || employeeID == "" {
+		return ""
+	}
+	e, err := b.Employees.Get(ctx, employeeID)
+	if err != nil || e == nil {
+		return ""
+	}
+	return e.Name
+}
+
 // CreateFromFeishu 实现 JobCreator：写 Message → 建 Job → 尝试调度。
 func (b *Bridge) CreateFromFeishu(ctx context.Context, employeeID, prompt, idempotencyKey, chatID, messageID string) (string, error) {
 	_, _ = b.Messages.Send(ctx, message.SendInput{

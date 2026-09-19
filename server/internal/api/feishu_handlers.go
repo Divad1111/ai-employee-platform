@@ -18,6 +18,51 @@ func (d Deps) handleFeishuGetConfig(w http.ResponseWriter, _ *http.Request, _ *a
 	writeJSON(w, http.StatusOK, d.Feishu.GetConfigPublic())
 }
 
+func (d Deps) handleFeishuStatus(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+	if d.Feishu == nil {
+		writeErr(w, http.StatusServiceUnavailable, "feishu 未启用")
+		return
+	}
+	forceRefresh := r.URL.Query().Get("refresh") == "true" || r.URL.Query().Get("refresh") == "1"
+	status := d.Feishu.Status(r.Context(), forceRefresh)
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (d Deps) handleFeishuTestMessage(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	if d.Feishu == nil {
+		writeErr(w, http.StatusServiceUnavailable, "feishu 未启用")
+		return
+	}
+	var req struct {
+		ReceiveIDType string `json:"receive_id_type"`
+		ReceiveID     string `json:"receive_id"`
+		Content       string `json:"content"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "无效请求体")
+		return
+	}
+	if req.ReceiveID == "" {
+		writeErr(w, http.StatusBadRequest, "需要 receive_id (用户 OpenID 或群聊 Chat ID)")
+		return
+	}
+
+	res, err := d.Feishu.TestSendMessage(r.Context(), req.ReceiveIDType, req.ReceiveID, req.Content)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if d.Audit != nil {
+		d.Audit.Log(r.Context(), "USER", sess.UserID, "feishu.test_message", "success", clientIP(r), map[string]string{
+			"receive_id": req.ReceiveID,
+			"message_id": res.MessageID,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, res)
+}
+
 func (d Deps) handleFeishuPutConfig(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.Feishu == nil || d.Secrets == nil {
 		writeErr(w, http.StatusServiceUnavailable, "feishu 未启用")
@@ -74,13 +119,42 @@ func (d Deps) handleFeishuPutConfig(w http.ResponseWriter, r *http.Request, sess
 }
 
 func (d Deps) handleFeishuBinding(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+	if d.Feishu == nil {
+		writeErr(w, http.StatusServiceUnavailable, "feishu 未启用")
+		return
+	}
 	var b feishu.Binding
 	if err := decodeJSON(r, &b); err != nil || b.EmployeeID == "" {
 		writeErr(w, http.StatusBadRequest, "需要 employee_id")
 		return
 	}
+	if b.FeishuAlias == "" {
+		writeErr(w, http.StatusBadRequest, "需要 feishu_bot_alias")
+		return
+	}
 	d.Feishu.UpsertBinding(b)
 	writeJSON(w, http.StatusOK, b)
+}
+
+func (d Deps) handleDeleteFeishuBinding(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+	if d.Feishu == nil {
+		writeErr(w, http.StatusServiceUnavailable, "feishu 未启用")
+		return
+	}
+	empID := r.URL.Query().Get("employee_id")
+	alias := r.URL.Query().Get("feishu_bot_alias")
+	if alias == "" {
+		alias = r.URL.Query().Get("alias")
+	}
+	if empID == "" && alias == "" {
+		writeErr(w, http.StatusBadRequest, "需要 employee_id 或 feishu_bot_alias")
+		return
+	}
+	if !d.Feishu.DeleteBinding(empID, alias) {
+		writeErr(w, http.StatusNotFound, "绑定不存在")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (d Deps) handleFeishuEvents(w http.ResponseWriter, r *http.Request) {

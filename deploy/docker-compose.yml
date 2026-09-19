@@ -32,6 +32,7 @@ services:
       AIE_DATABASE_URL: postgres://aie:aie@postgres:5432/aie?sslmode=disable
       AIE_SEED_DEMO: "0"
       AIE_CA_DIR: "/data/ca"
+      AIE_SECRET_DIR: "/data/secrets"
     ports:
       - "8080:8080"
       - "9090:9090"

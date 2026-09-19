@@ -372,14 +372,27 @@ html, body {
   border-radius: var(--radius-lg);
   padding: 1.25rem 1.35rem;
   box-shadow: var(--shadow-sm);
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
   position: relative;
   overflow: hidden;
+}
+
+a.stat-card {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+a.stat-card:focus-visible {
+  outline: 2px solid var(--brand-500);
+  outline-offset: 2px;
 }
 
 .stat-card:hover {
   transform: translateY(-2px);
   box-shadow: var(--shadow-md);
+  border-color: var(--brand-300, #93c5fd);
 }
 
 .stat-card::after {
@@ -554,12 +567,14 @@ html, body {
   background: #3b82f6;
 }
 
-.status-neutral {
+.status-neutral,
+.status-muted {
   background: #f1f5f9;
   color: #475569;
   border: 1px solid #e2e8f0;
 }
-.status-neutral .status-dot {
+.status-neutral .status-dot,
+.status-muted .status-dot {
   background: #94a3b8;
 }
 

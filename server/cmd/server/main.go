@@ -110,10 +110,13 @@ func main() {
 	jobSvc := job.NewService(job.NewMemoryStore(), auditor, bus)
 	msgSvc := message.NewService(message.NewMemoryStore(), auditor)
 
-	feishuSender := &feishu.MemorySender{}
 	feishuSvc := feishu.NewService(vault)
-	feishuSvc.Sender = feishuSender
 	notifySvc := notification.New(feishuSvc, bus, jobSvc)
+
+	// 启动飞书官方 WebSocket 长连接网关（若已配置并启用）
+	if feishuSvc.Gateway != nil {
+		_ = feishuSvc.Gateway.Restart(context.Background())
+	}
 
 	presence.OnOffline = func(wsID string) {
 		bus.Publish(context.Background(), eventbus.TypeWorkstationOffline, map[string]string{"workstation_id": wsID})

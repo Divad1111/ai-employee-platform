@@ -1,8 +1,8 @@
 /**
  * Jobs 任务列表与详情时间线 (Timeline)。
  */
-import { FormEvent, useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { apiGet, apiPost } from '../api/client'
 import { StatusBadge } from '../components/StatusBadge'
 import { IconJobs, IconPlus, IconRefresh } from '../components/Icons'
@@ -30,7 +30,17 @@ function isTerminal(status: string) {
   return ['SUCCESS', 'FAILED', 'CANCELLED', 'TIMEOUT'].includes(status)
 }
 
+function isActiveStatus(status: string) {
+  return !isTerminal(status)
+}
+
+function isErrorStatus(status: string) {
+  return ['FAILED', 'TIMEOUT', 'UNKNOWN'].includes(status)
+}
+
 export function JobsPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const filter = searchParams.get('filter') || 'all'
   const [items, setItems] = useState<Job[]>([])
   const [employees, setEmployees] = useState<Array<{ id: string; name: string }>>([])
   const [workspaces, setWorkspaces] = useState<Array<{ id: string; path?: string }>>([])
@@ -57,6 +67,15 @@ export function JobsPage() {
   }
 
   const empMap = Object.fromEntries(employees.map((e) => [e.id, e.name]))
+
+  const filteredItems = useMemo(() => {
+    if (filter === 'active') return items.filter((j) => isActiveStatus(j.status))
+    if (filter === 'errors') return items.filter((j) => isErrorStatus(j.status))
+    return items
+  }, [items, filter])
+
+  const filterLabel =
+    filter === 'active' ? '当前活跃任务' : filter === 'errors' ? '异常与错误任务' : '全部任务'
 
   useEffect(() => {
     void load().catch((e) => setError(String(e)))
@@ -158,8 +177,32 @@ export function JobsPage() {
       <div className="panel">
         <div className="panel-header">
           <div>
-            <h2>全部任务列表</h2>
-            <p>共记录 {items.length} 个任务状态生命周期</p>
+            <h2>任务列表 · {filterLabel}</h2>
+            <p>
+              共 {filteredItems.length} 条
+              {filter !== 'all' ? `（已从 ${items.length} 条中筛选）` : ''}
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            {(
+              [
+                ['all', '全部'],
+                ['active', '活跃'],
+                ['errors', '异常'],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                className={filter === key ? 'btn-sm' : 'btn-ghost btn-sm'}
+                onClick={() => {
+                  if (key === 'all') setSearchParams({})
+                  else setSearchParams({ filter: key })
+                }}
+              >
+                {label}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -175,7 +218,7 @@ export function JobsPage() {
               </tr>
             </thead>
             <tbody>
-              {items.map((j) => (
+              {filteredItems.map((j) => (
                 <tr key={j.id}>
                   <td style={{ maxWidth: '400px' }}>
                     <EntityName
@@ -217,9 +260,15 @@ export function JobsPage() {
                   </td>
                 </tr>
               ))}
-              {items.length === 0 ? (
+              {filteredItems.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="empty-tip">暂无任务记录</td>
+                  <td colSpan={5} className="empty-tip">
+                    {filter === 'active'
+                      ? '暂无活跃任务'
+                      : filter === 'errors'
+                        ? '暂无异常或失败任务'
+                        : '暂无任务记录'}
+                  </td>
                 </tr>
               ) : null}
             </tbody>

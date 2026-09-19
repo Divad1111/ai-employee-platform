@@ -80,42 +80,42 @@ export function DashboardPage() {
       {data ? (
         <>
           <div className="stat-grid">
-            <div className="stat-card">
+            <Link to="/employees" className="stat-card" title="查看数字员工">
               <div className="stat-label">数字员工总数</div>
               <div className="stat-value">{data.employees}</div>
-              <div className="stat-sub">注册生效的 AI 员工</div>
-            </div>
-            <div className="stat-card">
+              <div className="stat-sub">注册生效的 AI 员工 →</div>
+            </Link>
+            <Link to="/workstations" className="stat-card" title="查看工作站节点">
               <div className="stat-label">工作站节点</div>
               <div className="stat-value">{data.workstations}</div>
-              <div className="stat-sub">在线: {data.workstations_online} 台</div>
-            </div>
-            <div className="stat-card">
+              <div className="stat-sub">在线: {data.workstations_online} 台 →</div>
+            </Link>
+            <Link to="/workstations" className="stat-card" title="查看在线运行节点">
               <div className="stat-label">在线运行节点</div>
               <div className="stat-value" style={{ color: 'var(--brand-600)' }}>
                 {data.workstations_online}
               </div>
-              <div className="stat-sub">mTLS 长连握手正常</div>
-            </div>
-            <div className="stat-card">
+              <div className="stat-sub">mTLS 长连握手正常 →</div>
+            </Link>
+            <Link to="/jobs" className="stat-card" title="查看全部任务">
               <div className="stat-label">历史任务总数</div>
               <div className="stat-value">{data.jobs}</div>
-              <div className="stat-sub">全生命周期调度</div>
-            </div>
-            <div className="stat-card">
+              <div className="stat-sub">全生命周期调度 →</div>
+            </Link>
+            <Link to="/jobs?filter=active" className="stat-card" title="查看当前活跃任务">
               <div className="stat-label">当前活跃任务</div>
               <div className="stat-value" style={{ color: 'var(--info)' }}>
                 {data.active_jobs}
               </div>
-              <div className="stat-sub">执行或启动排队中</div>
-            </div>
-            <div className="stat-card">
+              <div className="stat-sub">执行或启动排队中 →</div>
+            </Link>
+            <Link to="/jobs?filter=errors" className="stat-card" title="查看异常与错误任务">
               <div className="stat-label">异常与错误</div>
               <div className="stat-value" style={{ color: data.errors > 0 ? 'var(--danger)' : 'var(--text-muted)' }}>
                 {data.errors}
               </div>
-              <div className="stat-sub">失败或超时的任务</div>
-            </div>
+              <div className="stat-sub">失败或超时的任务 →</div>
+            </Link>
           </div>
 
           <div className="panel">
