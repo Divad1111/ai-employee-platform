@@ -1,7 +1,10 @@
 # Control Plane 镜像（多阶段构建）
 # 设计依据：§71、§72
+# 支持 linux/amd64 与 linux/arm64（适配群晖 DSM Container Manager 等平台）
 
-FROM golang:1.24-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS build
+ARG TARGETOS
+ARG TARGETARCH
 ENV GOTOOLCHAIN=auto
 WORKDIR /src
 # gen 为 replace 依赖，需一并拷贝
@@ -14,8 +17,8 @@ COPY gen ./gen
 COPY server ./server
 COPY migrations ./migrations
 WORKDIR /src/server
-RUN CGO_ENABLED=0 go build -o /out/server ./cmd/server \
- && CGO_ENABLED=0 go build -o /out/migrate ./cmd/migrate
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o /out/server ./cmd/server \
+ && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o /out/migrate ./cmd/migrate
 # 预创建数据目录并赋予 nonroot 用户 (UID 65532) 写权限
 RUN mkdir -p /data/ca /data/secrets && chown -R 65532:65532 /data
 

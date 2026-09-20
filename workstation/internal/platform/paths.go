@@ -42,6 +42,11 @@ func Detect() Paths {
 		}
 	}
 
+	// 1.5. 若在系统服务/SYSTEM账户下运行且自身无身份，自动查找宿主机已有用户注册的身份
+	if uRoot := findFirstUserAie(); uRoot != "" {
+		return &devPaths{root: uRoot}
+	}
+
 	// 2. 检查系统标准路径是否存在已注册身份
 	var sysPaths Paths
 	switch runtime.GOOS {

@@ -26,6 +26,7 @@ import (
 	"github.com/ai-employee-platform/workstation/internal/platform"
 	"github.com/ai-employee-platform/workstation/internal/providers"
 	"github.com/ai-employee-platform/workstation/internal/service"
+	"github.com/ai-employee-platform/workstation/internal/termcolor"
 	"github.com/ai-employee-platform/workstation/internal/updater"
 )
 
@@ -224,11 +225,11 @@ func runDoctor(args []string) error {
 	fmt.Print(diagnostics.Format(r.Run()))
 	raw, err := ipcCall("doctor", nil)
 	if err != nil {
-		fmt.Println("Daemon         : \033[31mOFFLINE\033[0m")
+		fmt.Printf("Daemon         : %s\n", termcolor.Red("OFFLINE"))
 		if _, e := identity.Load(paths); e != nil {
-			fmt.Println("Identity       : \033[31mMISSING\033[0m")
+			fmt.Printf("Identity       : %s\n", termcolor.Red("MISSING"))
 		} else {
-			fmt.Println("Identity       : \033[32mOK\033[0m")
+			fmt.Printf("Identity       : %s\n", termcolor.Green("OK"))
 		}
 		return nil
 	}
@@ -241,11 +242,11 @@ func runDoctor(args []string) error {
 	}
 	if err := json.Unmarshal(raw, &doc); err == nil && len(doc.Checks) > 0 {
 		for _, c := range doc.Checks {
-			mark := "\033[31m[" + c.Status + "]\033[0m"
+			mark := termcolor.Red("[" + c.Status + "]")
 			if c.Status == "OK" {
-				mark = "\033[32m[OK]\033[0m"
+				mark = termcolor.Green("[OK]")
 			} else if c.Status == "WARN" {
-				mark = "\033[33m[WARN]\033[0m"
+				mark = termcolor.Yellow("[WARN]")
 			}
 			fmt.Printf("%s %s — %s\n", mark, c.Name, c.Detail)
 		}
@@ -570,9 +571,9 @@ func runPing(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("Control Plane : \033[32mOK\033[0m")
-	fmt.Println("TLS           : \033[32mOK\033[0m")
-	fmt.Println("mTLS          : \033[32mOK\033[0m")
+	fmt.Printf("Control Plane : %s\n", termcolor.Green("OK"))
+	fmt.Printf("TLS           : %s\n", termcolor.Green("OK"))
+	fmt.Printf("mTLS          : %s\n", termcolor.Green("OK"))
 	fmt.Printf("Server Time   : %d\n", resp.ServerUnixMs)
 	fmt.Printf("Sequence      : %d\n", resp.CurrentCommandSequence)
 	fmt.Printf("Nonce         : %s\n", resp.Nonce)

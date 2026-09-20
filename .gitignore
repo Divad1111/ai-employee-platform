@@ -40,9 +40,14 @@ Thumbs.db
 *.log
 *.db
 *.db-journal
+data/
+deploy/data/
+deploy/.env
+!deploy/.env.example
 
 # Admin build
 admin/dist/
 
 # Proto generated（若改为 CI 生成可不提交；当前允许提交时忽略临时文件）
 *.pb.go~
+

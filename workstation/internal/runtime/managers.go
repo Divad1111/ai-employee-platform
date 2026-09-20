@@ -160,6 +160,8 @@ func (m *Managers) StartSession(ctx context.Context, sessID, employeeID, workspa
 	if w != nil {
 		wsPath = w.Path
 		w.LockedBy = sessID
+	} else if emp != nil && emp.Dir != "" {
+		wsPath = emp.Dir
 	}
 	s := &Session{
 		ID: sessID, EmployeeID: employeeID, WorkspaceID: workspaceID,

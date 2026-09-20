@@ -46,7 +46,7 @@ var transitions = map[string]map[string]bool{
 		StatusStarting: true, StatusCancelled: true,
 	},
 	StatusStarting: {
-		StatusRunning: true, StatusFailed: true, StatusCancelled: true, StatusTimeout: true,
+		StatusRunning: true, StatusSuccess: true, StatusFailed: true, StatusCancelled: true, StatusTimeout: true,
 	},
 	StatusRunning: {
 		StatusSuccess: true, StatusFailed: true, StatusCancelled: true, StatusTimeout: true,
@@ -134,6 +134,7 @@ type Service struct {
 	store Store
 	audit Auditor
 	bus   Bus
+	mu    sync.Mutex
 }
 
 func NewService(store Store, audit Auditor, bus Bus) *Service {
@@ -181,6 +182,9 @@ func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string
 
 // Transition 状态转换并写 Timeline。
 func (s *Service) Transition(ctx context.Context, id, to, actorID, ip string, payload map[string]string) (*Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	j, err := s.store.Get(ctx, id)
 	if err != nil || j == nil {
 		return nil, ErrNotFound
@@ -195,7 +199,7 @@ func (s *Service) Transition(ctx context.Context, id, to, actorID, ip string, pa
 	from := j.Status
 	j.Status = to
 	now := time.Now().UTC()
-	if to == StatusRunning && j.StartedAt.IsZero() {
+	if (to == StatusStarting || to == StatusRunning) && j.StartedAt.IsZero() {
 		j.StartedAt = now
 	}
 	if terminal[to] {
@@ -241,6 +245,8 @@ func (s *Service) List(ctx context.Context) ([]*Job, error) {
 
 // BindWorkstation 绑定执行节点。
 func (s *Service) BindWorkstation(ctx context.Context, jobID, wsID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	j, err := s.store.Get(ctx, jobID)
 	if err != nil || j == nil {
 		return ErrNotFound
@@ -251,6 +257,8 @@ func (s *Service) BindWorkstation(ctx context.Context, jobID, wsID string) error
 
 // BindSession 绑定运行会话。
 func (s *Service) BindSession(ctx context.Context, jobID, sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	j, err := s.store.Get(ctx, jobID)
 	if err != nil || j == nil {
 		return ErrNotFound
@@ -261,6 +269,8 @@ func (s *Service) BindSession(ctx context.Context, jobID, sessionID string) erro
 
 // SetResult 写入 Job 结果文本（Agent 回复）。
 func (s *Service) SetResult(ctx context.Context, jobID, result string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	j, err := s.store.Get(ctx, jobID)
 	if err != nil || j == nil {
 		return ErrNotFound

@@ -193,9 +193,27 @@ func TestAPIEmployeeJobSessionMessageFlow(t *testing.T) {
 		t.Fatal(msg)
 	}
 
+	// 验证 Dashboard 统计异常任务数
+	code, jobFail := doJSON(t, h, http.MethodPost, "/api/jobs", tok, map[string]any{
+		"employee_id": empID, "prompt": "will-fail", "idempotency_key": "idem-fail",
+	})
+	if code != 201 {
+		t.Fatal(jobFail)
+	}
+	failJobID := jobFail["job"].(map[string]any)["id"].(string)
+	for _, st := range []string{"QUEUED", "ASSIGNED", "STARTING", "FAILED"} {
+		code, _ = doJSON(t, h, http.MethodPost, "/api/jobs/"+failJobID+"/transition", tok, map[string]string{"status": st})
+		if code != 200 {
+			t.Fatalf("transition %s: %d", st, code)
+		}
+	}
+
 	code, dash := doJSON(t, h, http.MethodGet, "/api/dashboard", tok, nil)
 	if code != 200 || dash["employees"].(float64) < 1 {
 		t.Fatal(dash)
+	}
+	if dash["errors"].(float64) != 1 {
+		t.Fatalf("dashboard errors expected 1, got %v", dash["errors"])
 	}
 	code, auditResp := doJSON(t, h, http.MethodGet, "/api/audit?limit=20", tok, nil)
 	if code != 200 {

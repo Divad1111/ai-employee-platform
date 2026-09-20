@@ -18,8 +18,12 @@ func TestDaemonIPCPipeline(t *testing.T) {
 	tr := ipc.NewMemoryTransport("daemon-test")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	cfg := config.Default()
+	cfg.Providers = map[string]config.ProviderCfg{
+		"cursor": {Enabled: true, Path: "agent-fake"},
+	}
 	d := daemon.New(daemon.Options{
-		Paths: platform.Detect(), Config: config.Default(),
+		Paths: platform.Detect(), Config: cfg,
 		Transport: tr, SkipConnect: true,
 	})
 	go func() { _ = d.Run(ctx) }()

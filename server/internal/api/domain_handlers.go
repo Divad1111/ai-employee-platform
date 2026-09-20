@@ -7,6 +7,7 @@ import (
 
 	"github.com/ai-employee-platform/server/internal/auth"
 	"github.com/ai-employee-platform/server/internal/feishu"
+	"github.com/ai-employee-platform/server/internal/job"
 	"github.com/ai-employee-platform/server/internal/permission"
 )
 
@@ -23,24 +24,22 @@ func (d Deps) handleDashboard(w http.ResponseWriter, r *http.Request, _ *auth.Se
 		if v.Status == "ONLINE" {
 			online++
 		}
-		if v.CertStatus == "REVOKED" {
-			errors++
-		}
 	}
 	activeJobs := make([]any, 0)
 	for _, j := range jobs {
 		st := string(j.Status)
-		if st == "SUCCESS" || st == "FAILED" || st == "CANCELLED" || st == "TIMEOUT" {
-			continue
+		if st == job.StatusFailed || st == job.StatusTimeout || st == job.StatusUnknown {
+			errors++
 		}
-		if st == "RUNNING" || st == "STARTING" || st == "WAITING_APPROVAL" {
+		if st == job.StatusRunning || st == job.StatusStarting || st == job.StatusWaitingApproval {
 			busy++
 		}
-		activeJobs = append(activeJobs, map[string]any{
-			"id": j.ID, "employee_id": j.EmployeeID, "status": st, "prompt": truncate(j.Prompt, 80),
-		})
-		if len(activeJobs) >= 20 {
-			break
+		if st != job.StatusSuccess && st != job.StatusFailed && st != job.StatusCancelled && st != job.StatusTimeout {
+			if len(activeJobs) < 20 {
+				activeJobs = append(activeJobs, map[string]any{
+					"id": j.ID, "employee_id": j.EmployeeID, "status": st, "prompt": truncate(j.Prompt, 80),
+				})
+			}
 		}
 	}
 	wsRows := make([]any, 0, len(wss))

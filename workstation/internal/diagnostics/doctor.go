@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/ai-employee-platform/workstation/internal/termcolor"
 )
 
 // Check 单项结果。
@@ -120,13 +122,13 @@ func (r *Runner) Fix(dryRun bool) (fixed []string, skipped []string, err error) 
 	return fixed, skipped, nil
 }
 
-// Format 人类可读（支持终端 ANSI 颜色：绿色 OK，红色 FAIL）。
+// Format 人类可读（支持终端 ANSI 颜色：绿色 OK，红色 FAIL；不支持时自动降级纯文本）。
 func Format(rep Report) string {
 	var b strings.Builder
 	for _, c := range rep.Checks {
-		mark := "\033[31m[FAIL]\033[0m"
+		mark := termcolor.Red("[FAIL]")
 		if c.OK {
-			mark = "\033[32m[OK]\033[0m"
+			mark = termcolor.Green("[OK]")
 		}
 		fmt.Fprintf(&b, "%s %s — %s\n", mark, c.Name, c.Detail)
 	}

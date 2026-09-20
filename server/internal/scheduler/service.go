@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -207,7 +208,11 @@ func (s *Service) Tick(ctx context.Context) (scheduled int) {
 	for _, j := range list {
 		// 检查长时间卡在 STARTING 的 Job（> 60秒）：超时失败并释放工作站并发槽位
 		if j.Status == job.StatusStarting {
-			if now.Sub(j.CreatedAt) > 60*time.Second {
+			startedAt := j.StartedAt
+			if startedAt.IsZero() {
+				startedAt = j.CreatedAt
+			}
+			if now.Sub(startedAt) > 60*time.Second {
 				_, _ = s.Jobs.Transition(ctx, j.ID, job.StatusFailed, "scheduler", "", map[string]string{
 					"reason": "工作站节点启动超时 (60s 无响应)",
 				})
@@ -220,6 +225,13 @@ func (s *Service) Tick(ctx context.Context) (scheduled int) {
 		if j.Status == job.StatusCreated || j.Status == job.StatusQueued {
 			if _, err := s.ScheduleJob(ctx, j.ID); err == nil {
 				scheduled++
+			} else {
+				fmt.Printf("[Scheduler] ScheduleJob(%s) 失败: %v (wsID=%s online=%v)\n", j.ID, err, j.WorkstationID, func() bool {
+					if j.WorkstationID != "" {
+						return s.isOnline(j.WorkstationID)
+					}
+					return false
+				}())
 			}
 		}
 	}

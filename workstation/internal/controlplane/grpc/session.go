@@ -27,6 +27,7 @@ type Session struct {
 	HeartbeatInterval time.Duration
 	AgentVersion      string
 	OnCommand         func(ctx context.Context, cmd *aiev1.Command) error
+	Stats             heartbeat.StatsFunc
 
 	mu     sync.Mutex
 	stream aiev1.WorkerService_ConnectClient
@@ -129,6 +130,7 @@ func (s *Session) runOnce(ctx context.Context) error {
 		WorkstationID: s.Client.wsID,
 		Version:       s.AgentVersion,
 		Interval:      s.HeartbeatInterval,
+		Stats:         s.Stats,
 		Send: func(c context.Context, h *aiev1.Heartbeat) error {
 			return s.send(c, &aiev1.WorkerToServer{Body: &aiev1.WorkerToServer_Heartbeat{Heartbeat: h}})
 		},

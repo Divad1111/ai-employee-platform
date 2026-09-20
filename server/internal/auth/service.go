@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -262,10 +263,8 @@ func (s *Service) InitAdmin(ctx context.Context, username, password, display, ip
 	if display == "" {
 		display = "系统管理员"
 	}
-	rawToken, _ := randomToken(4)
-	userID := "user-admin-" + rawToken
 	u := &User{
-		ID:           userID,
+		ID:           newUUID(),
 		Username:     username,
 		PasswordHash: hash,
 		DisplayName:  display,
@@ -398,7 +397,7 @@ func (m *MemoryUserStore) SeedAdmin(username, password, display string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.users[username] = &User{
-		ID:           "user-admin",
+		ID:           newUUID(),
 		Username:     username,
 		PasswordHash: hash,
 		DisplayName:  display,
@@ -521,3 +520,12 @@ func (m *MemorySessionStore) Delete(_ context.Context, token string) error {
 	delete(m.data, token)
 	return nil
 }
+
+func newUUID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+

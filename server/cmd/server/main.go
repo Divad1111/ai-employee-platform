@@ -21,6 +21,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/auth"
 	"github.com/ai-employee-platform/server/internal/certca"
 	"github.com/ai-employee-platform/server/internal/config"
+	"github.com/ai-employee-platform/server/internal/database"
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/enrollment"
 	"github.com/ai-employee-platform/server/internal/eventbus"
@@ -50,15 +51,42 @@ func main() {
 
 	auditor := audit.NewMemory()
 	bus := eventbus.New(500)
-	users := auth.NewMemoryUserStore()
+
+	var (
+		users       auth.UserStore        = auth.NewMemoryUserStore()
+		webSessions auth.SessionStore     = auth.NewMemorySessionStore()
+		empStore    employee.Store        = employee.NewMemoryStore()
+		wsStore     workspace.Store       = workspace.NewMemoryStore()
+		sessStore   session.Store         = session.NewMemoryStore()
+		jobStore    job.Store             = job.NewMemoryStore()
+		wsMetaStore workstation.MetaStore = workstation.NewMemoryMeta()
+	)
+
+	if cfg.DatabaseURL != "" {
+		db, err := database.Open(cfg.DatabaseURL)
+		if err != nil {
+			fmt.Printf("⚠️ 连接 PostgreSQL 失败 (%v)，回退到内存存储\n", err)
+		} else {
+			fmt.Println("✅ 数据库: 已连接 PostgreSQL，启用全量持久化 (Users, Employees, Workspaces, Jobs, Sessions, Workstations)")
+			defer db.Close()
+			users = db.NewUserStore()
+			webSessions = db.NewWebSessionStore()
+			empStore = db.NewEmployeeStore()
+			wsStore = db.NewWorkspaceStore()
+			sessStore = db.NewSessionStore()
+			jobStore = db.NewJobStore()
+			wsMetaStore = db.NewWorkstationMetaStore()
+		}
+	}
+
 	if getenv("AIE_DEV_SEED_ADMIN", "0") == "1" {
 		adminUser := getenv("AIE_ADMIN_USER", "admin")
 		adminPass := getenv("AIE_ADMIN_PASSWORD", "admin123")
-		if err := users.SeedAdmin(adminUser, adminPass, "Administrator"); err != nil {
-			fatal("初始化管理员失败: %v", err)
+		if seeder, ok := users.(interface{ SeedAdmin(u, p, d string) error }); ok {
+			_ = seeder.SeedAdmin(adminUser, adminPass, "Administrator")
 		}
 	}
-	authSvc := auth.NewService(users, auth.NewMemorySessionStore(), auditor)
+	authSvc := auth.NewService(users, webSessions, auditor)
 
 	caDir := getenv("AIE_CA_DIR", "/var/lib/aie/ca")
 	ca, err := certca.LoadOrNewAuthority(caDir)
@@ -83,9 +111,7 @@ func main() {
 	}
 
 	presence := reliability.NewPresence(5, 15)
-	empStore := employee.NewMemoryStore()
 	empSvc := employee.NewService(empStore, auditor, bus)
-	wsStore := workspace.NewMemoryStore()
 	wsSvc := workspace.NewService(wsStore, auditor)
 	wsSvc.SetBinder(workspace.EmployeeBridge{
 		GetByWorkspace: func(ctx context.Context, wsID string) (string, error) {
@@ -105,9 +131,9 @@ func main() {
 			return empStore.Save(ctx, e)
 		},
 	})
-	wsNodeSvc := workstation.NewService(ca, presence, nil)
-	sessSvc := session.NewService(session.NewMemoryStore(), auditor, bus)
-	jobSvc := job.NewService(job.NewMemoryStore(), auditor, bus)
+	wsNodeSvc := workstation.NewService(ca, presence, wsMetaStore)
+	sessSvc := session.NewService(sessStore, auditor, bus)
+	jobSvc := job.NewService(jobStore, auditor, bus)
 	msgSvc := message.NewService(message.NewMemoryStore(), auditor)
 
 	feishuSvc := feishu.NewService(vault)
@@ -218,6 +244,9 @@ func main() {
 				}
 				uj, err := jobSvc.Transition(ctx, jobID, job.StatusSuccess, "workstation", wsID, payload)
 				sched.Release(wsID)
+				if err != nil {
+					fmt.Printf("[Server] ⚠️ Transition to SUCCESS 失败 (job=%s): %v\n", jobID, err)
+				}
 				if err == nil && uj != nil {
 					if uj.Result == "" && payload["reply"] != "" {
 						uj.Result = payload["reply"]
@@ -233,6 +262,9 @@ func main() {
 				}
 				uj, err := jobSvc.Transition(ctx, jobID, job.StatusFailed, "workstation", wsID, payload)
 				sched.Release(wsID)
+				if err != nil {
+					fmt.Printf("[Server] ⚠️ Transition to FAILED 失败 (job=%s): %v\n", jobID, err)
+				}
 				if err == nil && uj != nil {
 					_ = notifySvc.OnJobTerminal(ctx, uj)
 				}

@@ -1,57 +1,81 @@
 # deploy/docker-compose.yml
-# V1：postgres + control-plane + admin-web；不引入 Redis。
-# 设计依据：§71。
+# AI Employee Platform 中心服务器栈
+# 支持直接使用镜像部署（群晖 DSM Container Manager / 生产环境）与本地源码构建部署
 
 services:
   postgres:
     image: postgres:16-alpine
     container_name: aie-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: aie
-      POSTGRES_PASSWORD: aie
-      POSTGRES_DB: aie
+      POSTGRES_USER: ${POSTGRES_USER:-aie}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aie}
+      POSTGRES_DB: ${POSTGRES_DB:-aie}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - aie_pg_data:/var/lib/postgresql/data
+      # 持久化数据库存储映射到本地目录，镜像更新/重新拉取不丢失配置与业务数据
+      - ${AIE_PG_DATA_DIR:-./data/postgres}:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aie -d aie"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aie} -d ${POSTGRES_DB:-aie}"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  control-plane:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.server
-    container_name: aie-control-plane
-    environment:
-      AIE_ENV: production
-      AIE_HTTP_ADDR: ":8080"
-      AIE_GRPC_ADDR: ":9090"
-      AIE_DATABASE_URL: postgres://aie:aie@postgres:5432/aie?sslmode=disable
-      AIE_SEED_DEMO: "0"
-      AIE_CA_DIR: "/data/ca"
-      AIE_SECRET_DIR: "/data/secrets"
-    ports:
-      - "8080:8080"
-      - "9090:9090"
+  # 初始化宿主机数据目录权限（适配 Linux / 群晖 DSM 挂载权限）
+  init-data:
+    image: busybox:latest
+    container_name: aie-init-data
+    restart: "no"
+    command: >
+      sh -c "mkdir -p /data/ca /data/secrets && chown -R 65532:65532 /data 2>/dev/null || true; chmod 700 /data/secrets 2>/dev/null || true"
     volumes:
-      - aie_data:/data
+      - ${AIE_SERVER_DATA_DIR:-./data/server}:/data
+
+  # 数据库自动迁移：在 Postgres 就绪后自动同步最新表结构，升级镜像后零人工配置
+  migrate:
+    image: ${AIE_CONTROL_PLANE_IMAGE:-aie-control-plane:latest}
+    container_name: aie-migrate
+    restart: "no"
+    entrypoint: ["/app/migrate"]
+    command: ["-dir", "/migrations", "up"]
+    environment:
+      AIE_DATABASE_URL: postgres://${POSTGRES_USER:-aie}:${POSTGRES_PASSWORD:-aie}@postgres:5432/${POSTGRES_DB:-aie}?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy
 
-  admin-web:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.admin
-    container_name: aie-admin
+  control-plane:
+    image: ${AIE_CONTROL_PLANE_IMAGE:-aie-control-plane:latest}
+    container_name: aie-control-plane
+    restart: unless-stopped
+    environment:
+      AIE_ENV: ${AIE_ENV:-production}
+      AIE_HTTP_ADDR: ":8080"
+      AIE_GRPC_ADDR: ":9090"
+      AIE_DATABASE_URL: postgres://${POSTGRES_USER:-aie}:${POSTGRES_PASSWORD:-aie}@postgres:5432/${POSTGRES_DB:-aie}?sslmode=disable
+      AIE_SEED_DEMO: "${AIE_SEED_DEMO:-0}"
+      AIE_CA_DIR: "/data/ca"
+      AIE_SECRET_DIR: "/data/secrets"
     ports:
-      - "8088:80"
+      - "${AIE_HTTP_PORT:-8080}:8080"
+      - "${AIE_GRPC_PORT:-9090}:9090"
+    volumes:
+      # 持久化 CA 根证书与私钥、机密凭据，保证镜像更新后已接入工作站 mTLS 仍长期有效
+      - ${AIE_SERVER_DATA_DIR:-./data/server}:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      init-data:
+        condition: service_completed_successfully
+
+  admin-web:
+    image: ${AIE_ADMIN_IMAGE:-aie-admin:latest}
+    container_name: aie-admin
+    restart: unless-stopped
+    ports:
+      - "${AIE_ADMIN_PORT:-8088}:80"
     depends_on:
       - control-plane
-
-volumes:
-  aie_pg_data:
-  aie_data:

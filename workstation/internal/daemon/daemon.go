@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/ai-employee-platform/workstation/internal/config"
 	"github.com/ai-employee-platform/workstation/internal/controlplane/ack"
 	grpcclient "github.com/ai-employee-platform/workstation/internal/controlplane/grpc"
+	"github.com/ai-employee-platform/workstation/internal/controlplane/heartbeat"
 	"github.com/ai-employee-platform/workstation/internal/controlplane/outbox"
 	"github.com/ai-employee-platform/workstation/internal/controlplane/reconnect"
 	"github.com/ai-employee-platform/workstation/internal/identity"
@@ -70,7 +73,7 @@ func New(opts Options) *Daemon {
 	if opts.Journal == nil {
 		opts.Journal = ack.NewMemoryJournal()
 	}
-	proc := process.NewManager("agent", "agent.exe", "agent-fake", "cursor-fake", "codex", "codex.exe", "codex-fake")
+	proc := process.NewManager("agent", "agent.exe", "agent.cmd", "agent-fake", "cursor-fake", "codex", "codex.exe", "codex-fake")
 	reg := providers.NewRegistry()
 	curPath, codPath := "", ""
 	if opts.Config.Providers != nil {
@@ -197,6 +200,20 @@ func (d *Daemon) maintainControlPlane(ctx context.Context) {
 		sess := grpcclient.NewSession(cli, d.Opts.Journal)
 		sess.Outbox = &outbox.Dispatcher{Store: d.Outbox}
 		sess.HeartbeatInterval = 5 * time.Second
+		sess.Stats = func() heartbeat.Stats {
+			e, _, s, _ := d.Runtime.Snapshot()
+			sample := d.Sample
+			if sample.CPUPercent == 0 && sample.MemoryPercent == 0 && d.Monitor != nil {
+				sample = d.Monitor.Sample()
+			}
+			return heartbeat.Stats{
+				Employees: uint32(e),
+				Sessions:  uint32(s),
+				CPU:       sample.CPUPercent,
+				Memory:    sample.MemoryPercent,
+				Disk:      sample.DiskPercent,
+			}
+		}
 		sess.OnCommand = func(cctx context.Context, cmd *aiev1.Command) error {
 			return d.handleCommand(cctx, sess, cmd)
 		}
@@ -396,7 +413,67 @@ func (d *Daemon) doctor() ipc.Response {
 		p, _ := d.Registry.Get(name)
 		info, _ := p.Detect(context.Background())
 		if info != nil && info.Path != "" {
-			add("provider."+name, "OK", info.Path)
+			detail := info.Path
+			status := "OK"
+			if name == "cursor" {
+				loggedIn := false
+				email := ""
+				home, _ := os.UserHomeDir()
+				cfgCandidates := []string{filepath.Join(home, ".cursor", "cli-config.json")}
+				sysDrive := os.Getenv("SystemDrive")
+				if sysDrive == "" {
+					sysDrive = "C:"
+				}
+				if entries, rerr := os.ReadDir(filepath.Join(sysDrive, "\\Users")); rerr == nil {
+					for _, entry := range entries {
+						if entry.IsDir() && entry.Name() != "Public" && entry.Name() != "Default" && entry.Name() != "All Users" {
+							cfgCandidates = append(cfgCandidates, filepath.Join(sysDrive, "\\Users", entry.Name(), ".cursor", "cli-config.json"))
+						}
+					}
+				}
+				for _, cf := range cfgCandidates {
+					if data, rerr := os.ReadFile(cf); rerr == nil {
+						var parsed struct {
+							AuthInfo struct {
+								Email string `json:"email"`
+							} `json:"authInfo"`
+						}
+						if json.Unmarshal(data, &parsed) == nil && parsed.AuthInfo.Email != "" {
+							loggedIn = true
+							email = parsed.AuthInfo.Email
+							break
+						}
+					}
+				}
+
+				if loggedIn {
+					status = "OK"
+					detail = fmt.Sprintf("%s (已登录授权: %s)", info.Path, email)
+				} else {
+					checkCtx, checkCancel := context.WithTimeout(context.Background(), 8*time.Second)
+					cmd := exec.CommandContext(checkCtx, info.Path, "status")
+					if len(cfgCandidates) > 0 {
+						targetHome := filepath.Dir(filepath.Dir(cfgCandidates[len(cfgCandidates)-1]))
+						cmd.Env = append(os.Environ(),
+							"USERPROFILE="+targetHome,
+							"HOME="+targetHome,
+							"LOCALAPPDATA="+filepath.Join(targetHome, "AppData", "Local"),
+							"APPDATA="+filepath.Join(targetHome, "AppData", "Roaming"),
+						)
+					}
+					out, err := cmd.CombinedOutput()
+					checkCancel()
+					outStr := string(out)
+					if err == nil && strings.Contains(outStr, "Logged in as") {
+						status = "OK"
+						detail = fmt.Sprintf("%s (%s)", info.Path, strings.TrimSpace(outStr))
+					} else {
+						status = "WARN"
+						detail = fmt.Sprintf("%s (未登录授权，请在终端执行 'agent login')", info.Path)
+					}
+				}
+			}
+			add("provider."+name, status, detail)
 		} else {
 			add("provider."+name, "WARN", "未检测到本机安装（可用 Fake ACP）")
 		}

@@ -10,8 +10,15 @@ import (
 	"github.com/ai-employee-platform/workstation/internal/app"
 )
 
-// main 解析子命令并交给 app 层执行。
+// main 解析子命令并交给 app 层执行（若作为 Windows 服务启动则进入 SCM Dispatcher）。
 func main() {
+	if handled, err := checkWindowsService(); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Windows 服务错误: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := app.Run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "aew 错误: %v\n", err)
 		os.Exit(1)

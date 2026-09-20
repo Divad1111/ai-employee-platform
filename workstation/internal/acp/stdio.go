@@ -122,16 +122,19 @@ func (s *StdioSession) Start(ctx context.Context) error {
 		_ = s.Stop(ctx)
 		return fmt.Errorf("%w: initialize: %v", ErrHandshake, err)
 	}
-	if _, err := s.call(ctx, "authenticate", map[string]any{"methodId": "cursor_login"}); err != nil {
+	authCtx, authCancel := context.WithTimeout(ctx, 10*time.Second)
+	_, authErr := s.call(authCtx, "authenticate", map[string]any{"methodId": "cursor_login"})
+	authCancel()
+	if authErr != nil {
 		// 若本机已 agent login，部分版本仍要求该方法；失败则继续尝试 session/new
 		select {
-		case s.events <- Event{Type: "auth_warn", Payload: []byte(err.Error())}:
+		case s.events <- Event{Type: "auth_warn", Payload: []byte(authErr.Error())}:
 		default:
 		}
 	}
 	cwd := s.workDir
 	if cwd == "" {
-		cwd, _ = os.Getwd()
+		cwd = os.TempDir()
 	}
 	raw, err := s.call(ctx, "session/new", map[string]any{
 		"cwd":        cwd,
@@ -139,6 +142,9 @@ func (s *StdioSession) Start(ctx context.Context) error {
 	})
 	if err != nil {
 		_ = s.Stop(ctx)
+		if strings.Contains(err.Error(), "Authentication required") {
+			return fmt.Errorf("Cursor Agent 未授权：请在工作站终端运行 'agent login' 完成登录授权后再执行任务 (详情: %v)", err)
+		}
 		return fmt.Errorf("%w: session/new: %v", ErrHandshake, err)
 	}
 	var newRes struct {

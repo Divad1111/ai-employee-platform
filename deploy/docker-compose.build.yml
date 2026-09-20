@@ -1,0 +1,20 @@
+# deploy/docker-compose.build.yml
+# 本地源码构建镜像时的 Compose 覆盖配置
+# 使用方法：
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build -d
+
+services:
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+
+  control-plane:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+
+  admin-web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.admin

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/ai-employee-platform/workstation/internal/acp"
@@ -77,6 +78,39 @@ func (p *Provider) Detect(ctx context.Context) (*providers.InstallInfo, error) {
 	return &providers.InstallInfo{Name: "cursor", Path: path, Version: "agent-cli"}, nil
 }
 
+func findUserHome() string {
+	home, _ := os.UserHomeDir()
+	if !strings.Contains(strings.ToLower(home), "systemprofile") && home != "" {
+		return home
+	}
+	sysDrive := os.Getenv("SystemDrive")
+	if sysDrive == "" {
+		sysDrive = "C:"
+	}
+	usersDir := filepath.Join(sysDrive, "\\Users")
+	entries, err := os.ReadDir(usersDir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == "Public" || name == "Default" || name == "All Users" || name == "Default User" {
+			continue
+		}
+		candidate := filepath.Join(usersDir, name)
+		if _, err := os.Stat(filepath.Join(candidate, ".cursor", "cli-config.json")); err == nil {
+			return candidate
+		}
+		if _, err := os.Stat(filepath.Join(candidate, ".aie")); err == nil {
+			return candidate
+		}
+	}
+	return ""
+}
+
 // lookupAgent 查找 Cursor CLI `agent` 可执行文件。
 // 官方文档：默认路径 ~/.local/bin/agent；命令为 `agent acp`。
 func lookupAgent() string {
@@ -91,9 +125,33 @@ func lookupAgent() string {
 	switch runtime.GOOS {
 	case "windows":
 		candidates = append(candidates,
-			filepath.Join(os.Getenv("LOCALAPPDATA"), "cursor-agent", "agent.exe"),
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "cursor-agent", "agent.cmd"),
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "cursor-agent", "cursor-agent.cmd"),
+			filepath.Join(home, ".local", "bin", "agent.cmd"),
 			filepath.Join(home, ".local", "bin", "agent.exe"),
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "cursor-agent", "agent.exe"),
 		)
+		sysDrive := os.Getenv("SystemDrive")
+		if sysDrive == "" {
+			sysDrive = "C:"
+		}
+		if entries, err := os.ReadDir(filepath.Join(sysDrive, "\\Users")); err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				u := entry.Name()
+				if u == "Public" || u == "Default" || u == "All Users" {
+					continue
+				}
+				candidates = append(candidates,
+					filepath.Join(sysDrive, "\\Users", u, "AppData", "Local", "cursor-agent", "agent.cmd"),
+					filepath.Join(sysDrive, "\\Users", u, "AppData", "Local", "cursor-agent", "cursor-agent.cmd"),
+					filepath.Join(sysDrive, "\\Users", u, ".local", "bin", "agent.cmd"),
+					filepath.Join(sysDrive, "\\Users", u, ".local", "bin", "agent.exe"),
+				)
+			}
+		}
 	}
 	for _, c := range candidates {
 		if st, err := os.Stat(c); err == nil && !st.IsDir() {
@@ -147,7 +205,16 @@ func (p *Provider) Start(ctx context.Context, spec providers.StartSpec) (provide
 	if useFake {
 		acpSess = p.ACP.Open(sid)
 	} else {
-		acpSess = acp.NewStdioSession(sid, info.Path, []string{"acp"}, spec.WorkspacePath)
+		stdioSess := acp.NewStdioSession(sid, info.Path, []string{"acp"}, spec.WorkspacePath)
+		if uHome := findUserHome(); uHome != "" {
+			stdioSess.SetEnv([]string{
+				"USERPROFILE=" + uHome,
+				"HOME=" + uHome,
+				"APPDATA=" + filepath.Join(uHome, "AppData", "Roaming"),
+				"LOCALAPPDATA=" + filepath.Join(uHome, "AppData", "Local"),
+			})
+		}
+		acpSess = stdioSess
 	}
 	if err := acpSess.Start(ctx); err != nil {
 		p.mu.Lock()

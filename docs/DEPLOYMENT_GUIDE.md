@@ -117,44 +117,45 @@
 
 ## 三、中心服务器安装与部署
 
-### 3.1 Docker 一键容器化部署（生产推荐）
+### 3.1 容器化一键部署（生产 / 群晖 DSM 推荐）
 
-1. **获取代码仓库**：
+平台支持**直接通过发布的多架构容器镜像部署**（无需本地 Go / Node 构建环境，兼容 Linux x86_64 与 ARM64 / 群晖 NAS）。
+
+#### 方式 A：标准宿主机通过镜像部署（推荐）
+1. **获取部署配置**：
+   下载 `deploy/docker-compose.yml` 与 `deploy/.env.example`（或直接克隆仓库）：
    ```bash
-   git clone https://github.com/ai-employee-platform/ai-employee-platform.git
-   cd ai-employee-platform
+   cd deploy
+   cp .env.example .env
    ```
-
-2. **检查环境配置（可选）**：
-   配置文件位于 `deploy/docker-compose.yml`。生产环境下默认已配置为：
-   - `AIE_ENV: production`（正式生产模式，无假数据注入）
-   - `AIE_SEED_DEMO: "0"`（禁用任何演示数据）
-   - `AIE_HTTP_ADDR: ":8080"`
-   - `AIE_GRPC_ADDR: ":9090"`
-
-3. **构建并启动全套容器栈**：
+2. **启动容器栈**：
    ```bash
-   docker compose -f deploy/docker-compose.yml build
-   docker compose -f deploy/docker-compose.yml up -d
+   docker compose pull
+   docker compose up -d
    ```
+   系统将自动：
+   - 映射 `./data/postgres` 持久化保存数据库，更新镜像不丢失任何数据；
+   - 映射 `./data/server` 持久化保存 CA 根证书与私钥，已接入工作站 mTLS 证书长期有效；
+   - 自动启动 `migrate` 容器执行增量数据库表结构迁移。
 
-4. **确认容器运行状态**：
-   ```bash
-   docker compose -f deploy/docker-compose.yml ps
+#### 方式 B：群晖 DSM (Container Manager) 一键部署
+1. 打开群晖 DSM，进入 **Container Manager**。
+2. 进入 **「项目 (Project)」** -> 点击 **「新增」**。
+3. 设定项目名称（如 `ai-employee`），路径选择 NAS 共享文件夹（例如 `/volume1/docker/ai-employee`）。
+4. 来源选择 **「创建 docker-compose.yml」**，将项目中的 `deploy/docker-compose.yml` 内容粘贴。
+5. （可选）在同目录下创建 `.env` 文件，指定群晖本地数据绝对路径：
+   ```env
+   AIE_PG_DATA_DIR=/volume1/docker/ai-employee/data/postgres
+   AIE_SERVER_DATA_DIR=/volume1/docker/ai-employee/data/server
    ```
-   输出应展示全部容器处于运行中：
-   ```
-   NAME                IMAGE                  STATUS                 PORTS
-   aie-admin           deploy-admin-web       Up                     0.0.0.0:8088->80/tcp
-   aie-control-plane   deploy-control-plane   Up                     0.0.0.0:8080->8080/tcp, 0.0.0.0:9090->9090/tcp
-   aie-postgres        postgres:16-alpine     Up (healthy)           0.0.0.0:5432->5432/tcp
-   ```
+6. 点击下一步完成启动。
+7. **零配置更新升级**：在群晖 Container Manager 项目中点击 **“操作” -> “拉取最新映像”** 并重启，系统会自动进行增量数据迁移，已有数据库配置与管理员完全保留！
 
-5. **执行/确认数据库架构迁移（自动初始化）**：
-   数据库首次启动时，可执行内嵌迁移程序确保 34 张标准架构表就绪：
-   ```bash
-   docker exec -i aie-postgres psql -U aie -d aie -c "\dt"
-   ```
+#### 方式 C：本地源码编译构建部署（开发调试）
+```bash
+cd deploy
+docker compose -f docker-compose.yml -f docker-compose.build.yml up --build -d
+```
 
 ---
 
