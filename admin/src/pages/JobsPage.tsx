@@ -7,6 +7,7 @@ import { apiGet, apiPost } from '../api/client'
 import { StatusBadge } from '../components/StatusBadge'
 import { IconJobs, IconPlus, IconRefresh } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
+import { PageFeatureGuide } from '../components/PageFeatureGuide'
 
 type Job = {
   id: string
@@ -121,6 +122,31 @@ export function JobsPage() {
           <span>刷新列表</span>
         </button>
       </header>
+
+      <PageFeatureGuide
+        title="任务流转中心全生命周期调度指引"
+        summary="平台核心调度中心，记录从飞书群聊 @触发、创建分配、工作站接单、Agent 推理执行到产物交付的完整链路。"
+        steps={[
+          {
+            step: '1',
+            title: '触发接入 (Created)',
+            desc: '支持通过飞书长连接 @机器人 派发任务，或在下方控制台手动输入 Prompt 指令一键下发。',
+            tag: '任务入口',
+          },
+          {
+            step: '2',
+            title: '原子调度与锁竞争 (Assigned)',
+            desc: '调度引擎根据员工绑定的工作站与工作区自动选路，完成节点分配与独占槽位锁定。',
+            tag: '并发调度',
+          },
+          {
+            step: '3',
+            title: '执行监控与时间线 (Timeline)',
+            desc: '点击任意任务进入详情，可查看包含每一轮状态迁移、ACP 会话事件与 Agent 真实输出的完整可溯时间线。',
+            tag: '全轨复盘',
+          },
+        ]}
+      />
 
       <div className="panel">
         <div className="panel-header">

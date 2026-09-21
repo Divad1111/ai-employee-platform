@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ai-employee-platform/server/internal/approval"
@@ -215,7 +216,12 @@ func (d Deps) handleAuditEnhanced(w http.ResponseWriter, r *http.Request, _ *aut
 	if limit <= 0 {
 		limit = 50
 	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		q = strings.TrimSpace(r.URL.Query().Get("keyword"))
+	}
 	items := d.Audit.Query(audit.Filter{
+		Keyword:      q,
 		Actor:        r.URL.Query().Get("actor"),
 		Action:       r.URL.Query().Get("action"),
 		ActionPrefix: r.URL.Query().Get("prefix"),
@@ -223,11 +229,33 @@ func (d Deps) handleAuditEnhanced(w http.ResponseWriter, r *http.Request, _ *aut
 		TargetID:     r.URL.Query().Get("target_id"),
 		Limit:        limit,
 	})
-	// 确保 metadata 无明文 secret 值
+	// 确保 metadata 无明文 secret 值，并补充友好操作主体名称
 	for i := range items {
-		if items[i].Metadata != nil {
-			if v, ok := items[i].Metadata["value"]; ok && v != "" && v != "***" {
-				items[i].Metadata["value"] = secret.Redact(v)
+		if items[i].Metadata == nil {
+			items[i].Metadata = map[string]string{}
+		}
+		if v, ok := items[i].Metadata["value"]; ok && v != "" && v != "***" {
+			items[i].Metadata["value"] = secret.Redact(v)
+		}
+		if _, ok := items[i].Metadata["actor_name"]; !ok {
+			switch items[i].ActorType {
+			case "USER":
+				if items[i].Metadata["username"] != "" {
+					items[i].Metadata["actor_name"] = items[i].Metadata["username"] + " (管理员)"
+				} else {
+					items[i].Metadata["actor_name"] = "admin (超级管理员)"
+				}
+			case "SYSTEM":
+				items[i].Metadata["actor_name"] = "系统内核 (System)"
+			case "EMPLOYEE":
+				if d.Employees != nil {
+					if emp, err := d.Employees.Get(r.Context(), items[i].ActorID); err == nil && emp != nil && emp.Name != "" {
+						items[i].Metadata["actor_name"] = emp.Name + " (AI 员工)"
+					}
+				}
+				if items[i].Metadata["actor_name"] == "" {
+					items[i].Metadata["actor_name"] = "AI 员工"
+				}
 			}
 		}
 	}

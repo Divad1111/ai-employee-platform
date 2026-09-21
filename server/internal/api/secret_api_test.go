@@ -131,3 +131,38 @@ func TestRotateRequiresTOTP(t *testing.T) {
 		t.Fatal(ok)
 	}
 }
+
+func TestDeleteSecret(t *testing.T) {
+	h, tok, _, _ := setupM8(t)
+	code, ref := doJSON(t, h, http.MethodPost, "/api/secrets", tok, map[string]string{
+		"name": "delete-me", "value": "secret-value",
+	})
+	if code != 201 {
+		t.Fatal(ref)
+	}
+	id := ref["id"].(string)
+
+	// 1. 未 step-up 删除 -> 应返回 403
+	code, deny := doJSON(t, h, http.MethodDelete, "/api/secrets/"+id, tok, nil)
+	if code != 403 {
+		t.Fatalf("未 step-up 删除应返回 403, 实际: %d %v", code, deny)
+	}
+
+	// 2. step-up (输入管理员密码)
+	code, su := doJSON(t, h, http.MethodPost, "/api/auth/step-up", tok, map[string]string{"password": "admin123"})
+	if code != 200 {
+		t.Fatalf("step-up 失败: %d %v", code, su)
+	}
+
+	// 3. step-up 后删除 -> 应成功 (200)
+	code, del := doJSON(t, h, http.MethodDelete, "/api/secrets/"+id, tok, nil)
+	if code != 200 {
+		t.Fatalf("step-up 后删除失败: %d %v", code, del)
+	}
+
+	// 4. 再次获取 -> 应返回 404
+	code, _ = doJSON(t, h, http.MethodGet, "/api/secrets/"+id, tok, nil)
+	if code != 404 {
+		t.Fatalf("删除后获取应 404, 实际: %d", code)
+	}
+}

@@ -204,6 +204,38 @@ func TestArtifactUploadDownloadHTTP(t *testing.T) {
 	}
 }
 
+func TestDeleteWorkstation_API(t *testing.T) {
+	h, tok, _, _ := setupM9(t)
+
+	// 1. 未 step-up 应 403
+	req := httptest.NewRequest(http.MethodDelete, "/api/workstations/WS-del-1", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("未 step-up 应 403, got %d", rr.Code)
+	}
+
+	// 2. 执行 step-up
+	suReq := httptest.NewRequest(http.MethodPost, "/api/auth/step-up", strings.NewReader(`{"password":"admin123"}`))
+	suReq.Header.Set("Authorization", "Bearer "+tok)
+	suReq.Header.Set("Content-Type", "application/json")
+	suRR := httptest.NewRecorder()
+	h.ServeHTTP(suRR, suReq)
+	if suRR.Code != http.StatusOK {
+		t.Fatalf("step-up 失败: %d %s", suRR.Code, suRR.Body.String())
+	}
+
+	// 3. step-up 后应成功删除
+	req2 := httptest.NewRequest(http.MethodDelete, "/api/workstations/WS-del-1", nil)
+	req2.Header.Set("Authorization", "Bearer "+tok)
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("step-up 后应成功删除: %d %s", rr2.Code, rr2.Body.String())
+	}
+}
+
 func jsonUnmarshal(b []byte, v any) {
 	_ = json.Unmarshal(b, v)
 }

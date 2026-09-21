@@ -1,11 +1,9 @@
-/**
- * Workstations 工作站节点管理、监控与一键接入引导。
- */
 import { useEffect, useState } from 'react'
-import { apiGet, apiPost, apiPatch } from '../api/client'
+import { apiDelete, apiGet, apiPatch, apiPost } from '../api/client'
 import { StatusBadge } from '../components/StatusBadge'
 import { EntityName } from '../components/EntityName'
-import { IconServer, IconRefresh, IconPlus, IconCheckCircle, IconTerminal } from '../components/Icons'
+import { IconAlertTriangle, IconCheckCircle, IconPlus, IconRefresh, IconServer, IconTerminal, IconTrash } from '../components/Icons'
+import { PageFeatureGuide } from '../components/PageFeatureGuide'
 
 type WS = {
   id: string
@@ -29,6 +27,26 @@ export function WorkstationsPage() {
   const [items, setItems] = useState<WS[]>([])
   const [loading, setLoading] = useState(false)
   const [showEnroll, setShowEnroll] = useState(false)
+  const [msg, setMsg] = useState('')
+
+  // 删除相关状态
+  const [deleteTarget, setDeleteTarget] = useState<WS | null>(null)
+  const [adminPassword, setAdminPassword] = useState('')
+  const [totpCode, setTotpCode] = useState('')
+  const [totpEnabled, setTotpEnabled] = useState(false)
+  const [showManualTotp, setShowManualTotp] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [modalError, setModalError] = useState('')
+
+  const checkTotpStatus = () => {
+    void apiGet<{ enabled: boolean }>('/auth/totp')
+      .then((res) => setTotpEnabled(!!res.enabled))
+      .catch(() => setTotpEnabled(false))
+  }
+
+  useEffect(() => {
+    checkTotpStatus()
+  }, [])
 
   // 令牌生成表单
   const [label, setLabel] = useState('开发计算节点')
@@ -60,6 +78,46 @@ export function WorkstationsPage() {
       await load()
     } catch (e: unknown) {
       alert('重命名失败: ' + (e instanceof Error ? e.message : '未知错误'))
+    }
+  }
+
+  function openDeleteModal(ws: WS) {
+    setDeleteTarget(ws)
+    setAdminPassword('')
+    setTotpCode('')
+    setModalError('')
+    setShowManualTotp(false)
+    checkTotpStatus()
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return
+    setDeleting(true)
+    setModalError('')
+    try {
+      if (adminPassword.trim()) {
+        await apiPost('/auth/step-up', {
+          password: adminPassword.trim(),
+          totp: totpCode.trim() || undefined,
+        })
+      }
+      await apiDelete(`/workstations/${deleteTarget.id}`)
+      setMsg(`工作站计算节点 [${deleteTarget.name}] (${deleteTarget.id}) 已安全移除，数字证书已自动吊销`)
+      setDeleteTarget(null)
+      await load()
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : '删除工作站失败'
+      if (errMsg.includes('TOTP') || errMsg.includes('动态验证码') || errMsg.includes('动态口令') || errMsg.includes('双因子')) {
+        setTotpEnabled(true)
+        setShowManualTotp(true)
+        setModalError(errMsg)
+      } else if (errMsg.includes('step-up') || errMsg.includes('二次认证')) {
+        setModalError('此操作属于高危操作，请输入管理员登录密码进行二次身份核验')
+      } else {
+        setModalError(errMsg)
+      }
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -138,6 +196,37 @@ aew service status`
           </button>
         </div>
       </header>
+
+      {msg ? (
+        <div className="badge badge-ok" style={{ display: 'block', padding: '0.65rem 1rem', marginBottom: '1rem', fontSize: '0.86rem' }}>
+          ✅ {msg}
+        </div>
+      ) : null}
+
+      <PageFeatureGuide
+        title="工作站节点接入、证书分发与保活架构指引"
+        summary="Workstation 是连接在物理主机或云虚拟机上的轻量级执行节点（aew），通过纯出站双向长连接实现零外网开放端口的绝对安全通信。"
+        steps={[
+          {
+            step: '1',
+            title: '生成一性接入令牌 (Enrollment)',
+            desc: '在后台生成包含有效期的临时注册 Token，为新机器注入信任基础。',
+            tag: '凭证下发',
+          },
+          {
+            step: '2',
+            title: 'mTLS 双向证书颁发与落盘',
+            desc: '工作站执行 aew register，由内置 CA 自动签署客户端 X.509 证书与公私钥对，彻底摒弃静态口令。',
+            tag: '身份认证',
+          },
+          {
+            step: '3',
+            title: '仅出站长连接与心跳遥测',
+            desc: '工作站常驻服务通过 TLS 端口 9090 主动上联，无需开放公网端口，秒级遥测 CPU、内存与 Agent 活跃状态。',
+            tag: '反向通道',
+          },
+        ]}
+      />
 
       {/* 节点接入向导与令牌生成面板 */}
       {showEnroll && (
@@ -331,6 +420,7 @@ aew service status`
                 <th>证书信任状态</th>
                 <th>客户端证书指纹 (Fingerprint)</th>
                 <th>最近心跳通信时间</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -348,15 +438,6 @@ aew service status`
                           待命名
                         </span>
                       )}
-                      <button
-                        type="button"
-                        className="btn-ghost btn-sm"
-                        title="点击重命名节点名称"
-                        style={{ padding: '0.15rem 0.4rem', fontSize: '0.72rem', height: 'auto', lineHeight: '1.2' }}
-                        onClick={() => void renameWorkstation(w.id, w.name)}
-                      >
-                        ✏️ 改名
-                      </button>
                     </div>
                   </td>
                   <td>
@@ -374,6 +455,27 @@ aew service status`
                     {w.last_heartbeat_at && !w.last_heartbeat_at.startsWith('0001')
                       ? new Date(w.last_heartbeat_at).toLocaleString()
                       : '等待初次心跳'}
+                  </td>
+                  <td>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      <button
+                        type="button"
+                        className="btn-ghost btn-sm"
+                        title="点击重命名节点名称"
+                        onClick={() => void renameWorkstation(w.id, w.name)}
+                      >
+                        ✏️ 改名
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-danger btn-sm"
+                        title="从平台删除该工作站并自动吊销证书"
+                        onClick={() => openDeleteModal(w)}
+                      >
+                        <IconTrash size={13} />
+                        <span>删除</span>
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -398,6 +500,199 @@ aew service status`
           </table>
         </div>
       </div>
+
+      {/* 删除工作站高危操作二次确认弹窗 */}
+      {deleteTarget ? (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.65)',
+            backdropFilter: 'blur(4px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+          }}
+        >
+          <div
+            style={{
+              background: '#ffffff',
+              borderRadius: '12px',
+              padding: '1.75rem',
+              width: '490px',
+              maxWidth: '92vw',
+              boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)',
+              border: '1px solid #fee2e2',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '1rem' }}>
+              <IconAlertTriangle size={22} style={{ color: '#ef4444' }} />
+              <h3 style={{ margin: 0, fontSize: '1.15rem', color: '#b91c1c' }}>
+                安全告警：移除工作站计算节点
+              </h3>
+            </div>
+
+            <p style={{ fontSize: '0.86rem', color: 'var(--text-secondary)', lineHeight: 1.6, margin: '0 0 1rem' }}>
+              移除工作站节点属于<strong>不可逆关键运维操作</strong>：
+            </p>
+            <ul style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', paddingLeft: '1.2rem', margin: '0 0 1rem', lineHeight: 1.6 }}>
+              <li>系统将自动<strong>吊销（Revoke）该工作站的 mTLS 客户端证书</strong>，切断握手通信；</li>
+              <li>已绑定到该工作站的数字员工将自动解除算力映射；</li>
+              <li><strong>若该计算节点当前有正在执行中的任务，系统将拒绝删除以保护任务执行完整性。</strong></li>
+            </ul>
+
+            <div
+              style={{
+                background: '#fef2f2',
+                border: '1px solid #fecaca',
+                borderRadius: '8px',
+                padding: '0.75rem 1rem',
+                marginBottom: '1rem',
+                fontSize: '0.85rem',
+              }}
+            >
+              <div style={{ color: '#991b1b', marginBottom: '0.25rem' }}>
+                <strong>待移除节点：</strong>
+                <span style={{ color: '#b91c1c', fontWeight: 700 }}>{deleteTarget.name}</span>
+              </div>
+              <div style={{ color: '#7f1d1d', fontSize: '0.78rem', fontFamily: 'monospace' }}>
+                节点 ID: {deleteTarget.id}
+              </div>
+              {deleteTarget.fingerprint ? (
+                <div style={{ color: '#7f1d1d', fontSize: '0.75rem', fontFamily: 'monospace', marginTop: '0.2rem' }}>
+                  证书指纹: {deleteTarget.fingerprint.slice(0, 24)}…
+                </div>
+              ) : null}
+            </div>
+
+            {modalError ? (
+              <div
+                style={{
+                  background: '#fef2f2',
+                  border: '1px solid #fca5a5',
+                  color: '#dc2626',
+                  padding: '0.65rem 0.85rem',
+                  borderRadius: '6px',
+                  fontSize: '0.85rem',
+                  fontWeight: 600,
+                  marginBottom: '1rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                }}
+              >
+                <IconAlertTriangle size={18} style={{ color: '#dc2626', flexShrink: 0 }} />
+                <span>{modalError}</span>
+              </div>
+            ) : null}
+
+            <div style={{ marginBottom: '1.25rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                <label
+                  style={{
+                    fontSize: '0.84rem',
+                    fontWeight: 600,
+                    color: 'var(--text-primary)',
+                  }}
+                >
+                  管理员登录密码 (高危操作二次认证)
+                </label>
+                {!totpEnabled && !showManualTotp && (
+                  <button
+                    type="button"
+                    className="btn-ghost btn-sm"
+                    style={{ padding: 0, fontSize: '0.78rem', color: 'var(--brand-600)', height: 'auto', border: 'none', background: 'none', cursor: 'pointer' }}
+                    onClick={() => setShowManualTotp(true)}
+                  >
+                    + 输入 TOTP 动态码
+                  </button>
+                )}
+              </div>
+              <input
+                autoFocus
+                type="password"
+                placeholder="请输入管理员密码以确认删除 (默认 admin123)"
+                value={adminPassword}
+                onChange={(ev) => setAdminPassword(ev.target.value)}
+                style={{ width: '100%', boxSizing: 'border-box' }}
+                onKeyDown={(ev) => {
+                  if (ev.key === 'Enter') void confirmDelete()
+                }}
+              />
+              <span style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
+                若最近 10 分钟内已完成过二次认证提权，可直接点击确定删除。
+              </span>
+            </div>
+
+            {(totpEnabled || showManualTotp) ? (
+              <div style={{ marginBottom: '1.25rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                  <label
+                    style={{
+                      fontSize: '0.84rem',
+                      fontWeight: 600,
+                      color: 'var(--text-primary)',
+                    }}
+                  >
+                    TOTP 6 位动态验证码 {totpEnabled ? '(该账号已启用双因子认证)' : '(双因子动态口令)'}
+                  </label>
+                  {!totpEnabled && showManualTotp && (
+                    <button
+                      type="button"
+                      className="btn-ghost btn-sm"
+                      style={{ padding: 0, fontSize: '0.75rem', color: 'var(--text-muted)', height: 'auto', border: 'none', background: 'none', cursor: 'pointer' }}
+                      onClick={() => { setShowManualTotp(false); setTotpCode('') }}
+                    >
+                      收起
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="text"
+                  placeholder="输入 Authenticator 中的 6 位口令 (如 123456)"
+                  value={totpCode}
+                  onChange={(ev) => setTotpCode(ev.target.value.trim())}
+                  maxLength={6}
+                  style={{
+                    width: '100%',
+                    boxSizing: 'border-box',
+                    fontSize: '1.05rem',
+                    textAlign: 'center',
+                    letterSpacing: '3px',
+                    fontWeight: 600,
+                  }}
+                  onKeyDown={(ev) => {
+                    if (ev.key === 'Enter') void confirmDelete()
+                  }}
+                />
+              </div>
+            ) : null}
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.6rem' }}>
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleting}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="btn-danger"
+                onClick={() => void confirmDelete()}
+                disabled={deleting}
+              >
+                {deleting ? '正在安全删除与吊销...' : '确定删除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   )
 }

@@ -3,6 +3,7 @@
 package certca
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -28,6 +29,12 @@ var (
 	ErrInvalidCSR  = errors.New("无效的 CSR")
 )
 
+// CertificateStore 证书持久化存储接口。
+type CertificateStore interface {
+	SaveRecord(ctx context.Context, r *Record) error
+	ListRecords(ctx context.Context) ([]*Record, error)
+}
+
 // Record 已签发证书记录。
 type Record struct {
 	WorkstationID string
@@ -48,6 +55,7 @@ type Authority struct {
 	caKeyPEM  []byte
 	byFP     map[string]*Record
 	byWS     map[string]string // workstation -> fingerprint
+	store    CertificateStore
 }
 
 // NewDevAuthority 生成开发用自签 CA。
@@ -247,22 +255,50 @@ func (a *Authority) SignCSR(workstationID string, csrPEM []byte, validDays int) 
 		ExpiresAt:     tmpl.NotAfter.UTC(),
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.byFP[fp] = rec
 	a.byWS[workstationID] = fp
+	st := a.store
+	a.mu.Unlock()
+	if st != nil {
+		_ = st.SaveRecord(context.Background(), rec)
+	}
 	return rec, nil
+}
+
+// SetStore 设置证书持久化存储，并从存储中预加载已有证书记录。
+func (a *Authority) SetStore(store CertificateStore) {
+	a.mu.Lock()
+	a.store = store
+	a.mu.Unlock()
+	if store != nil {
+		if records, err := store.ListRecords(context.Background()); err == nil {
+			a.mu.Lock()
+			for _, r := range records {
+				a.byFP[r.Fingerprint] = r
+				if r.Status != "REVOKED" || a.byWS[r.WorkstationID] == "" {
+					a.byWS[r.WorkstationID] = r.Fingerprint
+				}
+			}
+			a.mu.Unlock()
+		}
+	}
 }
 
 // Revoke 吊销证书。
 func (a *Authority) Revoke(fingerprint string) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	rec := a.byFP[fingerprint]
 	if rec == nil {
+		a.mu.Unlock()
 		return ErrNotFound
 	}
 	rec.Status = "REVOKED"
 	rec.RevokedAt = time.Now().UTC()
+	st := a.store
+	a.mu.Unlock()
+	if st != nil {
+		_ = st.SaveRecord(context.Background(), rec)
+	}
 	return nil
 }
 
@@ -285,6 +321,24 @@ func (a *Authority) FindByWorkstation(id string) *Record {
 	return a.byFP[fp]
 }
 
+// DeleteWorkstation 吊销并删除指定 Workstation 的全部证书记录。
+func (a *Authority) DeleteWorkstation(workstationID string) error {
+	a.mu.Lock()
+	fp, ok := a.byWS[workstationID]
+	if ok {
+		if rec := a.byFP[fp]; rec != nil {
+			rec.Status = "REVOKED"
+			rec.RevokedAt = time.Now().UTC()
+			if a.store != nil {
+				_ = a.store.SaveRecord(context.Background(), rec)
+			}
+		}
+		delete(a.byWS, workstationID)
+	}
+	a.mu.Unlock()
+	return nil
+}
+
 // ListRecords 返回全部证书记录副本。
 func (a *Authority) ListRecords() []Record {
 	a.mu.RLock()
@@ -297,6 +351,7 @@ func (a *Authority) ListRecords() []Record {
 }
 
 // VerifyClientRaw 校验客户端证书 DER：由本 CA 签发且未吊销。
+// 验签通过后若内存或存储中缺少该证书，自动恢复登记为有效证书记录（自愈机制）。
 func (a *Authority) VerifyClientRaw(raw []byte) (workstationID string, fp string, err error) {
 	cert, err := x509.ParseCertificate(raw)
 	if err != nil {
@@ -311,7 +366,35 @@ func (a *Authority) VerifyClientRaw(raw []byte) (workstationID string, fp string
 	if a.IsRevoked(fp) {
 		return "", fp, ErrRevoked
 	}
-	return cert.Subject.CommonName, fp, nil
+	workstationID = cert.Subject.CommonName
+
+	a.mu.Lock()
+	rec, exists := a.byFP[fp]
+	if !exists {
+		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: raw})
+		rec = &Record{
+			WorkstationID: workstationID,
+			Fingerprint:   fp,
+			CertPEM:       string(certPEM),
+			Status:        "ACTIVE",
+			IssuedAt:      cert.NotBefore.UTC(),
+			ExpiresAt:     cert.NotAfter.UTC(),
+		}
+		a.byFP[fp] = rec
+		a.byWS[workstationID] = fp
+		st := a.store
+		a.mu.Unlock()
+		if st != nil {
+			_ = st.SaveRecord(context.Background(), rec)
+		}
+	} else {
+		if a.byWS[workstationID] == "" {
+			a.byWS[workstationID] = fp
+		}
+		a.mu.Unlock()
+	}
+
+	return workstationID, fp, nil
 }
 
 func fingerprint(der []byte) string {

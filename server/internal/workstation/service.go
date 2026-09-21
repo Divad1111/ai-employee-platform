@@ -31,6 +31,7 @@ type MetaStore interface {
 	Upsert(ctx context.Context, id, name string) error
 	GetName(ctx context.Context, id string) string
 	ListIDs(ctx context.Context) []string
+	Delete(ctx context.Context, id string) error
 }
 
 // Service Workstation 只读 + 吊销。
@@ -96,12 +97,31 @@ func (s *Service) Get(ctx context.Context, id string) View {
 			v.DiskPercent = disk
 		}
 	}
+	if v.CertStatus == "" && v.Status == reliability.StatusOnline {
+		v.CertStatus = "ACTIVE"
+	}
 	return v
 }
 
 // Revoke 吊销证书。
 func (s *Service) Revoke(fingerprint string) error {
 	return s.CA.Revoke(fingerprint)
+}
+
+// Delete 删除工作站：吊销并清理证书、移除心跳跟踪、从元数据及数据库中删除。
+func (s *Service) Delete(ctx context.Context, id string) error {
+	if s.CA != nil {
+		_ = s.CA.DeleteWorkstation(id)
+	}
+	if s.Presence != nil {
+		s.Presence.Remove(id)
+	}
+	if s.Meta != nil {
+		if err := s.Meta.Delete(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // MemoryMeta 元数据。
@@ -135,4 +155,11 @@ func (m *MemoryMeta) ListIDs(_ context.Context) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+func (m *MemoryMeta) Delete(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.names, id)
+	return nil
 }

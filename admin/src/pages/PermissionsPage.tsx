@@ -5,6 +5,7 @@ import { FormEvent, useEffect, useState } from 'react'
 import { apiGet, apiPut } from '../api/client'
 import { StatusBadge } from '../components/StatusBadge'
 import { IconShield, IconPlus } from '../components/Icons'
+import { PageFeatureGuide } from '../components/PageFeatureGuide'
 
 type Profile = {
   id: string
@@ -122,6 +123,31 @@ export function PermissionsPage() {
           <p>基于 RBAC + 细粒度操作策略 · 支持 ALLOW（放行）、DENY（阻断）、ASK（触发人工审批）</p>
         </div>
       </header>
+
+      <PageFeatureGuide
+        title="权限策略沙箱与三态风控拦截指引"
+        summary="平台内置细粒度权限判定网关，严格拦截危险 Shell 命令、越权文件改动与网络违规外联。"
+        steps={[
+          {
+            step: '1',
+            title: '策略模板 Profile 划分',
+            desc: '针对不同岗位创建模板（如 测试助理宽松模版、生产只读模版），支持设为全局默认。',
+            tag: '模板定义',
+          },
+          {
+            step: '2',
+            title: '三态动作控制 (Effect)',
+            desc: 'ALLOW（直接放行）、DENY（直接阻断抛错）、ASK（阻断并提交人工审批单）。',
+            tag: '三态风控',
+          },
+          {
+            step: '3',
+            title: '优先级 Priority 与高危标记',
+            desc: '数值越小优先级越高；勾选 Critical 后触发审批将强制校验 TOTP 6 位动态口令。',
+            tag: '多级防护',
+          },
+        ]}
+      />
 
       {error ? <div className="error">{error}</div> : null}
       {msg ? <div className="ok-msg">{msg}</div> : null}

@@ -6,6 +6,7 @@ import { FormEvent, useEffect, useState } from 'react'
 import { apiDelete, apiGet, apiPost } from '../api/client'
 import { IconFolder, IconPlus, IconRefresh, IconUsers, IconServer } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
+import { PageFeatureGuide } from '../components/PageFeatureGuide'
 
 type Workspace = {
   id: string
@@ -132,6 +133,31 @@ export function WorkspacesPage() {
           <span>刷新列表</span>
         </button>
       </header>
+
+      <PageFeatureGuide
+        title="项目工作区挂载与代码安全隔离架构指引"
+        summary="Workspace 显式声明宿主机上的绝对路径与代码仓库属性，确保 AI Agent 仅在授权工程目录内读写代码。"
+        steps={[
+          {
+            step: '1',
+            title: '选定宿主计算节点 (Node)',
+            desc: '指定工作区所属的 Workstation，保证路径解析严格在对应目标节点有效。',
+            tag: '节点归属',
+          },
+          {
+            step: '2',
+            title: '配置绝对物理路径 (Path)',
+            desc: '填写真实磁盘路径（如 F:\\ai-employee-test 或 /home/project），禁止隐式随机落盘。',
+            tag: '路径挂载',
+          },
+          {
+            step: '3',
+            title: '专属数字员工绑定 (Owner)',
+            desc: '与数字员工建立一对一绑定关系，飞书派单给该员工时自动锁定并加载本工作区。',
+            tag: '上下文锁定',
+          },
+        ]}
+      />
 
       {error ? <div className="error">{error}</div> : null}
       {msg ? <div className="ok-msg">{msg}</div> : null}

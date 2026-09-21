@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -89,8 +90,36 @@ func (v *MemoryVault) Put(name, plaintext string) (Ref, error) {
 	return Ref{ID: id, Name: name}, nil
 }
 
+// Encrypt 自包含 AES-256-GCM 加密，返回 enc:v1: 前缀的密文字符串（用于 TOTP 等落盘持久化字段加密）。
+func (v *MemoryVault) Encrypt(plaintext string) (string, error) {
+	nonce := make([]byte, v.gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+	ct := v.gcm.Seal(nil, nonce, []byte(plaintext), nil)
+	blob := append(nonce, ct...)
+	return "enc:v1:" + base64.RawURLEncoding.EncodeToString(blob), nil
+}
+
 // Get 仅供受控服务解密使用；调用方不得写入普通日志。
 func (v *MemoryVault) Get(id string) (string, error) {
+	// 如果是自包含 AES-256-GCM 密文引用，直接使用主密钥解密
+	if strings.HasPrefix(id, "enc:v1:") {
+		raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(id, "enc:v1:"))
+		if err != nil {
+			return "", err
+		}
+		ns := v.gcm.NonceSize()
+		if len(raw) < ns {
+			return "", errors.New("密文损坏")
+		}
+		pt, err := v.gcm.Open(nil, raw[:ns], raw[ns:], nil)
+		if err != nil {
+			return "", err
+		}
+		return string(pt), nil
+	}
+
 	v.mu.RLock()
 	e, ok := v.byID[id]
 	v.mu.RUnlock()

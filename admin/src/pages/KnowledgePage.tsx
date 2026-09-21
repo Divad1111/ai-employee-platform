@@ -5,6 +5,7 @@ import { FormEvent, useEffect, useState } from 'react'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../api/client'
 import { IconBook, IconPlus } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
+import { PageFeatureGuide } from '../components/PageFeatureGuide'
 
 type Entry = {
   id: string
@@ -139,6 +140,31 @@ export function KnowledgePage() {
           <p>为数字员工注入业务规范、架构标准与工程知识背景 · 支持标签检索与按需挂载</p>
         </div>
       </header>
+
+      <PageFeatureGuide
+        title="企业领域知识库注入与上下文增强指引"
+        summary="管理公司研发规范、接口字典、架构拓扑与最佳实践，在数字员工执行具体 Prompt 时作为领域外脑提供语义上下文支撑。"
+        steps={[
+          {
+            step: '1',
+            title: '规范条目沉淀 (Markdown)',
+            desc: '录入工程设计规约、核心数据库字段释义、运维发布 SOP 等长效文本。',
+            tag: '知识资产',
+          },
+          {
+            step: '2',
+            title: '多维标签分类与索引 (Tags)',
+            desc: '通过打标分类（如 后端审核、JIRA联动、发布规范），实现知识快速索引。',
+            tag: '分类检索',
+          },
+          {
+            step: '3',
+            title: '员工个性化挂载 (Binding)',
+            desc: '将特定知识库按需挂载至指定数字员工，任务启动时自动加载至智能体上下文提示词中。',
+            tag: '上下文增强',
+          },
+        ]}
+      />
 
       {error ? <div className="error">{error}</div> : null}
       {msg ? <div className="ok-msg">{msg}</div> : null}

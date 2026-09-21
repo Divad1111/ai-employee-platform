@@ -50,8 +50,9 @@ func Default() *Config {
 	c.Runtime.MaxSessions = 1
 	c.Runtime.IdleTimeoutSec = 600
 	c.Providers = map[string]ProviderCfg{
-		"cursor": {Enabled: true},
-		"codex":  {Enabled: true},
+		"cursor":      {Enabled: true},
+		"codex":       {Enabled: true},
+		"antigravity": {Enabled: true},
 	}
 	c.Security.RequireMTLS = true
 	c.normalize()

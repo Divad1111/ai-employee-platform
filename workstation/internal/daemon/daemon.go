@@ -26,6 +26,7 @@ import (
 	"github.com/ai-employee-platform/workstation/internal/monitor"
 	"github.com/ai-employee-platform/workstation/internal/platform"
 	"github.com/ai-employee-platform/workstation/internal/providers"
+	"github.com/ai-employee-platform/workstation/internal/providers/antigravity"
 	"github.com/ai-employee-platform/workstation/internal/providers/codex"
 	"github.com/ai-employee-platform/workstation/internal/providers/cursor"
 	"github.com/ai-employee-platform/workstation/internal/runtime"
@@ -73,9 +74,14 @@ func New(opts Options) *Daemon {
 	if opts.Journal == nil {
 		opts.Journal = ack.NewMemoryJournal()
 	}
-	proc := process.NewManager("agent", "agent.exe", "agent.cmd", "agent-fake", "cursor-fake", "codex", "codex.exe", "codex-fake")
+	proc := process.NewManager(
+		"agent", "agent.exe", "agent.cmd", "agent-fake", "cursor-fake",
+		"codex", "codex.exe", "codex-fake",
+		"antigravity", "antigravity.exe", "antigravity.cmd", "agy", "agy.exe", "agy.cmd",
+		"language_server", "language_server.exe", "agentapi.bat", "antigravity-fake",
+	)
 	reg := providers.NewRegistry()
-	curPath, codPath := "", ""
+	curPath, codPath, agyPath := "", "", ""
 	if opts.Config.Providers != nil {
 		if p, ok := opts.Config.Providers["cursor"]; ok {
 			curPath = p.Path
@@ -83,9 +89,13 @@ func New(opts Options) *Daemon {
 		if p, ok := opts.Config.Providers["codex"]; ok {
 			codPath = p.Path
 		}
+		if p, ok := opts.Config.Providers["antigravity"]; ok {
+			agyPath = p.Path
+		}
 	}
 	reg.Register(cursor.NewProvider(proc, curPath))
 	reg.Register(codex.NewProvider(proc, codPath))
+	reg.Register(antigravity.NewProvider(proc, agyPath))
 	rt := runtime.NewManagers(opts.Paths, reg)
 	rt.MaxSess = opts.Config.MaxSessions
 	ob := outbox.NewMemoryStore()
@@ -471,6 +481,24 @@ func (d *Daemon) doctor() ipc.Response {
 						status = "WARN"
 						detail = fmt.Sprintf("%s (未登录授权，请在终端执行 'agent login')", info.Path)
 					}
+				}
+			} else if name == "antigravity" {
+				home, _ := os.UserHomeDir()
+				daemonDir := filepath.Join(home, ".gemini", "antigravity", "daemon")
+				entries, _ := os.ReadDir(daemonDir)
+				hasDaemon := false
+				for _, e := range entries {
+					if strings.HasPrefix(e.Name(), "ls_") && strings.HasSuffix(e.Name(), ".json") {
+						hasDaemon = true
+						break
+					}
+				}
+				if hasDaemon {
+					status = "OK"
+					detail = fmt.Sprintf("%s (LanguageServer 运行中)", info.Path)
+				} else {
+					status = "OK"
+					detail = fmt.Sprintf("%s (已检测到安装)", info.Path)
 				}
 			}
 			add("provider."+name, status, detail)

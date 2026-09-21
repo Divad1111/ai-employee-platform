@@ -7,7 +7,7 @@ import "context"
 
 // InstallInfo 描述本机已安装的 Provider 信息。
 type InstallInfo struct {
-	// Name 提供方名称，如 cursor / codex
+	// Name 提供方名称，如 cursor / codex / antigravity
 	Name string
 	// Version 版本号
 	Version string

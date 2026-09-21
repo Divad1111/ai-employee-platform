@@ -17,6 +17,8 @@ providers:
     enabled: true
   codex:
     enabled: true
+  antigravity:
+    enabled: true
 
 security:
   require_mtls: true

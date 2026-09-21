@@ -137,3 +137,91 @@ func TestPermissionEvaluateGitPushNeedsTOTP(t *testing.T) {
 		t.Fatal(ap)
 	}
 }
+
+func TestSecurityAPI_TOTPReEnrollAndDisableAndAuditFilter(t *testing.T) {
+	h, tok, _ := setupM7(t)
+
+	// 1. 首次 enroll (未绑定时)，缺少密码应返回 403
+	code, resp := doJSON(t, h, http.MethodPost, "/api/auth/totp/enroll", tok, nil)
+	if code != http.StatusForbidden {
+		t.Fatalf("first enroll without password expected 403, got %d: %v", code, resp)
+	}
+
+	// 1.1 首次 enroll，输入正确密码 -> 返回待激活 secret (201)
+	code, resp = doJSON(t, h, http.MethodPost, "/api/auth/totp/enroll", tok, map[string]string{"password": "admin123"})
+	if code != http.StatusCreated {
+		t.Fatalf("first enroll with password expected 201, got %d: %v", code, resp)
+	}
+	sec1, _ := resp["secret"].(string)
+	if sec1 == "" {
+		t.Fatalf("expected secret in response: %v", resp)
+	}
+
+	// 1.2 首次激活 confirm: 提交扫码后的 6 位 TOTP
+	otp0, _ := totp.CodeAt(sec1, time.Now())
+	code, resp = doJSON(t, h, http.MethodPost, "/api/auth/totp/confirm", tok, map[string]string{"totp": otp0})
+	if code != http.StatusOK {
+		t.Fatalf("confirm totp expected 200, got %d: %v", code, resp)
+	}
+
+	// 2. 已经开启 TOTP 后，缺少密码或 totp 重新 enroll -> 应返回 403 Forbidden
+	code, resp = doJSON(t, h, http.MethodPost, "/api/auth/totp/enroll", tok, map[string]string{"password": "admin123"})
+	if code != http.StatusForbidden {
+		t.Fatalf("re-enroll without totp expected 403, got %d: %v", code, resp)
+	}
+
+	// 3. 带错误 totp -> 应返回 403 Forbidden
+	code, resp = doJSON(t, h, http.MethodPost, "/api/auth/totp/enroll", tok, map[string]string{"password": "admin123", "totp": "000000"})
+	if code != http.StatusForbidden {
+		t.Fatalf("re-enroll with bad totp expected 403, got %d: %v", code, resp)
+	}
+
+	// 4. 同时带正确管理员密码与当前有效 totp -> 应成功重新生成 (201)
+	otp1, _ := totp.CodeAt(sec1, time.Now())
+	code, resp = doJSON(t, h, http.MethodPost, "/api/auth/totp/enroll", tok, map[string]string{"password": "admin123", "totp": otp1})
+	if code != http.StatusCreated {
+		t.Fatalf("re-enroll with valid password and totp expected 201, got %d: %v", code, resp)
+	}
+	sec2, _ := resp["secret"].(string)
+	if sec2 == "" || sec2 == sec1 {
+		t.Fatalf("expected new secret after re-enroll, got sec2=%s, sec1=%s", sec2, sec1)
+	}
+
+	// 4.1 激活新 secret
+	otp2, _ := totp.CodeAt(sec2, time.Now())
+	code, resp = doJSON(t, h, http.MethodPost, "/api/auth/totp/confirm", tok, map[string]string{"totp": otp2})
+	if code != http.StatusOK {
+		t.Fatalf("confirm new totp expected 200, got %d: %v", code, resp)
+	}
+
+	// 5. 尝试关闭 TOTP，缺少密码或口令 -> 应返回 403
+	code, resp = doJSON(t, h, http.MethodPost, "/api/auth/totp/disable", tok, map[string]string{"password": "admin123"})
+	if code != http.StatusForbidden {
+		t.Fatalf("disable totp without totp expected 403, got %d: %v", code, resp)
+	}
+
+	// 6. 同时带管理员密码与当前有效 TOTP 口令关闭 TOTP -> 应成功 (200)
+	otp3, _ := totp.CodeAt(sec2, time.Now())
+	code, resp = doJSON(t, h, http.MethodPost, "/api/auth/totp/disable", tok, map[string]string{"password": "admin123", "totp": otp3})
+	if code != http.StatusOK {
+		t.Fatalf("disable totp with valid password and totp expected 200, got %d: %v", code, resp)
+	}
+
+	// 校验 TOTP 状态已关闭
+	code, stResp := doJSON(t, h, http.MethodGet, "/api/auth/totp", tok, nil)
+	if code != http.StatusOK || stResp["enabled"] != false {
+		t.Fatalf("expected totp disabled, got code=%d, resp=%v", code, stResp)
+	}
+
+	// 7. 测试审计日志模糊检索
+	// 检索 "totp" 关键字 -> 应检索到 totp.enroll, totp.re_enroll, totp.disable
+	code, auditResp := doJSON(t, h, http.MethodGet, "/api/audit?q=totp", tok, nil)
+	if code != http.StatusOK {
+		t.Fatalf("audit search expected 200, got %d: %v", code, resp)
+	}
+	items, _ := auditResp["items"].([]any)
+	if len(items) == 0 {
+		t.Fatalf("expected audit items matching 'totp', got 0")
+	}
+}
+

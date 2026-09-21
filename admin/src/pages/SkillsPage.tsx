@@ -5,6 +5,7 @@ import { FormEvent, useEffect, useState } from 'react'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../api/client'
 import { IconZap, IconPlus } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
+import { PageFeatureGuide } from '../components/PageFeatureGuide'
 
 type Skill = {
   id: string
@@ -121,6 +122,31 @@ export function SkillsPage() {
           <p>标准化专业技能定义 · 赋能数字员工解决特定专业领域的复杂工程任务</p>
         </div>
       </header>
+
+      <PageFeatureGuide
+        title="技能库定义与数字员工专业赋能指引"
+        summary="技能库是平台将垂类领域工程经验（如 Bug 挖掘、安全巡检、自动化测试、数据库重构）抽象成标准化能力单元的中心。"
+        steps={[
+          {
+            step: '1',
+            title: '标准化领域能力注册',
+            desc: '声明技能名称、专业范畴与详细的行为模式 Prompt 模版，划定能力边界。',
+            tag: '能力封装',
+          },
+          {
+            step: '2',
+            title: '按需赋能数字员工',
+            desc: '在下方一键将技能授权绑定给特定员工，执行任务时自动注入 ACP / Cursor Agent 上下文。',
+            tag: '动态注入',
+          },
+          {
+            step: '3',
+            title: '技能分类与组合装配',
+            desc: '支持开发、测试、运维、安全等多分类复合装配，让同一名员工具备全栈协作能力。',
+            tag: '复合装配',
+          },
+        ]}
+      />
 
       {error ? <div className="error">{error}</div> : null}
       {msg ? <div className="ok-msg">{msg}</div> : null}

@@ -4,6 +4,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -111,6 +112,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/workstations", d.requirePerm("workstation.read", d.handleListWorkstations))
 	mux.HandleFunc("GET /api/workstations/{id}", d.requirePerm("workstation.read", d.handleGetWorkstation))
 	mux.HandleFunc("PATCH /api/workstations/{id}", d.requirePerm("workstation.write", d.handleUpdateWorkstation))
+	mux.HandleFunc("DELETE /api/workstations/{id}", d.requirePermStepUp("workstation.write", d.handleDeleteWorkstation))
 
 	// Sessions
 	mux.HandleFunc("GET /api/sessions", d.requirePerm("session.read", d.handleListSessions))
@@ -174,7 +176,10 @@ func NewRouter(d Deps) http.Handler {
 	// Permission / Approval / TOTP / Step-up（M7）
 	mux.HandleFunc("POST /api/auth/step-up", d.requireAuth(d.handleStepUp))
 	mux.HandleFunc("GET /api/auth/totp", d.requireAuth(d.handleTOTPStatus))
+	mux.HandleFunc("GET /api/approvals/totp/status", d.requireAuth(d.handleTOTPStatus))
 	mux.HandleFunc("POST /api/auth/totp/enroll", d.requireAuth(d.handleEnrollTOTP))
+	mux.HandleFunc("POST /api/auth/totp/confirm", d.requireAuth(d.handleConfirmTOTP))
+	mux.HandleFunc("POST /api/auth/totp/disable", d.requireAuth(d.handleDisableTOTP))
 	mux.HandleFunc("GET /api/permission/profiles", d.requirePerm("system.read", d.handleListPermissionProfiles))
 	mux.HandleFunc("GET /api/permission/rules", d.requirePerm("system.read", d.handleListPermissionRules))
 	mux.HandleFunc("POST /api/permission/evaluate", d.requirePerm("approval.read", d.handleEvaluatePermission))
@@ -432,6 +437,26 @@ func (d Deps) handleUpdateWorkstation(w http.ResponseWriter, r *http.Request, se
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "name": req.Name})
 }
 
+func (d Deps) handleDeleteWorkstation(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "缺少工作站 ID")
+		return
+	}
+	if d.Workstations == nil {
+		writeErr(w, http.StatusServiceUnavailable, "工作站服务不可用")
+		return
+	}
+	if err := d.Workstations.Delete(r.Context(), id); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	if d.Audit != nil {
+		d.Audit.Log(r.Context(), "USER", sess.UserID, "workstation.delete", "success", clientIP(r), map[string]string{"id": id})
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 type revokeReq struct {
 	Fingerprint string `json:"fingerprint"`
 }
@@ -535,7 +560,11 @@ func (d Deps) handleDisableEmployee(w http.ResponseWriter, r *http.Request, sess
 
 func (d Deps) handleDeleteEmployee(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if err := d.Employees.Delete(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r)); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		if errors.Is(err, employee.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "数字员工不存在")
+			return
+		}
+		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

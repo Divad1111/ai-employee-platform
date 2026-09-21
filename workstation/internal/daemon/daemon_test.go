@@ -20,7 +20,8 @@ func TestDaemonIPCPipeline(t *testing.T) {
 	defer cancel()
 	cfg := config.Default()
 	cfg.Providers = map[string]config.ProviderCfg{
-		"cursor": {Enabled: true, Path: "agent-fake"},
+		"cursor":      {Enabled: true, Path: "agent-fake"},
+		"antigravity": {Enabled: true, Path: "antigravity-fake"},
 	}
 	d := daemon.New(daemon.Options{
 		Paths: platform.Detect(), Config: cfg,
@@ -88,5 +89,47 @@ func TestDaemonIPCPipeline(t *testing.T) {
 	if err != nil || len(doc) == 0 {
 		t.Fatal(err)
 	}
+
+	// 验证 Antigravity Provider 探测与执行
+	det, err := cli.Call(context.Background(), "provider.detect", map[string]string{"Name": "antigravity"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var detInfo map[string]any
+	_ = json.Unmarshal(det, &detInfo)
+	if detInfo["Name"] != "antigravity" {
+		t.Fatalf("expected antigravity, got %v", detInfo)
+	}
+
+	_, err = cli.Call(context.Background(), "employee.ensure", map[string]string{
+		"ID": "EMP-AGY", "Name": "AgyBot", "Provider": "antigravity",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = cli.Call(context.Background(), "workspace.ensure", map[string]string{
+		"ID": "W-AGY", "EmployeeID": "EMP-AGY",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = cli.Call(context.Background(), "session.start", map[string]string{
+		"ID": "SES-AGY", "EmployeeID": "EMP-AGY", "WorkspaceID": "W-AGY", "Provider": "antigravity",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawAgy, err := cli.Call(context.Background(), "job.run", map[string]string{
+		"ID": "JOB-AGY", "EmployeeID": "EMP-AGY", "SessionID": "SES-AGY", "Prompt": "hello antigravity",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jobAgy map[string]any
+	_ = json.Unmarshal(rawAgy, &jobAgy)
+	if jobAgy["reply"] == "" && (jobAgy["Reply"] == nil || jobAgy["Reply"] == "") {
+		t.Fatalf("expected non-empty reply, got %v", jobAgy)
+	}
+
 	cancel()
 }

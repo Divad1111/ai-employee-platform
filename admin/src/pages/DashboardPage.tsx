@@ -7,6 +7,7 @@ import { apiGet } from '../api/client'
 import { StatusBadge } from '../components/StatusBadge'
 import { IconRefresh } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
+import { PageFeatureGuide } from '../components/PageFeatureGuide'
 
 type ActiveJob = {
   id: string
@@ -74,6 +75,31 @@ export function DashboardPage() {
           <span>立即刷新</span>
         </button>
       </header>
+
+      <PageFeatureGuide
+        title="监控控制台运行指标与链路架构指引"
+        summary="汇聚全域计算算力、网络心跳、数字员工注册状态及实时任务流转的关键大盘，支持秒级自动轮询探活。"
+        steps={[
+          {
+            step: '1',
+            title: '全量资产与健康指标大盘',
+            desc: '实时聚合数字员工数、工作站节点数、在线运行节点及历史任务总量，快速洞察集群全局承载水位。',
+            tag: '指标聚合',
+          },
+          {
+            step: '2',
+            title: 'mTLS 双向安全保活监控',
+            desc: '通过 gRPC 双向流与客户端证书验证，实时展示各宿主机节点的 CPU 负载率与内存占用率。',
+            tag: '硬件监控',
+          },
+          {
+            step: '3',
+            title: '正在执行的任务 (Active Jobs)',
+            desc: '实时呈现处于 CREATED / QUEUED / ASSIGNED / STARTING / RUNNING 的活跃任务流转状态，支持一键穿梭至任务详情追踪执行 Timeline。',
+            tag: '流转追踪',
+          },
+        ]}
+      />
 
       {error ? <div className="error">{error}</div> : null}
 

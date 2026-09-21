@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ai-employee-platform/server/internal/auth"
+	"github.com/ai-employee-platform/server/internal/certca"
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/job"
 	"github.com/ai-employee-platform/server/internal/session"
@@ -89,6 +90,14 @@ func (db *DB) NewSessionStore() session.Store {
 
 func (db *DB) NewWorkstationMetaStore() workstation.MetaStore {
 	return &PostgresWorkstationStore{db: db}
+}
+
+func (db *DB) NewCertStore() certca.CertificateStore {
+	return &PostgresCertStore{db: db}
+}
+
+func (db *DB) NewTOTPStore() *PostgresTOTPStore {
+	return &PostgresTOTPStore{db: db}
 }
 
 func newUUID() string {

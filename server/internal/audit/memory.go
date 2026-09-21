@@ -78,12 +78,13 @@ func (m *Memory) Log(_ context.Context, actorType, actorID, action, result, ip s
 
 // Filter 审计查询条件。
 type Filter struct {
-	Actor      string
-	Action     string
+	Keyword      string
+	Actor        string
+	Action       string
 	ActionPrefix string
-	TargetType string
-	TargetID   string
-	Limit      int
+	TargetType   string
+	TargetID     string
+	Limit        int
 }
 
 // Query 按条件过滤（新→旧）。
@@ -91,22 +92,37 @@ func (m *Memory) Query(f Filter) []Entry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var matched []Entry
+	kw := strings.ToLower(strings.TrimSpace(f.Keyword))
+	actionFilter := strings.ToLower(strings.TrimSpace(f.Action))
+	actorFilter := strings.ToLower(strings.TrimSpace(f.Actor))
 	for i := len(m.entries) - 1; i >= 0; i-- {
 		e := m.entries[i]
-		if f.Actor != "" && e.ActorID != f.Actor && e.ActorType != f.Actor {
+		if actorFilter != "" && !strings.EqualFold(e.ActorID, actorFilter) && !strings.EqualFold(e.ActorType, actorFilter) {
 			continue
 		}
-		if f.Action != "" && e.Action != f.Action {
+		if actionFilter != "" && !strings.Contains(strings.ToLower(e.Action), actionFilter) {
 			continue
 		}
-		if f.ActionPrefix != "" && !strings.HasPrefix(e.Action, f.ActionPrefix) {
+		if f.ActionPrefix != "" && !strings.HasPrefix(strings.ToLower(e.Action), strings.ToLower(f.ActionPrefix)) {
 			continue
 		}
-		if f.TargetType != "" && e.TargetType != f.TargetType {
+		if f.TargetType != "" && !strings.EqualFold(e.TargetType, f.TargetType) {
 			continue
 		}
-		if f.TargetID != "" && e.TargetID != f.TargetID {
+		if f.TargetID != "" && !strings.EqualFold(e.TargetID, f.TargetID) {
 			continue
+		}
+		if kw != "" {
+			hit := strings.Contains(strings.ToLower(e.Action), kw) ||
+				strings.Contains(strings.ToLower(e.ActorID), kw) ||
+				strings.Contains(strings.ToLower(e.ActorType), kw) ||
+				strings.Contains(strings.ToLower(e.IP), kw) ||
+				strings.Contains(strings.ToLower(e.Result), kw) ||
+				strings.Contains(strings.ToLower(e.TargetID), kw) ||
+				strings.Contains(strings.ToLower(e.TargetType), kw)
+			if !hit {
+				continue
+			}
 		}
 		matched = append(matched, e)
 		if f.Limit > 0 && len(matched) >= f.Limit {

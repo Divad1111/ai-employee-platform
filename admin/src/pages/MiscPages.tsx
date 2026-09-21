@@ -4,12 +4,18 @@
 import { useEffect, useState } from 'react'
 import { apiGet, apiPost } from '../api/client'
 import { IconFileText, IconRefresh } from '../components/Icons'
+import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { EntityName } from '../components/EntityName'
+import { getUser } from '../stores/session'
 
 type AuditItem = {
   id: number
+  actor_type?: string
   actor_id: string
   action: string
   result: string
+  ip?: string
+  metadata?: Record<string, string>
   created_at: string
 }
 
@@ -17,10 +23,11 @@ export function AuditPage() {
   const [items, setItems] = useState<AuditItem[]>([])
   const [action, setAction] = useState('')
   const [loading, setLoading] = useState(false)
+  const currentUser = getUser()
 
   const load = () => {
     setLoading(true)
-    const q = action ? `?action=${encodeURIComponent(action)}&limit=50` : '?limit=50'
+    const q = action ? `?q=${encodeURIComponent(action)}&limit=50` : '?limit=50'
     apiGet<{ items: AuditItem[] }>(`/audit${q}`)
       .then((d) => setItems(d.items ?? []))
       .finally(() => setLoading(false))
@@ -43,19 +50,44 @@ export function AuditPage() {
         </button>
       </header>
 
+      <PageFeatureGuide
+        title="不可篡改全量操作安全审计流指引"
+        summary="记录管控平台发生的全部关键行为，支持按动作类型追溯，满足企业级安全合规治理要求。"
+        steps={[
+          {
+            step: '1',
+            title: '只追加写入 (Append-Only)',
+            desc: '底层审计表禁止任何 UPDATE 与 DELETE 操作，确保日志物理级防篡改。',
+            tag: '合规存证',
+          },
+          {
+            step: '2',
+            title: '全量关键操作抓取',
+            desc: '覆盖用户登录、二次鉴权 Step-up、机密凭证调用、人工审批单决策等关键事件。',
+            tag: '操作全景',
+          },
+          {
+            step: '3',
+            title: '四元组责任追溯',
+            desc: '完整沉淀 操作人 (Actor)、动作 (Action)、决策结果 (Result) 及 来源 IP 地址。',
+            tag: '可信溯源',
+          },
+        ]}
+      />
+
       <div className="panel">
         <div className="panel-header">
           <div>
             <h2>操作检索与过滤</h2>
-            <p>可按操作动作 (例: secret.access、approval.decide) 筛选最近 50 条记录</p>
+            <p>支持按动作 (例: secret、totp、approval)、操作人、客户端 IP 全文模糊检索最近 50 条审计流水</p>
           </div>
         </div>
         <div className="inline-form">
           <input
-            placeholder="输入动作 Action 过滤 (例如: secret.access)"
+            placeholder="输入关键字检索 (如: totp, secret, approve, admin, 127.0.0.1)"
             value={action}
             onChange={(e) => setAction(e.target.value)}
-            style={{ width: '320px' }}
+            style={{ width: '380px' }}
           />
           {action ? (
             <button type="button" className="btn-ghost" onClick={() => setAction('')}>
@@ -90,7 +122,17 @@ export function AuditPage() {
                     {new Date(a.created_at).toLocaleString()}
                   </td>
                   <td>
-                    <span className="mono">{a.actor_id}</span>
+                    <EntityName
+                      name={
+                        a.metadata?.actor_name ||
+                        (a.actor_id === currentUser?.id ? `${currentUser.username} (当前管理员)` : '') ||
+                        (a.metadata?.username ? `${a.metadata.username} (管理员)` : '') ||
+                        (a.actor_type === 'USER' ? 'admin (超级管理员)' : '') ||
+                        (a.actor_type === 'SYSTEM' ? '系统内核 (System)' : '')
+                      }
+                      id={a.actor_id}
+                      sub={a.actor_type ? `${a.actor_type}${a.ip ? ` · ${a.ip}` : ''}` : undefined}
+                    />
                   </td>
                   <td>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
@@ -183,6 +225,31 @@ export function SettingsPage() {
           </button>
         </div>
       </header>
+
+      <PageFeatureGuide
+        title="平台核心控制面与高可用基础设施指引"
+        summary="展示并管控 Control Plane 在当前环境运行的核心参数、调度超时窗口、长连心跳基线与双因子 TOTP 状态。"
+        steps={[
+          {
+            step: '1',
+            title: '可靠性与心跳探测 (Presence)',
+            desc: '5 秒心跳探测窗口 + 15 秒判定离线，驱动工作站健康在线与故障隔离转移。',
+            tag: '保活巡检',
+          },
+          {
+            step: '2',
+            title: '调度流转限额 (Scheduler)',
+            desc: '单节点最大并发数控制（默认 2 个 Job 并行）+ 启动超时保底防护，防止算力雪崩。',
+            tag: '并发削峰',
+          },
+          {
+            step: '3',
+            title: '基础设施与安全证书 (PKI)',
+            desc: '内置 X.509 根证书颁发机构 (CA)、PostgreSQL 持久化数据库连接与生产机密保险库。',
+            tag: '基础信任',
+          },
+        ]}
+      />
 
       {/* 结构化卡片视图 */}
       {!showRaw ? (

@@ -192,6 +192,13 @@ func (s *Service) SetConfig(cfg Config) {
 	s.cfg = cfg
 	s.cachedStatus = nil
 	if s.vault != nil {
+		if rot, ok := s.vault.(secret.Rotator); ok {
+			for _, ref := range s.vault.List() {
+				if ref.Name == "feishu.config_data" {
+					_ = rot.Delete(ref.ID)
+				}
+			}
+		}
 		if b, err := json.Marshal(cfg); err == nil {
 			_, _ = s.vault.Put("feishu.config_data", string(b))
 		}
@@ -692,6 +699,13 @@ func (s *Service) saveBindingsLocked() {
 		}
 	}
 	if b, err := json.Marshal(list); err == nil {
+		if rot, ok := s.vault.(secret.Rotator); ok {
+			for _, ref := range s.vault.List() {
+				if ref.Name == "feishu.bindings_data" {
+					_ = rot.Delete(ref.ID)
+				}
+			}
+		}
 		_, _ = s.vault.Put("feishu.bindings_data", string(b))
 	}
 }

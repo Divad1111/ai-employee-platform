@@ -150,3 +150,10 @@ func (p *Presence) MarkOnline(wsID string) {
 	p.Touch(wsID, "", 0, 0, 0, 0, 0)
 }
 
+// Remove 节点被删除时立即移除心跳跟踪。
+func (p *Presence) Remove(wsID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.byWS, wsID)
+}
+

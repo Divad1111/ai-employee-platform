@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { apiGet, getToken } from '../api/client'
 import { IconPackage, IconRefresh } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
+import { PageFeatureGuide } from '../components/PageFeatureGuide'
 
 type Artifact = {
   id: string
@@ -82,6 +83,31 @@ export function ArtifactsPage() {
           <span>刷新制品</span>
         </button>
       </header>
+
+      <PageFeatureGuide
+        title="任务制品产物保全与版本防篡改指引"
+        summary="集中归档 AI Agent 在任务执行过程中导出的二进制构建包、Diff 补丁文件、架构设计图及全流程输出报告。"
+        steps={[
+          {
+            step: '1',
+            title: 'SHA-256 指纹校验与去重',
+            desc: '所有上传制品自动计算哈希指纹，防止重复冗余落盘并确保证据链不可篡改。',
+            tag: '完整性存证',
+          },
+          {
+            step: '2',
+            title: '任务全链路追溯绑定',
+            desc: '每个制品强制关联派生它的 Job ID，可一键跳转回溯当时的上下文 Prompt 与执行输出。',
+            tag: '来源追溯',
+          },
+          {
+            step: '3',
+            title: '安全流式直接下载',
+            desc: '内置 JWT Bearer 鉴权保护，管理员可随时一键下载产物包到本地进行回归测试与部署。',
+            tag: '交付归档',
+          },
+        ]}
+      />
 
       {err ? <div className="error">{err}</div> : null}
 

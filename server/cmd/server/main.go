@@ -60,6 +60,8 @@ func main() {
 		sessStore   session.Store         = session.NewMemoryStore()
 		jobStore    job.Store             = job.NewMemoryStore()
 		wsMetaStore workstation.MetaStore = workstation.NewMemoryMeta()
+		totpStore   approval.TOTPStore    = approval.NewMemoryTOTP()
+		certStore   certca.CertificateStore
 	)
 
 	if cfg.DatabaseURL != "" {
@@ -67,7 +69,7 @@ func main() {
 		if err != nil {
 			fmt.Printf("⚠️ 连接 PostgreSQL 失败 (%v)，回退到内存存储\n", err)
 		} else {
-			fmt.Println("✅ 数据库: 已连接 PostgreSQL，启用全量持久化 (Users, Employees, Workspaces, Jobs, Sessions, Workstations)")
+			fmt.Println("✅ 数据库: 已连接 PostgreSQL，启用全量持久化 (Users, Employees, Workspaces, Jobs, Sessions, Workstations, TOTP, Certificates)")
 			defer db.Close()
 			users = db.NewUserStore()
 			webSessions = db.NewWebSessionStore()
@@ -76,6 +78,8 @@ func main() {
 			sessStore = db.NewSessionStore()
 			jobStore = db.NewJobStore()
 			wsMetaStore = db.NewWorkstationMetaStore()
+			totpStore = db.NewTOTPStore()
+			certStore = db.NewCertStore()
 		}
 	}
 
@@ -92,6 +96,9 @@ func main() {
 	ca, err := certca.LoadOrNewAuthority(caDir)
 	if err != nil {
 		fatal("初始化 CA 失败: %v", err)
+	}
+	if certStore != nil {
+		ca.SetStore(certStore)
 	}
 	enrollSvc := enrollment.NewService(enrollment.NewMemoryStore(), ca, auditor)
 
@@ -275,7 +282,7 @@ func main() {
 	_ = permission.EnsureDefault(permStore)
 	permEng := permission.NewEngine(permStore, auditor)
 	secretMgr := secret.NewManager(vault, secret.NewMemoryBindings(), auditor)
-	approvalSvc := approval.New(approval.NewMemoryStore(), approval.NewMemoryTOTP(), vault, jobSvc, permEng, auditor, bus)
+	approvalSvc := approval.New(approval.NewMemoryStore(), totpStore, vault, jobSvc, permEng, auditor, bus)
 	artRoot := getenv("AIE_ARTIFACT_DIR", "")
 	artSvc := artifact.New(artifact.NewMemoryStore(), artRoot)
 	regSvc, _, err := registry.New(registry.NewMemoryStore(), getenv("AIE_PROVIDER_SIGNING_PUBKEY", ""))

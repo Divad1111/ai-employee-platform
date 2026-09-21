@@ -22,8 +22,11 @@ func GenerateSecret() (string, error) {
 	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b), nil
 }
 
-// Verify 校验 6 位码；允许 ±1 时间窗。
+// Verify 校验 6 位码；清洗空格与分隔符，允许 ±2 时间窗（前后 60 秒容差）。
 func Verify(secret, code string, now time.Time) bool {
+	code = strings.TrimSpace(code)
+	code = strings.ReplaceAll(code, " ", "")
+	code = strings.ReplaceAll(code, "-", "")
 	secret = strings.ToUpper(strings.ReplaceAll(secret, " ", ""))
 	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret)
 	if err != nil {
@@ -33,7 +36,7 @@ func Verify(secret, code string, now time.Time) bool {
 		now = time.Now()
 	}
 	counter := now.Unix() / 30
-	for _, d := range []int64{-1, 0, 1} {
+	for _, d := range []int64{-2, -1, 0, 1, 2} {
 		if hotp(key, uint64(counter+d)) == code {
 			return true
 		}

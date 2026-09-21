@@ -87,9 +87,10 @@ func (v *FileVault) Put(name, plaintext string) (Ref, error) {
 	return ref, v.persistLocked()
 }
 
-func (v *FileVault) Get(id string) (string, error) { return v.inner.Get(id) }
-func (v *FileVault) Ref(id string) (Ref, error)    { return v.inner.Ref(id) }
-func (v *FileVault) List() []Ref                   { return v.inner.List() }
+func (v *FileVault) Encrypt(plaintext string) (string, error) { return v.inner.Encrypt(plaintext) }
+func (v *FileVault) Get(id string) (string, error)             { return v.inner.Get(id) }
+func (v *FileVault) Ref(id string) (Ref, error)                { return v.inner.Ref(id) }
+func (v *FileVault) List() []Ref                               { return v.inner.List() }
 
 func (v *FileVault) Replace(id, plaintext string) error {
 	v.mu.Lock()

@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ai-employee-platform/server/internal/approval"
@@ -106,14 +107,193 @@ func (d Deps) handleRejectApproval(w http.ResponseWriter, r *http.Request, sess 
 }
 
 func (d Deps) handleEnrollTOTP(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
-	sec, b, err := d.Approvals.EnrollTOTP(r.Context(), sess.UserID)
+	if d.Approvals == nil {
+		writeErr(w, http.StatusServiceUnavailable, "approvals 未启用")
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+		TOTP     string `json:"totp"`
+		Code     string `json:"code"`
+	}
+	_ = decodeJSON(r, &body)
+
+	ip := clientIP(r)
+	alreadyEnabled := d.Approvals.TOTPEnabled(r.Context(), sess.UserID)
+	password := strings.TrimSpace(body.Password)
+	totpCode := strings.TrimSpace(body.Code)
+	if totpCode == "" {
+		totpCode = strings.TrimSpace(body.TOTP)
+	}
+
+	// 若已启用 TOTP，重新生成绑定二维码属于高危凭证重置，必须同时输入管理员登录密码与当前 6 位动态口令
+	if alreadyEnabled {
+		if password == "" && d.Auth != nil {
+			if d.Audit != nil {
+				d.Audit.Log(r.Context(), "USER", sess.UserID, "totp.re_enroll", "failed", ip, map[string]string{"reason": "missing_password"})
+			}
+			writeErr(w, http.StatusForbidden, "重新生成绑定二维码需输入管理员登录密码")
+			return
+		}
+		if d.Auth != nil && password != "" {
+			if err := d.Auth.VerifyPassword(r.Context(), sess.Username, password); err != nil {
+				if d.Audit != nil {
+					d.Audit.Log(r.Context(), "USER", sess.UserID, "totp.re_enroll", "failed", ip, map[string]string{"reason": "invalid_password"})
+				}
+				writeErr(w, http.StatusForbidden, "管理员登录密码错误")
+				return
+			}
+		}
+
+		if totpCode == "" {
+			if d.Audit != nil {
+				d.Audit.Log(r.Context(), "USER", sess.UserID, "totp.re_enroll", "failed", ip, map[string]string{"reason": "missing_totp"})
+			}
+			writeErr(w, http.StatusForbidden, "重新生成绑定二维码需输入当前 Authenticator 中的 6 位动态口令")
+			return
+		}
+		if err := d.Approvals.VerifyUserTOTP(r.Context(), sess.UserID, totpCode, ip); err != nil {
+			if d.Audit != nil {
+				d.Audit.Log(r.Context(), "USER", sess.UserID, "totp.re_enroll", "failed", ip, map[string]string{"reason": "invalid_totp"})
+			}
+			writeErr(w, http.StatusForbidden, "当前 TOTP 动态口令校验失败，拒绝重新生成")
+			return
+		}
+	} else {
+		// 未开启时首次开通：需验证管理员登录密码
+		if password == "" && d.Auth != nil {
+			if d.Audit != nil {
+				d.Audit.Log(r.Context(), "USER", sess.UserID, "totp.enroll", "failed", ip, map[string]string{"reason": "missing_password"})
+			}
+			writeErr(w, http.StatusForbidden, "开通 TOTP 双因子认证需输入管理员登录密码")
+			return
+		}
+		if d.Auth != nil && password != "" {
+			if err := d.Auth.VerifyPassword(r.Context(), sess.Username, password); err != nil {
+				if d.Audit != nil {
+					d.Audit.Log(r.Context(), "USER", sess.UserID, "totp.enroll", "failed", ip, map[string]string{"reason": "invalid_password"})
+				}
+				writeErr(w, http.StatusForbidden, "管理员登录密码错误")
+				return
+			}
+		}
+	}
+
+	sec, b, err := d.Approvals.EnrollPendingTOTP(r.Context(), sess.UserID, ip)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// 明文 secret 仅此一次返回
+	if alreadyEnabled && d.Audit != nil {
+		d.Audit.Log(r.Context(), "USER", sess.UserID, "totp.re_enroll", "success", ip, map[string]string{"ref": b.SecretRef})
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"secret": sec, "enabled": b.Enabled, "note": "请立即绑定到 Authenticator，明文不再回显",
+		"secret":  sec,
+		"enabled": false,
+		"note":    "请使用手机 Authenticator 扫描二维码并输入 6 位动态口令进行首次激活确认",
+	})
+}
+
+func (d Deps) handleConfirmTOTP(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	if d.Approvals == nil {
+		writeErr(w, http.StatusServiceUnavailable, "approvals 未启用")
+		return
+	}
+	var body struct {
+		TOTP string `json:"totp"`
+		Code string `json:"code"`
+	}
+	_ = decodeJSON(r, &body)
+
+	code := strings.TrimSpace(body.Code)
+	if code == "" {
+		code = strings.TrimSpace(body.TOTP)
+	}
+	if code == "" {
+		writeErr(w, http.StatusBadRequest, "请输入手机 Authenticator 生成的 6 位动态口令以确认激活")
+		return
+	}
+
+	ip := clientIP(r)
+	if err := d.Approvals.ConfirmTOTP(r.Context(), sess.UserID, code, ip); err != nil {
+		if d.Audit != nil {
+			d.Audit.Log(r.Context(), "USER", sess.UserID, "totp.confirm", "failed", ip, map[string]string{"error": err.Error()})
+		}
+		writeErr(w, http.StatusForbidden, "动态口令校验失败，请核对手机时间或重新输入")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled": true,
+		"message": "TOTP 双因子认证已成功激活生效",
+	})
+}
+
+func (d Deps) handleDisableTOTP(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	if d.Approvals == nil {
+		writeErr(w, http.StatusServiceUnavailable, "approvals 未启用")
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+		TOTP     string `json:"totp"`
+		Code     string `json:"code"`
+	}
+	_ = decodeJSON(r, &body)
+
+	ip := clientIP(r)
+	if !d.Approvals.TOTPEnabled(r.Context(), sess.UserID) {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "message": "当前未开启 TOTP"})
+		return
+	}
+
+	password := strings.TrimSpace(body.Password)
+	totpCode := strings.TrimSpace(body.Code)
+	if totpCode == "" {
+		totpCode = strings.TrimSpace(body.TOTP)
+	}
+
+	// 1. 验证管理员登录密码
+	if password == "" && d.Auth != nil {
+		if d.Audit != nil {
+			d.Audit.Log(r.Context(), "USER", sess.UserID, "totp.disable", "failed", ip, map[string]string{"reason": "missing_password"})
+		}
+		writeErr(w, http.StatusForbidden, "关闭 TOTP 双因子认证需输入管理员登录密码")
+		return
+	}
+	if d.Auth != nil && password != "" {
+		if err := d.Auth.VerifyPassword(r.Context(), sess.Username, password); err != nil {
+			if d.Audit != nil {
+				d.Audit.Log(r.Context(), "USER", sess.UserID, "totp.disable", "failed", ip, map[string]string{"reason": "invalid_password"})
+			}
+			writeErr(w, http.StatusForbidden, "管理员登录密码错误")
+			return
+		}
+	}
+
+	// 2. 验证当前 6 位 TOTP 口令
+	if totpCode == "" {
+		if d.Audit != nil {
+			d.Audit.Log(r.Context(), "USER", sess.UserID, "totp.disable", "failed", ip, map[string]string{"reason": "missing_totp"})
+		}
+		writeErr(w, http.StatusForbidden, "关闭 TOTP 双因子认证需输入当前 Authenticator 中的 6 位动态口令")
+		return
+	}
+	if err := d.Approvals.VerifyUserTOTP(r.Context(), sess.UserID, totpCode, ip); err != nil {
+		if d.Audit != nil {
+			d.Audit.Log(r.Context(), "USER", sess.UserID, "totp.disable", "failed", ip, map[string]string{"reason": "invalid_totp"})
+		}
+		writeErr(w, http.StatusForbidden, "当前 TOTP 动态口令校验失败，拒绝关闭")
+		return
+	}
+
+	// 3. 执行关闭
+	if err := d.Approvals.DisableTOTP(r.Context(), sess.UserID, ip); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled": false,
+		"message": "TOTP 双因子认证已成功安全关闭",
 	})
 }
 

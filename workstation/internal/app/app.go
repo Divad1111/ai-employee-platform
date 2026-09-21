@@ -99,11 +99,11 @@ func printHelp() {
   aew reconnect
   aew daemon [--skip-connect]
   aew service install|uninstall|start|stop|restart|status
-  aew employee ensure --id EMP-1 --name Alice [--provider cursor]
+  aew employee ensure --id EMP-1 --name Alice [--provider cursor|codex|antigravity]
   aew workspace ensure --id WS-1 --employee EMP-1 [--path DIR]
   aew session start|stop --id SES-1 ...
   aew job run --id JOB-1 --employee EMP-1 --session SES-1 --prompt "..."
-  aew agent detect|install|update|uninstall --provider cursor
+  aew agent detect|install|update|uninstall [--provider cursor|codex|antigravity]
   aew update check|install|rollback
   aew config show
   aew help`)
@@ -374,7 +374,7 @@ func runJob(args []string) error {
 
 func runAgent(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("用法: aew agent detect|install|update|uninstall --provider cursor")
+		return fmt.Errorf("用法: aew agent detect|install|update|uninstall [--provider cursor|codex|antigravity]")
 	}
 	switch args[0] {
 	case "detect":

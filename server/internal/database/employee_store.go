@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/ai-employee-platform/server/internal/employee"
@@ -83,8 +84,37 @@ func (s *PostgresEmployeeStore) List(ctx context.Context) ([]*employee.Employee,
 }
 
 func (s *PostgresEmployeeStore) Delete(ctx context.Context, id string) error {
-	_, err := s.db.SQL.ExecContext(ctx, `DELETE FROM employees WHERE id = $1`, id)
-	return err
+	tx, err := s.db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// 1. 检查该数字员工是否有处于 RUNNING 或 DISPATCHED 的任务
+	var runningCount int
+	_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE employee_id = $1 AND status IN ('RUNNING', 'DISPATCHED')`, id).Scan(&runningCount)
+	if runningCount > 0 {
+		return fmt.Errorf("无法删除数字员工：该员工当前仍有 %d 个正在执行的任务，请先取消任务或等待完成", runningCount)
+	}
+
+	// 2. 清理历史 jobs（包含 job_events 级联）与 sessions
+	_, _ = tx.ExecContext(ctx, `DELETE FROM jobs WHERE employee_id = $1`, id)
+	_, _ = tx.ExecContext(ctx, `DELETE FROM sessions WHERE employee_id = $1`, id)
+
+	// 3. 解绑绑定的 workspaces（设置 employee_id 为 NULL）
+	_, _ = tx.ExecContext(ctx, `UPDATE workspaces SET employee_id = NULL WHERE employee_id = $1`, id)
+
+	// 4. 删除员工记录（自动级联清理 employee_skills, employee_knowledge, employee_feishu_bindings）
+	res, err := tx.ExecContext(ctx, `DELETE FROM employees WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return employee.ErrNotFound
+	}
+
+	return tx.Commit()
 }
 
 func (s *PostgresEmployeeStore) FindByWorkspace(ctx context.Context, workspaceID string) (*employee.Employee, error) {

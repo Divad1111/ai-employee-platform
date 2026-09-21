@@ -1,12 +1,10 @@
-/**
- * Sessions 会话管理列表（§51：Agent 运行上下文）。
- */
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet } from '../api/client'
 import { StatusBadge } from '../components/StatusBadge'
 import { IconTerminal, IconRefresh } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
+import { PageFeatureGuide } from '../components/PageFeatureGuide'
 
 type Sess = {
   id: string
@@ -58,6 +56,31 @@ export function SessionsPage() {
           <span>刷新会话</span>
         </button>
       </header>
+
+      <PageFeatureGuide
+        title="Agent 运行会话生命周期与隔离架构指引"
+        summary="Session 代表数字员工在宿主工作站中拉起的交互式 Agent 子进程上下文（如 Cursor CLI agent acp），保持持久化记忆与多轮对话。"
+        steps={[
+          {
+            step: '1',
+            title: '动态绑定与冷启动拉起',
+            desc: '任务分配后，工作站 Runtime 根据员工指定的 Provider (Cursor / Codex) 在工作区目录唤起 Agent 守护进程。',
+            tag: '进程管理',
+          },
+          {
+            step: '2',
+            title: '状态迁移与健康复用',
+            desc: '会话经历 STARTING → READY → BUSY 流转。任务执行完毕后回归 READY 状态，可承接连续多轮会话无需重复拉起。',
+            tag: '长效复用',
+          },
+          {
+            step: '3',
+            title: '工作区隔离与算力保护',
+            desc: '每个 Session 严格限定在对应项目的独立目录与子进程中，具备超时保护与安全沙箱限制。',
+            tag: '安全隔离',
+          },
+        ]}
+      />
 
       <div className="panel">
         <div className="panel-header">

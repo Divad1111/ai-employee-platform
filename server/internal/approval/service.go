@@ -6,6 +6,7 @@ package approval
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -288,22 +289,130 @@ func (s *Service) verifyTOTP(ctx context.Context, userID, code, ip string) error
 
 // EnrollTOTP 绑定 TOTP；返回一次性明文 secret（仅此响应，随后仅存引用）。
 func (s *Service) EnrollTOTP(ctx context.Context, userID string) (secretPlain string, binding *TOTPBinding, err error) {
+	return s.EnrollTOTPWithIP(ctx, userID, "")
+}
+
+// EnrollTOTPWithIP 带客户端 IP 记录绑定 TOTP。
+func (s *Service) EnrollTOTPWithIP(ctx context.Context, userID, ip string) (secretPlain string, binding *TOTPBinding, err error) {
 	sec, err := totp.GenerateSecret()
 	if err != nil {
 		return "", nil, err
 	}
-	ref, err := s.vault.Put("totp."+userID, sec)
-	if err != nil {
-		return "", nil, err
+	var secretRef string
+	if encrypter, ok := s.vault.(interface{ Encrypt(string) (string, error) }); ok {
+		encrypted, err := encrypter.Encrypt(sec)
+		if err != nil {
+			return "", nil, err
+		}
+		secretRef = encrypted
+	} else {
+		ref, err := s.vault.Put("totp."+userID, sec)
+		if err != nil {
+			return "", nil, err
+		}
+		secretRef = ref.ID
 	}
-	b := &TOTPBinding{UserID: userID, SecretRef: ref.ID, Enabled: true}
+	b := &TOTPBinding{UserID: userID, SecretRef: secretRef, Enabled: true}
 	if err := s.totp.Save(ctx, b); err != nil {
 		return "", nil, err
 	}
 	if s.audit != nil {
-		s.audit.Log(ctx, "USER", userID, "totp.enroll", "success", "", map[string]string{"ref": ref.ID})
+		s.audit.Log(ctx, "USER", userID, "totp.enroll", "success", ip, map[string]string{"ref": secretRef})
 	}
 	return sec, b, nil
+}
+
+// EnrollPendingTOTP 生成 TOTP 秘钥并记录待激活绑定（Enabled: false，等待用户扫描输入动态码确认激活）。
+func (s *Service) EnrollPendingTOTP(ctx context.Context, userID, ip string) (secretPlain string, binding *TOTPBinding, err error) {
+	sec, err := totp.GenerateSecret()
+	if err != nil {
+		return "", nil, err
+	}
+	var secretRef string
+	if encrypter, ok := s.vault.(interface{ Encrypt(string) (string, error) }); ok {
+		encrypted, err := encrypter.Encrypt(sec)
+		if err != nil {
+			return "", nil, err
+		}
+		secretRef = encrypted
+	} else {
+		ref, err := s.vault.Put("totp."+userID, sec)
+		if err != nil {
+			return "", nil, err
+		}
+		secretRef = ref.ID
+	}
+	b := &TOTPBinding{UserID: userID, SecretRef: secretRef, Enabled: false}
+	if err := s.totp.Save(ctx, b); err != nil {
+		return "", nil, err
+	}
+	if s.audit != nil {
+		s.audit.Log(ctx, "USER", userID, "totp.enroll_pending", "success", ip, map[string]string{"ref": secretRef})
+	}
+	return sec, b, nil
+}
+
+// ConfirmTOTP 校验用户输入的 6 位动态码，若成功则将 TOTPBinding.Enabled 设为 true 并落盘持久化。
+func (s *Service) ConfirmTOTP(ctx context.Context, userID, code, ip string) error {
+	b, err := s.totp.Get(ctx, userID)
+	if err != nil || b == nil || b.SecretRef == "" {
+		return ErrTOTPNotConfigured
+	}
+	if !b.LockedUntil.IsZero() && time.Now().Before(b.LockedUntil) {
+		return ErrTOTPLocked
+	}
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return ErrTOTPRequired
+	}
+	plain, err := s.vault.Get(b.SecretRef)
+	if err != nil || plain == "" {
+		return ErrTOTPNotConfigured
+	}
+	if !totp.Verify(plain, code, time.Now()) {
+		b.FailedCount++
+		if b.FailedCount >= s.maxFail {
+			b.LockedUntil = time.Now().Add(s.lockFor)
+			b.FailedCount = 0
+		}
+		_ = s.totp.Save(ctx, b)
+		if s.audit != nil {
+			s.audit.Log(ctx, "USER", userID, "totp.confirm", "failed", ip, nil)
+		}
+		return ErrTOTPInvalid
+	}
+	b.Enabled = true
+	b.FailedCount = 0
+	b.LockedUntil = time.Time{}
+	if err := s.totp.Save(ctx, b); err != nil {
+		return err
+	}
+	if s.audit != nil {
+		s.audit.Log(ctx, "USER", userID, "totp.activate", "success", ip, map[string]string{"ref": b.SecretRef})
+	}
+	return nil
+}
+
+// DisableTOTP 关闭指定用户的 TOTP 双因子绑定。
+func (s *Service) DisableTOTP(ctx context.Context, userID, ip string) error {
+	b, err := s.totp.Get(ctx, userID)
+	if err != nil || b == nil {
+		return nil
+	}
+	b.Enabled = false
+	b.SecretRef = ""
+	b.FailedCount = 0
+	b.LockedUntil = time.Time{}
+	if err := s.totp.Save(ctx, b); err != nil {
+		if s.audit != nil {
+			s.audit.Log(ctx, "USER", userID, "totp.disable", "failed", ip, map[string]string{"error": err.Error()})
+		}
+		return err
+	}
+	if s.audit != nil {
+		s.audit.Log(ctx, "USER", userID, "totp.disable", "success", ip, nil)
+	}
+	return nil
 }
 
 // TOTPEnabled 用户是否已启用 TOTP。
