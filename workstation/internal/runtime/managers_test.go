@@ -72,3 +72,47 @@ func TestJobManagerDoesNotImportCursorType(t *testing.T) {
 	reg := providers.NewRegistry()
 	_ = runtime.NewManagers(platform.Detect(), reg)
 }
+
+func TestStartSessionWithMCP(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("AIE_DATA_DIR", root)
+	paths := platform.Detect()
+	proc := process.NewManager("cursor-fake")
+	proc.SetRunner(&process.FakeRunner{})
+	reg := providers.NewRegistry()
+	reg.Register(cursor.NewProvider(proc, "cursor-fake"))
+	rt := runtime.NewManagers(paths, reg)
+
+	_, err := rt.EnsureEmployee("EMP-MCP", "Bob", "cursor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := rt.EnsureWorkspace("W-MCP", "EMP-MCP", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mcpServers := []any{
+		map[string]any{
+			"name": "workflow-mcp",
+			"type": "http",
+			"url":  "http://127.0.0.1:8080/mcp",
+		},
+	}
+	sess, err := rt.StartSessionWithMCP(context.Background(), "SES-MCP", "EMP-MCP", ws.ID, "cursor", mcpServers)
+	if err != nil {
+		t.Fatalf("StartSessionWithMCP failed: %v", err)
+	}
+	if sess.Status != runtime.SessReady {
+		t.Fatalf("expected SessReady, got %v", sess.Status)
+	}
+
+	// 验证可正常运行 Job
+	job, reply, err := rt.RunJob(context.Background(), "JOB-MCP", "EMP-MCP", "SES-MCP", "test prompt")
+	if err != nil || job.Status != runtime.JobSuccess || reply == "" {
+		t.Fatalf("RunJob failed: err=%v, status=%v, reply=%s", err, job.Status, reply)
+	}
+
+	_ = rt.StopSession(context.Background(), "SES-MCP")
+}
+

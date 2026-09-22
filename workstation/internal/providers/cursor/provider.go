@@ -214,6 +214,9 @@ func (p *Provider) Start(ctx context.Context, spec providers.StartSpec) (provide
 				"LOCALAPPDATA=" + filepath.Join(uHome, "AppData", "Local"),
 			})
 		}
+		if len(spec.MCPServers) > 0 {
+			stdioSess.SetMCPServers(spec.MCPServers)
+		}
 		acpSess = stdioSess
 	}
 	if err := acpSess.Start(ctx); err != nil {

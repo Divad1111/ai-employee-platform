@@ -80,3 +80,57 @@ func TestPresenceOffline(t *testing.T) {
 		t.Fatal("Offline 不可调度")
 	}
 }
+
+func TestCommandEnqueueFull(t *testing.T) {
+	s := reliability.NewCommandStore(0)
+
+	// 1. 测试 EnqueueFull 附加结构化载荷 (SyncSkills)
+	cmd1, _, err := s.EnqueueFull("WS-1", aiev1.CommandType_COMMAND_TYPE_SYNC_SKILLS, "EMP-1", "", `{"sync":true}`, func(cmd *aiev1.Command) {
+		cmd.Structured = &aiev1.Command_SyncSkills{
+			SyncSkills: &aiev1.SyncSkillsPayload{
+				EmployeeId: "EMP-1",
+				Packages: []*aiev1.SkillPackage{
+					{Id: "skill.test", CursorName: "sk-test", Version: "1.0.0"},
+				},
+			},
+		}
+	})
+	if err != nil {
+		t.Fatalf("EnqueueFull failed: %v", err)
+	}
+	if cmd1.Meta.Sequence != 1 {
+		t.Fatalf("expected seq 1, got %d", cmd1.Meta.Sequence)
+	}
+	if cmd1.GetSyncSkills() == nil || len(cmd1.GetSyncSkills().Packages) != 1 {
+		t.Fatalf("expected structured SyncSkills payload: %+v", cmd1)
+	}
+
+	// 2. 测试 EnqueueFull 递增序列号并附加 StartJob
+	cmd2, _, err := s.EnqueueFull("WS-1", aiev1.CommandType_COMMAND_TYPE_START_JOB, "EMP-1", "JOB-1", `{}`, func(cmd *aiev1.Command) {
+		cmd.Structured = &aiev1.Command_StartJob{
+			StartJob: &aiev1.StartJobPayload{
+				WorkflowId: "wf-1",
+				Prompt:     "do something",
+			},
+		}
+	})
+	if err != nil {
+		t.Fatalf("EnqueueFull cmd2 failed: %v", err)
+	}
+	if cmd2.Meta.Sequence != 2 {
+		t.Fatalf("expected seq 2, got %d", cmd2.Meta.Sequence)
+	}
+	if cmd2.GetStartJob() == nil || cmd2.GetStartJob().WorkflowId != "wf-1" {
+		t.Fatalf("expected structured StartJob payload: %+v", cmd2)
+	}
+
+	// 3. 验证未确认列表包含两个命令
+	unacked := s.UnackedAfter("WS-1", 0)
+	if len(unacked) != 2 {
+		t.Fatalf("expected 2 unacked commands, got %d", len(unacked))
+	}
+	if unacked[0].GetSyncSkills() == nil || unacked[1].GetStartJob() == nil {
+		t.Fatalf("unacked commands missing structured payloads: %+v", unacked)
+	}
+}
+

@@ -126,3 +126,5 @@ AIE_DATA_DIR="$HOME/.aie" ./bin/aew daemon
   - Q-06 已决 B（CP 下发签名公钥）
 - 下一步：按需进入 **V3**（当前路线图暂缓）或运维硬化
 - V3 暂缓
+- **工作流MCP 已落地**：见 [`docs/WORKFLOW_MCP.md`](docs/WORKFLOW_MCP.md)（Go 重写 PersonalWorkMCP、工作流单点授权、Admin「工作流管理」页、ACP mcpServers 注入）
+

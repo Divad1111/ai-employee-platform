@@ -208,7 +208,12 @@ func (s *Server) handleUpstream(wsID string, stream aiev1.WorkerService_ConnectS
 
 // PushCommand 入队并尝试经当前连接下发。
 func (s *Server) PushCommand(wsID string, typ aiev1.CommandType, employeeID, jobID, payloadJSON string) (*aiev1.Command, error) {
-	cmd, _, err := s.Commands.Enqueue(wsID, typ, employeeID, jobID, payloadJSON)
+	return s.PushCommandFull(wsID, typ, employeeID, jobID, payloadJSON, nil)
+}
+
+// PushCommandFull 入队并下发，可附加结构化载荷。
+func (s *Server) PushCommandFull(wsID string, typ aiev1.CommandType, employeeID, jobID, payloadJSON string, apply func(*aiev1.Command)) (*aiev1.Command, error) {
+	cmd, _, err := s.Commands.EnqueueFull(wsID, typ, employeeID, jobID, payloadJSON, apply)
 	if err != nil {
 		return nil, err
 	}

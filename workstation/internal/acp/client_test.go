@@ -41,3 +41,12 @@ func TestHandshakeFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestStdioSessionSetMCPServers(t *testing.T) {
+	s := acp.NewStdioSession("ses-test", "fake-binary", []string{}, t.TempDir())
+	s.SetMCPServers([]any{
+		map[string]any{"name": "mcp-1", "url": "http://localhost:8080/mcp"},
+	})
+	s.SetEnv([]string{"KEY=VAL"})
+}
+

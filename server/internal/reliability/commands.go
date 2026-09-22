@@ -83,6 +83,11 @@ func (s *CommandStore) LastAcked(wsID string) uint64 {
 
 // Enqueue 分配单调序号并入队；相同 command_id 幂等返回已有命令。
 func (s *CommandStore) Enqueue(wsID string, typ aiev1.CommandType, employeeID, jobID, payloadJSON string) (*aiev1.Command, bool, error) {
+	return s.EnqueueFull(wsID, typ, employeeID, jobID, payloadJSON, nil)
+}
+
+// EnqueueFull 入队并可附加结构化载荷（start_job / sync_skills）。
+func (s *CommandStore) EnqueueFull(wsID string, typ aiev1.CommandType, employeeID, jobID, payloadJSON string, apply func(*aiev1.Command)) (*aiev1.Command, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	w := s.ensure(wsID)
@@ -103,6 +108,9 @@ func (s *CommandStore) Enqueue(wsID string, typ aiev1.CommandType, employeeID, j
 		JobId:         jobID,
 		Type:          typ,
 		PayloadJson:   payloadJSON,
+	}
+	if apply != nil {
+		apply(cmd)
 	}
 	pc := &PendingCommand{Command: cmd, CreatedAt: now}
 	w.pending[seq] = pc

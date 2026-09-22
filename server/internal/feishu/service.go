@@ -57,6 +57,7 @@ type IncomingEvent struct {
 	MessageID     string
 	ParentID      string
 	ChatID        string
+	ChatType      string // 飞书 chat_type：p2p=私聊，group=群聊
 	SenderOpenID  string
 	Text          string
 	QuotedContent string
@@ -288,6 +289,10 @@ func (s *Service) rebuildLarkLocked() {
 			if msg.ChatId != nil {
 				chatID = *msg.ChatId
 			}
+			chatType := ""
+			if msg.ChatType != nil {
+				chatType = *msg.ChatType
+			}
 			msgID := ""
 			if msg.MessageId != nil {
 				msgID = *msg.MessageId
@@ -320,12 +325,13 @@ func (s *Service) rebuildLarkLocked() {
 				MessageID:     msgID,
 				ParentID:      parentID,
 				ChatID:        chatID,
+				ChatType:      chatType,
 				SenderOpenID:  openID,
 				Text:          text,
 				QuotedContent: quotedContent,
 				RawType:       "im.message.receive_v1",
 			}
-			fmt.Printf("[Feishu] 📩 收到消息事件: sender=%s, chat=%s, msgID=%s, text=%q, parentID=%s\n", openID, chatID, msgID, text, parentID)
+			fmt.Printf("[Feishu] 📩 收到消息事件: sender=%s, chat=%s, chatType=%s, msgID=%s, text=%q, parentID=%s\n", openID, chatID, chatType, msgID, text, parentID)
 			jobID, dup, err := s.HandleMessage(ctx, incoming)
 			if err != nil {
 				fmt.Printf("[Feishu] ⚠️ 消息处理反馈: %v (text=%q)\n", err, text)
@@ -910,46 +916,47 @@ func (s *Service) FetchMessageContent(ctx context.Context, messageID string) (st
 	return ParseMessageBody(msgType, contentStr), nil
 }
 
-// HandleMessage 异步创建 Message/Job 后返回
+// isP2PChat 判断是否为飞书私聊（单聊）。
+func isP2PChat(chatType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(chatType))
+	return ct == "p2p" || ct == "private"
+}
+
+// boundAliases 返回当前已绑定的员工别名列表（去重、保序）。
+func (s *Service) boundAliases() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(s.bindings))
+	for _, b := range s.bindings {
+		alias := strings.TrimSpace(b.FeishuAlias)
+		if alias == "" {
+			continue
+		}
+		key := strings.ToLower(alias)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, alias)
+	}
+	return out
+}
+
+// HandleMessage 异步创建 Message/Job 后返回。
+// 派单规则：
+//  1. 必须显式 @别名 / EMP-xxx / /emp 才能派单（不做 open_id / chat_id / 唯一绑定兜底）；
+//  2. 群聊未 @ → 静默忽略；
+//  3. 私聊未 @ → 仅回复提示「请@对应员工执行」，不创建任务。
 func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID string, duplicate bool, err error) {
 	if s.Dedupe(ev.EventID) {
 		return "", true, nil
 	}
 	empID, prompt, err := s.ParseTarget(ev.Text)
-	if err != nil {
-		// 1. 尝试按 SenderOpenID 查找绑定的员工
-		s.mu.RLock()
-		if boundEmp, ok := s.byOpenID[ev.SenderOpenID]; ok && boundEmp != "" {
-			empID = boundEmp
-			prompt = s.CleanPrompt(ev.Text)
-			err = nil
-		} else {
-			// 2. 尝试按 ChatID 查找绑定的员工
-			for _, b := range s.bindings {
-				if b.ChatID != "" && b.ChatID == ev.ChatID {
-					empID = b.EmployeeID
-					prompt = s.CleanPrompt(ev.Text)
-					err = nil
-					break
-				}
-			}
-		}
-		// 3. 如果系统当前只配置了唯一一个绑定，私聊中直接默认由该员工承接
-		if err != nil && len(s.bindings) == 1 {
-			for _, b := range s.bindings {
-				empID = b.EmployeeID
-				prompt = s.CleanPrompt(ev.Text)
-				err = nil
-				break
-			}
-		}
-		s.mu.RUnlock()
-	}
-
-	// 如果仍然未识别到目标数字员工，主动在飞书中回复指引
 	if err != nil || empID == "" {
-		if s.Sender != nil && ev.ChatID != "" {
-			card := BuildGuideCard(ev.Text)
+		// 私聊未点名员工：发送提示；群聊未点名：静默
+		if isP2PChat(ev.ChatType) && s.Sender != nil && ev.ChatID != "" {
+			card := BuildMentionRequiredCard(s.boundAliases())
 			_ = s.Sender.Send(ctx, Reply{ChatID: ev.ChatID, Content: card.MustJSON()})
 		}
 		return "", false, ErrNoEmployee
@@ -1255,6 +1262,7 @@ func ParseWebhookBody(body []byte) (challenge string, token string, ev *Incoming
 			Type    string `json:"type"`
 			Message struct {
 				ChatID    string `json:"chat_id"`
+				ChatType  string `json:"chat_type"`
 				MessageID string `json:"message_id"`
 				ParentID  string `json:"parent_id"`
 				Content   string `json:"content"`
@@ -1267,6 +1275,7 @@ func ParseWebhookBody(body []byte) (challenge string, token string, ev *Incoming
 			// 兼容旧 v1 回调格式
 			OpenID           string `json:"open_id"`
 			ChatID           string `json:"chat_id"`
+			ChatType         string `json:"chat_type"`
 			Text             string `json:"text"`
 			TextWithoutAtBot string `json:"text_without_at_bot"`
 		} `json:"event"`
@@ -1294,6 +1303,7 @@ func ParseWebhookBody(body []byte) (challenge string, token string, ev *Incoming
 			MessageID:    base.Event.Message.MessageID,
 			ParentID:     base.Event.Message.ParentID,
 			ChatID:       base.Event.Message.ChatID,
+			ChatType:     base.Event.Message.ChatType,
 			SenderOpenID: base.Event.Sender.SenderID.OpenID,
 			Text:         text,
 			RawType:      base.Header.EventType,
@@ -1309,6 +1319,7 @@ func ParseWebhookBody(body []byte) (challenge string, token string, ev *Incoming
 		return "", tok, &IncomingEvent{
 			EventID:      base.UUID,
 			ChatID:       base.Event.ChatID,
+			ChatType:     base.Event.ChatType,
 			SenderOpenID: base.Event.OpenID,
 			Text:         t,
 			RawType:      "message",

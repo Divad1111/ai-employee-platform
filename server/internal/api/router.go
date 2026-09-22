@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +23,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/feishu"
 	"github.com/ai-employee-platform/server/internal/job"
-	"github.com/ai-employee-platform/server/internal/knowledge"
+	"github.com/ai-employee-platform/server/internal/mcpauth"
 	"github.com/ai-employee-platform/server/internal/message"
 	"github.com/ai-employee-platform/server/internal/metrics"
 	"github.com/ai-employee-platform/server/internal/notification"
@@ -31,7 +32,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/scheduler"
 	"github.com/ai-employee-platform/server/internal/secret"
 	"github.com/ai-employee-platform/server/internal/session"
-	"github.com/ai-employee-platform/server/internal/skill"
+	"github.com/ai-employee-platform/server/internal/workflowmcp"
 	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/workspace"
 )
@@ -60,8 +61,14 @@ type Deps struct {
 	Artifacts       *artifact.Service
 	Registry        *registry.Service
 	Metrics         *metrics.Registry
-	Skills          *skill.Service
-	Knowledge       *knowledge.Service
+	WorkflowMCP     *workflowmcp.Service
+	MCPAuth         *mcpauth.Service
+	SkillSyncer     SkillSyncer
+}
+
+// SkillSyncer 向工作站推送技能包同步命令。
+type SkillSyncer interface {
+	SyncSkills(ctx context.Context, workstationID, employeeID string, skillIDs []string) error
 }
 
 // NewRouter 构造 HTTP 路由。
@@ -150,17 +157,38 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("DELETE /api/integrations/feishu/bindings", d.requirePerm("employee.write", d.handleDeleteFeishuBinding))
 	mux.HandleFunc("POST /api/integrations/feishu/events", d.handleFeishuEvents) // 公开 Webhook
 
-	// Skills / Knowledge / Permissions 写入
-	mux.HandleFunc("GET /api/skills", d.requirePerm("employee.read", d.handleListSkills))
-	mux.HandleFunc("POST /api/skills", d.requirePerm("employee.write", d.handleCreateSkill))
-	mux.HandleFunc("PATCH /api/skills/{id}", d.requirePerm("employee.write", d.handleUpdateSkill))
-	mux.HandleFunc("DELETE /api/skills/{id}", d.requirePerm("employee.write", d.handleDeleteSkill))
-	mux.HandleFunc("POST /api/skills/bindings", d.requirePerm("employee.write", d.handleBindSkill))
-	mux.HandleFunc("GET /api/knowledge", d.requirePerm("employee.read", d.handleListKnowledge))
-	mux.HandleFunc("POST /api/knowledge", d.requirePerm("employee.write", d.handleCreateKnowledge))
-	mux.HandleFunc("PATCH /api/knowledge/{id}", d.requirePerm("employee.write", d.handleUpdateKnowledge))
-	mux.HandleFunc("DELETE /api/knowledge/{id}", d.requirePerm("employee.write", d.handleDeleteKnowledge))
-	mux.HandleFunc("POST /api/knowledge/bindings", d.requirePerm("employee.write", d.handleBindKnowledge))
+	// 工作流MCP
+	mux.HandleFunc("GET /api/workflow-mcp/workflows", d.requirePerm("workflow.read", d.handleListWorkflows))
+	mux.HandleFunc("POST /api/workflow-mcp/workflows", d.requirePerm("workflow.write", d.handleUpsertWorkflow))
+	mux.HandleFunc("GET /api/workflow-mcp/workflows/{id}", d.requirePerm("workflow.read", d.handleGetWorkflow))
+	mux.HandleFunc("PUT /api/workflow-mcp/workflows/{id}", d.requirePerm("workflow.write", d.handleUpsertWorkflow))
+	mux.HandleFunc("DELETE /api/workflow-mcp/workflows/{id}", d.requirePerm("workflow.delete", d.handleDeleteWorkflow))
+
+	mux.HandleFunc("GET /api/workflow-mcp/skills", d.requirePerm("workflow.read", d.handleListSkillPackages))
+	mux.HandleFunc("POST /api/workflow-mcp/skills", d.requirePerm("workflow.write", d.handleUpsertSkillPackage))
+	mux.HandleFunc("POST /api/workflow-mcp/skills/sync", d.requirePerm("workflow.write", d.handleSyncSkillsToWorkstation))
+	mux.HandleFunc("GET /api/workflow-mcp/skills/{id}", d.requirePerm("workflow.read", d.handleGetSkillPackage))
+	mux.HandleFunc("PUT /api/workflow-mcp/skills/{id}", d.requirePerm("workflow.write", d.handleUpsertSkillPackage))
+	mux.HandleFunc("DELETE /api/workflow-mcp/skills/{id}", d.requirePerm("workflow.delete", d.handleDeleteSkillPackage))
+	mux.HandleFunc("GET /api/workflow-mcp/skills/{id}/export", d.requirePerm("workflow.read", d.handleExportSkillPackage))
+
+	mux.HandleFunc("GET /api/workflow-mcp/knowledge", d.requirePerm("workflow.read", d.handleListKnowledgeDocs))
+	mux.HandleFunc("POST /api/workflow-mcp/knowledge", d.requirePerm("workflow.write", d.handleUpsertKnowledgeDoc))
+	mux.HandleFunc("GET /api/workflow-mcp/knowledge/search", d.requirePerm("workflow.read", d.handleSearchKnowledgeDocs))
+	mux.HandleFunc("POST /api/workflow-mcp/knowledge/reindex", d.requirePerm("workflow.write", d.handleReindexKnowledge))
+	mux.HandleFunc("GET /api/workflow-mcp/knowledge/{id...}", d.requirePerm("workflow.read", d.handleGetKnowledgeDoc))
+	mux.HandleFunc("PUT /api/workflow-mcp/knowledge/{id...}", d.requirePerm("workflow.write", d.handleUpsertKnowledgeDoc))
+	mux.HandleFunc("DELETE /api/workflow-mcp/knowledge/{id...}", d.requirePerm("workflow.delete", d.handleDeleteKnowledgeDoc))
+	mux.HandleFunc("GET /api/workflow-mcp/search", d.requirePerm("workflow.read", d.handleUnifiedSearch))
+	mux.HandleFunc("POST /api/workflow-mcp/import", d.requirePerm("workflow.write", d.handleImportWorkflowMCP))
+
+	mux.HandleFunc("GET /api/employees/{id}/workflows", d.requirePerm("workflow.grant", d.handleListEmployeeWorkflows))
+	mux.HandleFunc("POST /api/employees/{id}/workflows", d.requirePerm("workflow.grant", d.handleGrantEmployeeWorkflow))
+	mux.HandleFunc("DELETE /api/employees/{id}/workflows", d.requirePerm("workflow.grant", d.handleRevokeEmployeeWorkflow))
+	mux.HandleFunc("GET /api/employees/{id}/mcp-tokens", d.requirePerm("workflow.grant", d.handleListEmployeeMCPTokens))
+	mux.HandleFunc("POST /api/employees/{id}/mcp-tokens", d.requirePerm("workflow.grant", d.handleIssueEmployeeMCPToken))
+	mux.HandleFunc("DELETE /api/mcp-tokens/{id}", d.requirePerm("workflow.grant", d.handleRevokeMCPToken))
+
 	mux.HandleFunc("PUT /api/permission/profiles", d.requirePerm("system.write", d.handleUpsertPermissionProfile))
 	mux.HandleFunc("PUT /api/permission/rules", d.requirePerm("system.write", d.handleUpsertPermissionRule))
 

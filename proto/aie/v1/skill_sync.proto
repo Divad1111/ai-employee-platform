@@ -1,0 +1,58 @@
+// 技能包同步与 Job 启动结构化载荷。
+// 设计依据：工作流MCP 运行时下发链路。
+syntax = "proto3";
+
+package aie.v1;
+
+option go_package = "github.com/ai-employee-platform/gen/go/aie/v1;aiev1";
+
+// SkillFile 技能包内单个文件。
+message SkillFile {
+  string path = 1;
+  bytes content = 2;
+  string sha256 = 3;
+  uint32 mode = 4;
+}
+
+// SkillPackage Cursor 兼容技能包。
+message SkillPackage {
+  string id = 1;
+  string cursor_name = 2;
+  string version = 3;
+  string skill_md = 4;
+  repeated SkillFile files = 5;
+  string content_hash = 6;
+}
+
+// MCPServerSpec 注入 ACP session/new 的 MCP 服务配置。
+message MCPServerSpec {
+  string name = 1;
+  string type = 2; // stdio | http | sse
+  string command = 3;
+  repeated string args = 4;
+  map<string, string> env = 5;
+  string url = 6;
+  map<string, string> headers = 7;
+}
+
+// SyncSkillsPayload COMMAND_TYPE_SYNC_SKILLS 载荷。
+message SyncSkillsPayload {
+  string employee_id = 1;
+  repeated SkillPackage packages = 2;
+  repeated string prune_cursor_names = 3;
+  string target_dir = 4;
+}
+
+// StartJobPayload COMMAND_TYPE_START_JOB 结构化载荷（与 payload_json 并存以兼容旧工作站）。
+message StartJobPayload {
+  string prompt = 1;
+  string workspace_id = 2;
+  string workspace_path = 3;
+  string provider = 4;
+  string workflow_id = 5;
+  string workflow_version = 6;
+  string workflow_yaml = 7;
+  repeated MCPServerSpec mcp_servers = 8;
+  repeated string skill_cursor_names = 9;
+  repeated SkillPackage skill_packages = 10;
+}

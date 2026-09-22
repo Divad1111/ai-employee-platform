@@ -1361,6 +1361,20 @@ flowchart TD
 
 ---
 
+## E-14 工作流MCP（已落地）
+
+#### T-1401 [x] 工作流MCP：领域包 + 权限 + MCP/REST + Admin + 运行时下发
+
+- **Epic**: E-14
+- **依赖**: T-1010
+- **产出物**: `server/internal/workflowmcp`、`mcpauth`、`mcpserver`；`migrations/000009_workflow_mcp.sql`；`docs/WORKFLOW_MCP.md`；Admin `/workflows`；Workstation `skillsync` + ACP `mcpServers`
+- **验收标准**:
+  - 仅工作流需授权；技能/知识闭包自动放行
+  - `POST /mcp` 双鉴权；Employee READ 不可写
+  - Job 下发可带技能包与 MCP 配置；工作站落盘到 `~/.cursor/skills`
+
+---
+
 ## E-11 Isolation（V3 · 暂缓）
 
 ### S-1101 Policy 强化 — Milestone: M10

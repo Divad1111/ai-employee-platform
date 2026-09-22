@@ -73,20 +73,22 @@ var (
 
 // Job 领域对象。
 type Job struct {
-	ID             string    `json:"id"`
-	EmployeeID     string    `json:"employee_id"`
-	WorkspaceID    string    `json:"workspace_id"`
-	SessionID      string    `json:"session_id"`
-	WorkstationID  string    `json:"workstation_id"`
-	Prompt         string    `json:"prompt"`
-	CreatedBy      string    `json:"created_by"`
-	Status         string    `json:"status"`
-	Result         string    `json:"result"`
-	IdempotencyKey string    `json:"idempotency_key"`
-	TimeoutSec     int       `json:"timeout_sec"`
-	CreatedAt      time.Time `json:"created_at"`
-	StartedAt      time.Time `json:"started_at,omitempty"`
-	CompletedAt    time.Time `json:"completed_at,omitempty"`
+	ID                string          `json:"id"`
+	EmployeeID        string          `json:"employee_id"`
+	WorkspaceID       string          `json:"workspace_id"`
+	SessionID         string          `json:"session_id"`
+	WorkstationID     string          `json:"workstation_id"`
+	Prompt            string          `json:"prompt"`
+	CreatedBy         string          `json:"created_by"`
+	Status            string          `json:"status"`
+	Result            string          `json:"result"`
+	IdempotencyKey    string          `json:"idempotency_key"`
+	TimeoutSec        int             `json:"timeout_sec"`
+	WorkflowID        string          `json:"workflow_id,omitempty"`
+	WorkflowSnapshot  map[string]any  `json:"workflow_snapshot,omitempty"`
+	CreatedAt         time.Time       `json:"created_at"`
+	StartedAt         time.Time       `json:"started_at,omitempty"`
+	CompletedAt       time.Time       `json:"completed_at,omitempty"`
 }
 
 // Event Timeline 条目。
@@ -108,6 +110,7 @@ type CreateInput struct {
 	IdempotencyKey string `json:"idempotency_key"`
 	TimeoutSec     int    `json:"timeout_sec"`
 	CreatedBy      string `json:"created_by"`
+	WorkflowID     string `json:"workflow_id"`
 }
 
 // Auditor / Bus。
@@ -164,6 +167,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string
 		Status:         StatusCreated,
 		IdempotencyKey: in.IdempotencyKey,
 		TimeoutSec:     in.TimeoutSec,
+		WorkflowID:     in.WorkflowID,
 		CreatedAt:      now,
 	}
 	if j.CreatedBy == "" {
@@ -276,6 +280,19 @@ func (s *Service) SetResult(ctx context.Context, jobID, result string) error {
 		return ErrNotFound
 	}
 	j.Result = result
+	return s.store.Save(ctx, j)
+}
+
+// SetWorkflowSnapshot 设置工作流关联及快照。
+func (s *Service) SetWorkflowSnapshot(ctx context.Context, jobID, workflowID string, snapshot map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, err := s.store.Get(ctx, jobID)
+	if err != nil || j == nil {
+		return ErrNotFound
+	}
+	j.WorkflowID = workflowID
+	j.WorkflowSnapshot = snapshot
 	return s.store.Save(ctx, j)
 }
 

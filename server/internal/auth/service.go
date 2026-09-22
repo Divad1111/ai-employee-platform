@@ -373,16 +373,19 @@ func NewMemoryUserStore() *MemoryUserStore {
 				"secret.read", "secret.write",
 				"system.read", "system.write",
 				"enrollment.write",
+				"workflow.read", "workflow.write", "workflow.delete", "workflow.grant",
 			},
 			"OPERATOR": {
 				"employee.read", "workstation.read", "workspace.read",
 				"session.read", "job.read", "job.write", "job.cancel",
 				"message.read", "message.write", "approval.read",
+				"workflow.read", "workflow.grant",
 			},
 			"VIEWER": {
 				"employee.read", "workstation.read", "workspace.read",
 				"session.read", "job.read", "message.read",
 				"approval.read", "system.read", "audit.read",
+				"workflow.read",
 			},
 		},
 	}

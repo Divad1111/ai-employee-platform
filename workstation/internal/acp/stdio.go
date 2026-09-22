@@ -36,6 +36,7 @@ type StdioSession struct {
 	acpSessionID string
 	collecting   bool
 	replyBuf     strings.Builder
+	mcpServers   []any
 }
 
 type rpcResult struct {
@@ -60,6 +61,11 @@ func NewStdioSession(sessionID, binary string, args []string, workDir string) *S
 
 // SetEnv 追加环境变量（如 CURSOR_API_KEY）。
 func (s *StdioSession) SetEnv(env []string) { s.env = append([]string{}, env...) }
+
+// SetMCPServers 设置注入 session/new 的 MCP 服务列表。
+func (s *StdioSession) SetMCPServers(servers []any) {
+	s.mcpServers = append([]any{}, servers...)
+}
 
 func (s *StdioSession) Start(ctx context.Context) error {
 	s.mu.Lock()
@@ -136,9 +142,13 @@ func (s *StdioSession) Start(ctx context.Context) error {
 	if cwd == "" {
 		cwd = os.TempDir()
 	}
+	mcpServers := s.mcpServers
+	if mcpServers == nil {
+		mcpServers = []any{}
+	}
 	raw, err := s.call(ctx, "session/new", map[string]any{
 		"cwd":        cwd,
-		"mcpServers": []any{},
+		"mcpServers": mcpServers,
 	})
 	if err != nil {
 		_ = s.Stop(ctx)

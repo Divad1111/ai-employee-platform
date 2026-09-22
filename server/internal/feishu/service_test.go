@@ -317,3 +317,60 @@ func TestParseMessageBodyFormats(t *testing.T) {
 		t.Fatalf("card parse failed:\n%s", cardParsed)
 	}
 }
+
+func TestHandleMessageRequiresExplicitMention(t *testing.T) {
+	v, _ := secret.NewMemoryVault()
+	s := feishu.NewService(v)
+	s.UpsertBinding(feishu.Binding{EmployeeID: "EMP-可乐", FeishuAlias: "可乐"})
+	fj := &fakeJobs{}
+	s.Jobs = fj
+	s.Employees = fakeEmp{}
+	sender := &feishu.MemorySender{}
+	s.Sender = sender
+
+	// 群聊未 @：静默，不回消息、不建任务
+	_, _, err := s.HandleMessage(context.Background(), feishu.IncomingEvent{
+		EventID: "g1", MessageID: "mg1", ChatID: "oc_group", ChatType: "group",
+		SenderOpenID: "ou_1", Text: "[JIRA] 状态变更通知",
+	})
+	if err != feishu.ErrNoEmployee {
+		t.Fatalf("群聊未 @ 应返回 ErrNoEmployee, got %v", err)
+	}
+	if len(sender.Sent) != 0 {
+		t.Fatalf("群聊未 @ 不应回复，实际 Sent=%d", len(sender.Sent))
+	}
+	if len(fj.created) != 0 {
+		t.Fatalf("群聊未 @ 不应建任务")
+	}
+
+	// 私聊未 @：只回提示卡，不建任务
+	_, _, err = s.HandleMessage(context.Background(), feishu.IncomingEvent{
+		EventID: "p1", MessageID: "mp1", ChatID: "oc_p2p", ChatType: "p2p",
+		SenderOpenID: "ou_1", Text: "帮我看看这个问题",
+	})
+	if err != feishu.ErrNoEmployee {
+		t.Fatalf("私聊未 @ 应返回 ErrNoEmployee, got %v", err)
+	}
+	if len(sender.Sent) != 1 {
+		t.Fatalf("私聊未 @ 应回复 1 条提示，实际 Sent=%d", len(sender.Sent))
+	}
+	if !strings.Contains(sender.Sent[0].Content, "请@对应员工执行") &&
+		!strings.Contains(sender.Sent[0].Content, "@对应员工") {
+		t.Fatalf("提示卡内容不符合预期: %s", sender.Sent[0].Content)
+	}
+	if len(fj.created) != 0 {
+		t.Fatalf("私聊未 @ 不应建任务")
+	}
+
+	// 私聊显式 @：正常派单
+	jobID, dup, err := s.HandleMessage(context.Background(), feishu.IncomingEvent{
+		EventID: "p2", MessageID: "mp2", ChatID: "oc_p2p", ChatType: "p2p",
+		SenderOpenID: "ou_1", Text: "@可乐 帮我看看这个问题",
+	})
+	if err != nil || dup || jobID != "JOB-1" {
+		t.Fatalf("私聊 @ 派单失败: job=%s dup=%v err=%v", jobID, dup, err)
+	}
+	if len(fj.created) != 1 {
+		t.Fatalf("私聊 @ 应建 1 个任务, got %d", len(fj.created))
+	}
+}

@@ -27,7 +27,8 @@ import (
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/feishu"
 	"github.com/ai-employee-platform/server/internal/job"
-	"github.com/ai-employee-platform/server/internal/knowledge"
+	"github.com/ai-employee-platform/server/internal/mcpauth"
+	"github.com/ai-employee-platform/server/internal/mcpserver"
 	"github.com/ai-employee-platform/server/internal/message"
 	"github.com/ai-employee-platform/server/internal/metrics"
 	"github.com/ai-employee-platform/server/internal/notification"
@@ -37,8 +38,8 @@ import (
 	"github.com/ai-employee-platform/server/internal/scheduler"
 	"github.com/ai-employee-platform/server/internal/secret"
 	"github.com/ai-employee-platform/server/internal/session"
-	"github.com/ai-employee-platform/server/internal/skill"
 	"github.com/ai-employee-platform/server/internal/workergrpc"
+	"github.com/ai-employee-platform/server/internal/workflowmcp"
 	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/workspace"
 )
@@ -62,6 +63,8 @@ func main() {
 		wsMetaStore workstation.MetaStore = workstation.NewMemoryMeta()
 		totpStore   approval.TOTPStore    = approval.NewMemoryTOTP()
 		certStore   certca.CertificateStore
+		wfStore     workflowmcp.Store     = workflowmcp.NewMemoryStore()
+		mcpTokStore mcpauth.Store         = mcpauth.NewMemoryStore()
 	)
 
 	if cfg.DatabaseURL != "" {
@@ -69,7 +72,7 @@ func main() {
 		if err != nil {
 			fmt.Printf("⚠️ 连接 PostgreSQL 失败 (%v)，回退到内存存储\n", err)
 		} else {
-			fmt.Println("✅ 数据库: 已连接 PostgreSQL，启用全量持久化 (Users, Employees, Workspaces, Jobs, Sessions, Workstations, TOTP, Certificates)")
+			fmt.Println("✅ 数据库: 已连接 PostgreSQL，启用全量持久化 (Users, Employees, Workspaces, Jobs, Sessions, Workstations, TOTP, Certificates, WorkflowMCP)")
 			defer db.Close()
 			users = db.NewUserStore()
 			webSessions = db.NewWebSessionStore()
@@ -80,6 +83,8 @@ func main() {
 			wsMetaStore = db.NewWorkstationMetaStore()
 			totpStore = db.NewTOTPStore()
 			certStore = db.NewCertStore()
+			wfStore = workflowmcp.NewPostgresStore(db.SQL)
+			mcpTokStore = mcpauth.NewPostgresStore(db.SQL)
 		}
 	}
 
@@ -296,18 +301,26 @@ func main() {
 		ID: "codex", Name: "Codex", Capabilities: map[string]bool{"acp": true},
 	})
 	met := metrics.New()
-	skillSvc := skill.NewService()
-	knwSvc := knowledge.NewService()
+	wfSvc := workflowmcp.NewService(wfStore)
+	mcpAuthSvc := mcpauth.NewService(mcpTokStore)
 	bridge := &feishu.Bridge{
 		Employees: empSvc, Jobs: jobSvc, Messages: msgSvc,
 		Scheduler: sched, Notify: notifySvc, Feishu: feishuSvc,
 	}
 	bridge.Wire()
 
+	mcpURL := getenv("AIE_MCP_PUBLIC_URL", "http://127.0.0.1"+cfg.HTTPAddr+"/mcp")
+	if cfg.HTTPAddr != "" && cfg.HTTPAddr[0] == ':' {
+		mcpURL = getenv("AIE_MCP_PUBLIC_URL", "http://127.0.0.1"+cfg.HTTPAddr+"/mcp")
+	}
+	sched.SetWorkflowMCP(wfSvc, mcpURL)
+	sched.SetMCPAuth(mcpAuthSvc)
+	sched.SetFullPusher(workerSvc)
+
 	// 生产/真实运行模式：默认不注入演示数据，只使用实际接入的工作站与业务数据
 	if getenv("AIE_SEED_DEMO", "0") == "1" && cfg.Env != "production" {
 		fmt.Println("调试模式: 正在注入开发演示数据...")
-		seedDemoData(empSvc, wsSvc, wsNodeSvc, presence, jobSvc, feishuSvc, skillSvc, knwSvc)
+		seedDemoData(empSvc, wsSvc, wsNodeSvc, presence, jobSvc, feishuSvc, wfSvc)
 		go func() {
 			t := time.NewTicker(5 * time.Second)
 			defer t.Stop()
@@ -379,10 +392,15 @@ func main() {
 		Artifacts:       artSvc,
 		Registry:        regSvc,
 		Metrics:         met,
-		Skills:          skillSvc,
-		Knowledge:       knwSvc,
+		WorkflowMCP:     wfSvc,
+		MCPAuth:         mcpAuthSvc,
+		SkillSyncer:     sched,
 	})
-	httpSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: httpHandler}
+	mcpSrv := &mcpserver.Server{WF: wfSvc, MCPAuth: mcpAuthSvc, Auth: authSvc, Syncer: sched}
+	mux := http.NewServeMux()
+	mux.Handle("/", httpHandler)
+	mux.Handle("/mcp", mcpSrv.Handler())
+	httpSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: mux}
 	go func() {
 		fmt.Printf("HTTP 监听 %s\n", cfg.HTTPAddr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

@@ -191,19 +191,39 @@ func BuildJobResultCard(jobID, status, summary string) *Card {
 	)
 }
 
-// BuildGuideCard 构建未识别数字员工时的使用指引卡片
+// BuildGuideCard 构建未识别数字员工时的使用指引卡片（兼容旧调用）。
 func BuildGuideCard(rawText string) *Card {
+	_ = rawText
+	return BuildMentionRequiredCard(nil)
+}
+
+// BuildMentionRequiredCard 私聊未 @ 员工时的提示卡片：请 @ 对应员工执行。
+func BuildMentionRequiredCard(aliases []string) *Card {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("收到您的消息：%q\n\n", rawText))
-	sb.WriteString("当前尚未识别到执行该任务的目标数字员工。\n\n")
-	sb.WriteString("**💡 任务派发格式：**\n")
-	sb.WriteString("• `@数字员工别名 任务需求`（例：`@AI员工 跑回归测试`）\n")
-	sb.WriteString("• `/emp 别名 任务需求`（例：`/emp AI员工 跑回归测试`）\n")
+	sb.WriteString("请 **@对应员工** 后再发送任务，否则无法派单执行。\n\n")
+	sb.WriteString("**派发格式示例：**\n")
+	if len(aliases) > 0 {
+		sb.WriteString(fmt.Sprintf("• `@%s 任务需求`\n", aliases[0]))
+		sb.WriteString(fmt.Sprintf("• `/emp %s 任务需求`\n", aliases[0]))
+	} else {
+		sb.WriteString("• `@数字员工别名 任务需求`\n")
+		sb.WriteString("• `/emp 别名 任务需求`\n")
+	}
 	sb.WriteString("• `EMP-xxxx 任务需求`\n\n")
-	sb.WriteString("> ℹ️ 提示：请在管理后台「数字员工」确认员工存在，并在「飞书企业协同」中绑定别名或当前单聊/群聊映射。")
+	if len(aliases) > 0 {
+		sb.WriteString("**当前可 @ 的员工别名：** ")
+		for i, a := range aliases {
+			if i > 0 {
+				sb.WriteString("、")
+			}
+			sb.WriteString("`@" + a + "`")
+		}
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("> ℹ️ 群聊中未 @ 数字员工的消息会被忽略；私聊也需要明确 @ 目标员工。")
 
 	return NewMarkdownCard(
-		"🤖 任务派发指引",
+		"请@对应员工执行",
 		CardTemplateOrange,
 		sb.String(),
 		"AI Employee 企业员工协同平台",

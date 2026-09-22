@@ -2,10 +2,11 @@
 # 设计依据：§71、§72
 # 支持 linux/amd64 与 linux/arm64（适配群晖 DSM Container Manager 等平台）
 
-FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS build
 ARG TARGETOS
 ARG TARGETARCH
 ENV GOTOOLCHAIN=auto
+ENV GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct
 WORKDIR /src
 # gen 为 replace 依赖，需一并拷贝
 COPY gen/go.mod gen/go.sum* ./gen/

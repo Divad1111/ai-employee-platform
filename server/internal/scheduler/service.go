@@ -14,7 +14,9 @@ import (
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/job"
+	"github.com/ai-employee-platform/server/internal/mcpauth"
 	"github.com/ai-employee-platform/server/internal/reliability"
+	"github.com/ai-employee-platform/server/internal/workflowmcp"
 	"github.com/ai-employee-platform/server/internal/workspace"
 	"github.com/ai-employee-platform/server/internal/workstation"
 )
@@ -39,6 +41,10 @@ type Service struct {
 	Workspaces         *workspace.Service
 	Presence           *reliability.Presence
 	Pusher             CommandPusher
+	FullPusher         FullCommandPusher
+	WorkflowMCP        *workflowmcp.Service
+	MCPAuth            *mcpauth.Service
+	MCPPublicURL       string // 例如 http://127.0.0.1:8080/mcp
 	MaxConcurrentPerWS int
 	MaxCPUPercent      float64 // 超过则不分新 Job（0=不限制）
 	MaxMemoryPercent   float64
@@ -126,13 +132,40 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (*job.Job, erro
 			"prompt":       j.Prompt,
 			"workspace_id": j.WorkspaceID,
 		}
+		workspacePath := ""
 		if s.Workspaces != nil && j.WorkspaceID != "" {
 			if wsp, err := s.Workspaces.Get(ctx, j.WorkspaceID); err == nil && wsp != nil && wsp.Path != "" {
 				payload["workspace_path"] = wsp.Path
+				workspacePath = wsp.Path
 			}
 		}
 		payloadJSON, _ := json.Marshal(payload)
-		if _, err := s.Pusher.PushCommand(wsID, aiev1.CommandType_COMMAND_TYPE_START_JOB, j.EmployeeID, j.ID, string(payloadJSON)); err != nil {
+
+		var startJob *aiev1.StartJobPayload
+		if s.WorkflowMCP != nil {
+			var err error
+			startJob, err = s.buildStartJobPayload(ctx, j.EmployeeID, j.Prompt, j.WorkspaceID, workspacePath, j.WorkflowID)
+			if err != nil {
+				return j, err
+			}
+			if startJob != nil && startJob.WorkflowId != "" {
+				j.WorkflowID = startJob.WorkflowId
+				j.WorkflowSnapshot = map[string]any{
+					"id": startJob.WorkflowId, "version": startJob.WorkflowVersion,
+				}
+				if s.Jobs != nil {
+					_ = s.Jobs.SetWorkflowSnapshot(ctx, j.ID, j.WorkflowID, j.WorkflowSnapshot)
+				}
+			}
+		}
+
+		if s.FullPusher != nil && startJob != nil {
+			if _, err := s.FullPusher.PushCommandFull(wsID, aiev1.CommandType_COMMAND_TYPE_START_JOB, j.EmployeeID, j.ID, string(payloadJSON), func(cmd *aiev1.Command) {
+				cmd.Structured = &aiev1.Command_StartJob{StartJob: startJob}
+			}); err != nil {
+				return j, err
+			}
+		} else if _, err := s.Pusher.PushCommand(wsID, aiev1.CommandType_COMMAND_TYPE_START_JOB, j.EmployeeID, j.ID, string(payloadJSON)); err != nil {
 			return j, err
 		}
 	}

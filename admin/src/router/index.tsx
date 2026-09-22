@@ -12,12 +12,11 @@ import { EmployeeDetailPage } from '../pages/EmployeeDetailPage'
 import { EmployeesPage } from '../pages/EmployeesPage'
 import { FeishuPage } from '../pages/FeishuPage'
 import { JobDetailPage, JobsPage } from '../pages/JobsPage'
-import { KnowledgePage } from '../pages/KnowledgePage'
 import { LoginPage } from '../pages/LoginPage'
 import { SetupPage } from '../pages/SetupPage'
 import { PermissionsPage } from '../pages/PermissionsPage'
 import { SessionsPage } from '../pages/SessionsPage'
-import { SkillsPage } from '../pages/SkillsPage'
+import { WorkflowMcpPage } from '../pages/workflow/WorkflowMcpPage'
 import { WorkstationsPage } from '../pages/WorkstationsPage'
 import { WorkspacesPage } from '../pages/WorkspacesPage'
 import { isAuthenticated } from '../stores/session'
@@ -46,8 +45,9 @@ export function AppRouter() {
             <Route path="/jobs/:id" element={<JobDetailPage />} />
             <Route path="/sessions" element={<SessionsPage />} />
             <Route path="/feishu" element={<FeishuPage />} />
-            <Route path="/skills" element={<SkillsPage />} />
-            <Route path="/knowledge" element={<KnowledgePage />} />
+            <Route path="/workflows" element={<WorkflowMcpPage />} />
+            <Route path="/skills" element={<Navigate to="/workflows" replace />} />
+            <Route path="/knowledge" element={<Navigate to="/workflows" replace />} />
             <Route path="/permissions" element={<PermissionsPage />} />
             <Route path="/approvals" element={<ApprovalsPage />} />
             <Route path="/secrets" element={<SecretsPage />} />

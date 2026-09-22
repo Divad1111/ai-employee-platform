@@ -4,9 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strings"
 
 	"github.com/ai-employee-platform/server/internal/auth"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // PostgresWebSessionStore 在 PostgreSQL 中持久化管理员 Web 登录会话。
@@ -19,7 +19,10 @@ func (s *PostgresWebSessionStore) Save(ctx context.Context, sess *auth.Session) 
 	if !sess.StepUpUntil.IsZero() {
 		stepUp = sql.NullTime{Time: sess.StepUpUntil, Valid: true}
 	}
-	rolesStr := "{" + strings.Join(sess.Roles, ",") + "}"
+	roles := sess.Roles
+	if roles == nil {
+		roles = []string{}
+	}
 	query := `
 		INSERT INTO admin_web_sessions (token, user_id, username, roles, expires_at, step_up_until)
 		VALUES ($1, $2, $3, $4, $5, $6)
@@ -30,18 +33,21 @@ func (s *PostgresWebSessionStore) Save(ctx context.Context, sess *auth.Session) 
 			expires_at = EXCLUDED.expires_at,
 			step_up_until = EXCLUDED.step_up_until
 	`
-	_, err := s.db.SQL.ExecContext(ctx, query, sess.Token, sess.UserID, sess.Username, rolesStr, sess.ExpiresAt, stepUp)
+	_, err := s.db.SQL.ExecContext(ctx, query, sess.Token, sess.UserID, sess.Username, roles, sess.ExpiresAt, stepUp)
 	return err
 }
 
 func (s *PostgresWebSessionStore) Get(ctx context.Context, token string) (*auth.Session, error) {
 	row := s.db.SQL.QueryRowContext(ctx, `
-		SELECT token, user_id, username, expires_at, step_up_until
+		SELECT token, user_id, username, roles, expires_at, step_up_until
 		FROM admin_web_sessions
 		WHERE token = $1`, token)
 	var sess auth.Session
 	var stepUp sql.NullTime
-	if err := row.Scan(&sess.Token, &sess.UserID, &sess.Username, &sess.ExpiresAt, &stepUp); err != nil {
+	var roles []string
+	// pgx/stdlib 下 text[] 需经 Map.SQLScanner 才能扫入 []string
+	tm := pgtype.NewMap()
+	if err := row.Scan(&sess.Token, &sess.UserID, &sess.Username, tm.SQLScanner(&roles), &sess.ExpiresAt, &stepUp); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -50,7 +56,11 @@ func (s *PostgresWebSessionStore) Get(ctx context.Context, token string) (*auth.
 	if stepUp.Valid {
 		sess.StepUpUntil = stepUp.Time
 	}
-	sess.Roles = []string{"ADMIN"}
+	sess.Roles = roles
+	if len(sess.Roles) == 0 {
+		// 兼容历史脏数据：roles 列为空时回退，避免整站 403
+		sess.Roles = []string{"ADMIN"}
+	}
 	return &sess, nil
 }
 

@@ -32,6 +32,7 @@ import (
 	"github.com/ai-employee-platform/workstation/internal/runtime"
 	"github.com/ai-employee-platform/workstation/internal/runtime/process"
 	"github.com/ai-employee-platform/workstation/internal/runtime/recovery"
+	"github.com/ai-employee-platform/workstation/internal/skillsync"
 )
 
 // Options 启动选项。
@@ -240,6 +241,14 @@ func (d *Daemon) maintainControlPlane(ctx context.Context) {
 
 func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cmd *aiev1.Command) error {
 	switch cmd.GetType() {
+	case aiev1.CommandType_COMMAND_TYPE_SYNC_SKILLS:
+		payload := cmd.GetSyncSkills()
+		if payload == nil {
+			return nil
+		}
+		_, err := skillsync.Sync(payload.GetPackages(), payload.GetTargetDir(), payload.GetPruneCursorNames())
+		return err
+
 	case aiev1.CommandType_COMMAND_TYPE_START_JOB:
 		jobID := cmd.GetJobId()
 		empID := cmd.GetEmployeeId()
@@ -254,6 +263,20 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 		if pJSON := cmd.GetPayloadJson(); pJSON != "" {
 			_ = json.Unmarshal([]byte(pJSON), &payload)
 		}
+		startJob := cmd.GetStartJob()
+		if startJob != nil {
+			if startJob.GetPrompt() != "" {
+				payload.Prompt = startJob.GetPrompt()
+			}
+			if startJob.GetWorkspaceId() != "" {
+				payload.WorkspaceID = startJob.GetWorkspaceId()
+			}
+			if startJob.GetWorkspacePath() != "" {
+				payload.WorkspacePath = startJob.GetWorkspacePath()
+			}
+			// 先落盘技能包，再 StartSession
+			_, _ = skillsync.SyncFromStartJob(startJob)
+		}
 
 		// 确保本地员工视图
 		_, _ = d.Runtime.EnsureEmployee(empID, empID, "cursor")
@@ -264,17 +287,47 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			_, _ = d.Runtime.EnsureWorkspace(wsID, empID, payload.WorkspacePath)
 		}
 
-		// 会话复用或按需创建
+		// 将会话 MCP 配置转为 []any
+		var mcpServers []any
+		if startJob != nil {
+			for _, m := range startJob.GetMcpServers() {
+				entry := map[string]any{"name": m.GetName()}
+				if m.GetType() != "" {
+					entry["type"] = m.GetType()
+				}
+				if m.GetCommand() != "" {
+					entry["command"] = m.GetCommand()
+				}
+				if len(m.GetArgs()) > 0 {
+					entry["args"] = m.GetArgs()
+				}
+				if len(m.GetEnv()) > 0 {
+					entry["env"] = m.GetEnv()
+				}
+				if m.GetUrl() != "" {
+					entry["url"] = m.GetUrl()
+				}
+				if len(m.GetHeaders()) > 0 {
+					entry["headers"] = m.GetHeaders()
+				}
+				mcpServers = append(mcpServers, entry)
+			}
+		}
+
+		// 会话复用或按需创建；MCP 变化时需重建
 		var sessID string
 		activeSess := d.Runtime.FindActiveSession(empID)
-		if activeSess != nil {
+		if activeSess != nil && len(mcpServers) == 0 {
 			sessID = activeSess.ID
 		} else {
+			if activeSess != nil {
+				_ = d.Runtime.StopSession(ctx, activeSess.ID)
+			}
 			sessID = "ses-" + empID
 			_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_STARTED,
 				fmt.Sprintf(`{"status":"STARTING","provider":"cursor","workspace_id":%q}`, wsID)))
 			startCtx, startCancel := context.WithTimeout(ctx, 2*time.Minute)
-			_, err := d.Runtime.StartSession(startCtx, sessID, empID, wsID, "cursor")
+			_, err := d.Runtime.StartSessionWithMCP(startCtx, sessID, empID, wsID, "cursor", mcpServers)
 			startCancel()
 			if err != nil && err != runtime.ErrActiveSession {
 				_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_ERROR,

@@ -35,6 +35,8 @@ type StartSpec struct {
 	WorkspacePath string
 	// SessionID 会话 ID（可由上层生成）
 	SessionID string
+	// MCPServers 注入 ACP session/new 的 MCP 配置（任意 JSON 可序列化结构）
+	MCPServers []any
 }
 
 // SessionStatus 描述会话运行状态摘要。

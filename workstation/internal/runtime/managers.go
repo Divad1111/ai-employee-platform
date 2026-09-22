@@ -137,6 +137,11 @@ func (m *Managers) EnsureWorkspace(id, employeeID, path string) (*Workspace, err
 
 // StartSession 按需启动；无 Job 时可不跑（调用方决定）。
 func (m *Managers) StartSession(ctx context.Context, sessID, employeeID, workspaceID, provider string) (*Session, error) {
+	return m.StartSessionWithMCP(ctx, sessID, employeeID, workspaceID, provider, nil)
+}
+
+// StartSessionWithMCP 启动 Session 并可注入 MCP Servers。
+func (m *Managers) StartSessionWithMCP(ctx context.Context, sessID, employeeID, workspaceID, provider string, mcpServers []any) (*Session, error) {
 	m.mu.Lock()
 	for _, s := range m.sessions {
 		if s.EmployeeID == employeeID && s.Status != SessStopped && s.Status != SessUnknown {
@@ -177,6 +182,7 @@ func (m *Managers) StartSession(ctx context.Context, sessID, employeeID, workspa
 	}
 	agent, err := prov.Start(ctx, providers.StartSpec{
 		EmployeeID: employeeID, WorkspacePath: wsPath, SessionID: sessID,
+		MCPServers: mcpServers,
 	})
 	if err != nil {
 		m.markSession(sessID, SessUnknown)

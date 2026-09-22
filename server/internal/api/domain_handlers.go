@@ -95,13 +95,11 @@ func (d Deps) handleEmployeeOverview(w http.ResponseWriter, r *http.Request, _ *
 			}
 		}
 	}
-	var skills any
-	if d.Skills != nil {
-		skills = d.Skills.ListByEmployee(r.Context(), id)
-	}
-	var knowledge any
-	if d.Knowledge != nil {
-		knowledge = d.Knowledge.ListByEmployee(r.Context(), id)
+	var workflows any
+	var effectiveSkills any
+	if d.WorkflowMCP != nil {
+		workflows, _ = d.WorkflowMCP.ListEmployeeWorkflows(r.Context(), id)
+		effectiveSkills, _ = d.WorkflowMCP.EffectiveSkills(r.Context(), id)
 	}
 	var binding any
 	if d.Feishu != nil {
@@ -109,136 +107,8 @@ func (d Deps) handleEmployeeOverview(w http.ResponseWriter, r *http.Request, _ *
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"employee": e, "sessions": sessions, "jobs": jobsOut,
-		"skills": skills, "knowledge": knowledge, "feishu": binding,
+		"workflows": workflows, "effective_skills": effectiveSkills, "feishu": binding,
 	})
-}
-
-func (d Deps) handleListSkills(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	if d.Skills == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": d.Skills.List(r.Context())})
-}
-
-func (d Deps) handleCreateSkill(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	if d.Skills == nil {
-		writeErr(w, http.StatusServiceUnavailable, "skills 未启用")
-		return
-	}
-	var body struct {
-		Name, Description, Category string
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "无效请求体")
-		return
-	}
-	sk, err := d.Skills.Create(r.Context(), body.Name, body.Description, body.Category)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusCreated, sk)
-}
-
-func (d Deps) handleUpdateSkill(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	var body struct {
-		Name, Description, Category string
-	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	sk, err := d.Skills.Update(r.Context(), r.PathValue("id"), body.Name, body.Description, body.Category)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, sk)
-}
-
-func (d Deps) handleDeleteSkill(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	if err := d.Skills.Delete(r.Context(), r.PathValue("id")); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (d Deps) handleBindSkill(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	var body struct {
-		EmployeeID string `json:"employee_id"`
-		SkillID    string `json:"skill_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "无效请求体")
-		return
-	}
-	if err := d.Skills.Bind(r.Context(), body.EmployeeID, body.SkillID); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "bound"})
-}
-
-func (d Deps) handleListKnowledge(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	if d.Knowledge == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": d.Knowledge.List(r.Context())})
-}
-
-func (d Deps) handleCreateKnowledge(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	var body struct {
-		Title, Summary, Content string
-		Tags                    []string
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "无效请求体")
-		return
-	}
-	e, err := d.Knowledge.Create(r.Context(), body.Title, body.Summary, body.Content, body.Tags)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusCreated, e)
-}
-
-func (d Deps) handleUpdateKnowledge(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	var body struct {
-		Title, Summary, Content string
-		Tags                    []string
-	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	e, err := d.Knowledge.Update(r.Context(), r.PathValue("id"), body.Title, body.Summary, body.Content, body.Tags)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, e)
-}
-
-func (d Deps) handleDeleteKnowledge(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	if err := d.Knowledge.Delete(r.Context(), r.PathValue("id")); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (d Deps) handleBindKnowledge(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	var body struct {
-		EmployeeID  string `json:"employee_id"`
-		KnowledgeID string `json:"knowledge_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "无效请求体")
-		return
-	}
-	if err := d.Knowledge.Bind(r.Context(), body.EmployeeID, body.KnowledgeID); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "bound"})
 }
 
 func (d Deps) handleUpsertPermissionProfile(w http.ResponseWriter, r *http.Request, sess *auth.Session) {

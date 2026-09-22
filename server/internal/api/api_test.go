@@ -19,9 +19,11 @@ import (
 	"github.com/ai-employee-platform/server/internal/enrollment"
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/job"
+	"github.com/ai-employee-platform/server/internal/mcpauth"
 	"github.com/ai-employee-platform/server/internal/message"
 	"github.com/ai-employee-platform/server/internal/reliability"
 	"github.com/ai-employee-platform/server/internal/session"
+	"github.com/ai-employee-platform/server/internal/workflowmcp"
 	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/workspace"
 )
@@ -72,6 +74,8 @@ func setupAPI(t *testing.T) (http.Handler, string) {
 		Messages:     message.NewService(message.NewMemoryStore(), auditor),
 		Bus:          bus,
 		Audit:        auditor,
+		WorkflowMCP:  workflowmcp.NewService(workflowmcp.NewMemoryStore()),
+		MCPAuth:      mcpauth.NewService(mcpauth.NewMemoryStore()),
 	})
 	token := login(t, h)
 	return h, token

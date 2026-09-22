@@ -13,7 +13,6 @@ import {
   IconTerminal,
   IconMessage,
   IconZap,
-  IconBook,
   IconShield,
   IconCheckCircle,
   IconKey,
@@ -64,8 +63,7 @@ const navSections: NavSection[] = [
   {
     title: '能力与协同扩展',
     items: [
-      { to: '/skills', label: '技能库目录', icon: IconZap },
-      { to: '/knowledge', label: '知识库文档', icon: IconBook },
+      { to: '/workflows', label: '工作流管理', icon: IconZap },
       { to: '/feishu', label: '飞书应用协同', icon: IconMessage },
     ],
   },
