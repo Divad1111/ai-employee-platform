@@ -19,6 +19,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/artifact"
 	"github.com/ai-employee-platform/server/internal/audit"
 	"github.com/ai-employee-platform/server/internal/auth"
+	"github.com/ai-employee-platform/server/internal/automation"
 	"github.com/ai-employee-platform/server/internal/certca"
 	"github.com/ai-employee-platform/server/internal/config"
 	"github.com/ai-employee-platform/server/internal/database"
@@ -65,6 +66,7 @@ func main() {
 		certStore   certca.CertificateStore
 		wfStore     workflowmcp.Store     = workflowmcp.NewMemoryStore()
 		mcpTokStore mcpauth.Store         = mcpauth.NewMemoryStore()
+		autoStore   automation.Store      = automation.NewMemoryStore()
 	)
 
 	if cfg.DatabaseURL != "" {
@@ -72,7 +74,7 @@ func main() {
 		if err != nil {
 			fmt.Printf("⚠️ 连接 PostgreSQL 失败 (%v)，回退到内存存储\n", err)
 		} else {
-			fmt.Println("✅ 数据库: 已连接 PostgreSQL，启用全量持久化 (Users, Employees, Workspaces, Jobs, Sessions, Workstations, TOTP, Certificates, WorkflowMCP)")
+			fmt.Println("✅ 数据库: 已连接 PostgreSQL，启用全量持久化 (Users, Employees, Workspaces, Jobs, Sessions, Workstations, TOTP, Certificates, WorkflowMCP, Automation)")
 			defer db.Close()
 			users = db.NewUserStore()
 			webSessions = db.NewWebSessionStore()
@@ -85,6 +87,7 @@ func main() {
 			certStore = db.NewCertStore()
 			wfStore = workflowmcp.NewPostgresStore(db.SQL)
 			mcpTokStore = mcpauth.NewPostgresStore(db.SQL)
+			autoStore = automation.NewPostgresStore(db.SQL)
 		}
 	}
 
@@ -186,6 +189,10 @@ func main() {
 
 	sched := scheduler.New(jobSvc, empSvc, wsNodeSvc, presence, workerSvc)
 	sched.SetWorkspaces(wsSvc)
+
+	autoSvc := automation.New(autoStore, jobSvc, sched, vault, auditor)
+	autoSvc.SetNotify(automation.FeishuBridge{Svc: feishuSvc}, notifySvc)
+
 	workerSvc.OnEvent = func(wsID string, ev *aiev1.Event) {
 		ctx := context.Background()
 		jobID := ev.GetJobId()
@@ -264,6 +271,7 @@ func main() {
 						uj.Result = payload["reply"]
 					}
 					_ = notifySvc.OnJobTerminal(ctx, uj)
+					autoSvc.OnJobTerminal(ctx, uj)
 				}
 			}
 		case aiev1.EventType_EVENT_TYPE_JOB_FAILED:
@@ -279,6 +287,7 @@ func main() {
 				}
 				if err == nil && uj != nil {
 					_ = notifySvc.OnJobTerminal(ctx, uj)
+					autoSvc.OnJobTerminal(ctx, uj)
 				}
 			}
 		}
@@ -345,6 +354,7 @@ func main() {
 				return
 			case <-t.C:
 				sched.Tick(context.Background())
+				autoSvc.Tick(context.Background(), time.Now().UTC())
 				// 刷新基础 metrics
 				nOnline := 0
 				for _, v := range wsNodeSvc.List(context.Background()) {
@@ -395,6 +405,7 @@ func main() {
 		WorkflowMCP:     wfSvc,
 		MCPAuth:         mcpAuthSvc,
 		SkillSyncer:     sched,
+		Automation:      autoSvc,
 	})
 	mcpSrv := &mcpserver.Server{WF: wfSvc, MCPAuth: mcpAuthSvc, Auth: authSvc, Syncer: sched}
 	mux := http.NewServeMux()

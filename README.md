@@ -128,3 +128,14 @@ AIE_DATA_DIR="$HOME/.aie" ./bin/aew daemon
 - V3 暂缓
 - **工作流MCP 已落地**：见 [`docs/WORKFLOW_MCP.md`](docs/WORKFLOW_MCP.md)（Go 重写 PersonalWorkMCP、工作流单点授权、Admin「工作流管理」页、ACP mcpServers 注入）
 
+
+任务描述：
+现在任务都是通过飞书发送的，现在我想在主分类“任务调度流转”下添加一个子页签“自动化任务”，这个“自动化任务”页签里主要包含：
+1. 定时任务周期性的任务制定，比如每日，每周，每月，每年，自定义周期等
+2. 日历任务，在日历的每一天上挂任务
+3. webhook推送，接收外部的webhook推送，需要在这个页面进行webhook的配置，接收的webhook一定要做安全校验不然任何人都可以推送webhook.
+
+要求：
+1. 代码设计可扩展
+2. 代码要有注释
+3. 代码结构清晰

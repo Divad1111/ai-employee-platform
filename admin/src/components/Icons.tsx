@@ -194,4 +194,14 @@ export function IconTrash({ size = 16, ...props }: IconProps) {
   )
 }
 
+/** 时钟：自动化 / 定时任务 */
+export function IconClock({ size = 18, ...props }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </svg>
+  )
+}
+
 

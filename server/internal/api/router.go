@@ -17,6 +17,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/artifact"
 	"github.com/ai-employee-platform/server/internal/audit"
 	"github.com/ai-employee-platform/server/internal/auth"
+	"github.com/ai-employee-platform/server/internal/automation"
 	"github.com/ai-employee-platform/server/internal/certca"
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/enrollment"
@@ -64,6 +65,7 @@ type Deps struct {
 	WorkflowMCP     *workflowmcp.Service
 	MCPAuth         *mcpauth.Service
 	SkillSyncer     SkillSyncer
+	Automation      *automation.Service
 }
 
 // SkillSyncer 向工作站推送技能包同步命令。
@@ -200,6 +202,19 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/secrets/bindings", d.requirePerm("secret.write", d.handleBindSecret))
 	mux.HandleFunc("POST /api/employees/{employee_id}/secrets/resolve", d.requirePerm("secret.read", d.handleResolveSecrets))
 	mux.HandleFunc("POST /api/scheduler/tick", d.requirePerm("job.write", d.handleSchedulerTick))
+
+	// Automation（周期 / 日历 / Webhook）
+	mux.HandleFunc("GET /api/automations", d.requirePerm("automation.read", d.handleListAutomations))
+	mux.HandleFunc("POST /api/automations", d.requirePerm("automation.write", d.handleCreateAutomation))
+	mux.HandleFunc("GET /api/automations/{id}", d.requirePerm("automation.read", d.handleGetAutomation))
+	mux.HandleFunc("PATCH /api/automations/{id}", d.requirePerm("automation.write", d.handleUpdateAutomation))
+	mux.HandleFunc("DELETE /api/automations/{id}", d.requirePerm("automation.write", d.handleDeleteAutomation))
+	mux.HandleFunc("GET /api/automations/{id}/calendar-items", d.requirePerm("automation.read", d.handleListCalendarItems))
+	mux.HandleFunc("PUT /api/automations/{id}/calendar-items", d.requirePerm("automation.write", d.handlePutCalendarItems))
+	mux.HandleFunc("GET /api/automations/{id}/runs", d.requirePerm("automation.read", d.handleListAutomationRuns))
+	mux.HandleFunc("POST /api/automations/{id}/rotate-secrets", d.requirePermStepUp("automation.write", d.handleRotateAutomationSecrets))
+	mux.HandleFunc("POST /api/automations/tick", d.requirePerm("automation.write", d.handleAutomationTick))
+	mux.HandleFunc("POST /api/integrations/automation/hooks/{path_token}", d.handleAutomationWebhook)
 
 	// Permission / Approval / TOTP / Step-up（M7）
 	mux.HandleFunc("POST /api/auth/step-up", d.requireAuth(d.handleStepUp))
@@ -776,6 +791,9 @@ func (d Deps) handleJobTransition(w http.ResponseWriter, r *http.Request, sess *
 	if d.Notify != nil {
 		_ = d.Notify.OnJobTerminal(r.Context(), j)
 	}
+	if d.Automation != nil {
+		d.Automation.OnJobTerminal(r.Context(), j)
+	}
 	if d.Scheduler != nil && j.WorkstationID != "" {
 		d.Scheduler.Release(j.WorkstationID)
 	}
@@ -790,6 +808,9 @@ func (d Deps) handleCancelJob(w http.ResponseWriter, r *http.Request, sess *auth
 	}
 	if d.Notify != nil {
 		_ = d.Notify.OnJobTerminal(r.Context(), j)
+	}
+	if d.Automation != nil {
+		d.Automation.OnJobTerminal(r.Context(), j)
 	}
 	if d.Scheduler != nil && j.WorkstationID != "" {
 		d.Scheduler.Release(j.WorkstationID)

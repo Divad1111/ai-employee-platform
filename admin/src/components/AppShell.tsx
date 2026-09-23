@@ -21,6 +21,7 @@ import {
   IconSettings,
   IconLogOut,
   IconFolder,
+  IconClock,
 } from './Icons'
 
 type NavItem = {
@@ -56,6 +57,7 @@ const navSections: NavSection[] = [
     title: '任务调度流转',
     items: [
       { to: '/jobs', label: '任务流转中心', icon: IconJobs },
+      { to: '/automations', label: '自动化任务', icon: IconClock },
       { to: '/artifacts', label: '任务制品产物', icon: IconPackage },
       { to: '/approvals', label: '人工审批中心', icon: IconCheckCircle },
     ],

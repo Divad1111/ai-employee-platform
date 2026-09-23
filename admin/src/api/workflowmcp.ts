@@ -99,9 +99,31 @@ export async function reindexKnowledge() {
 }
 
 export async function unifiedSearch(q: string) {
-  return apiGet<{ workflows: unknown[]; skills: unknown[]; knowledge: unknown[] }>(
-    `/workflow-mcp/search?q=${encodeURIComponent(q)}`,
-  )
+  return apiGet<{
+    workflows: Array<{
+      id: string
+      name?: string
+      version?: string
+      description?: string
+      score?: number
+    }>
+    skills: Array<{
+      id: string
+      name?: string
+      version?: string
+      description?: string
+      cursor_name?: string
+      score?: number
+    }>
+    knowledge: Array<{
+      id: string
+      title?: string
+      path?: string
+      source?: string
+      content?: string
+      score?: number
+    }>
+  }>(`/workflow-mcp/search?q=${encodeURIComponent(q)}`)
 }
 
 export async function listEmployeeWorkflows(empId: string) {

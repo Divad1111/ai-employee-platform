@@ -12,6 +12,7 @@ import { EmployeeDetailPage } from '../pages/EmployeeDetailPage'
 import { EmployeesPage } from '../pages/EmployeesPage'
 import { FeishuPage } from '../pages/FeishuPage'
 import { JobDetailPage, JobsPage } from '../pages/JobsPage'
+import { AutomationsPage } from '../pages/AutomationsPage'
 import { LoginPage } from '../pages/LoginPage'
 import { SetupPage } from '../pages/SetupPage'
 import { PermissionsPage } from '../pages/PermissionsPage'
@@ -43,6 +44,7 @@ export function AppRouter() {
             <Route path="/workspaces" element={<WorkspacesPage />} />
             <Route path="/jobs" element={<JobsPage />} />
             <Route path="/jobs/:id" element={<JobDetailPage />} />
+            <Route path="/automations" element={<AutomationsPage />} />
             <Route path="/sessions" element={<SessionsPage />} />
             <Route path="/feishu" element={<FeishuPage />} />
             <Route path="/workflows" element={<WorkflowMcpPage />} />
