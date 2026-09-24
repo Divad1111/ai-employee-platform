@@ -604,6 +604,9 @@ a.stat-card:focus-visible {
   gap: 1rem;
   margin: 0.5rem 0;
   width: 100%;
+  padding: 0 1.1rem 1.1rem;
+  max-width: 560px;
+  box-sizing: border-box;
 }
 
 .stack-form label {
@@ -744,8 +747,196 @@ button:disabled, .btn:disabled {
 }
 
 .field-caption {
-  display: inline;
+  display: block;
   line-height: 1.3;
+  margin-bottom: 0.35rem;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.stack-form .form-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.25rem;
+}
+
+/* 可搜索下拉 */
+.search-select {
+  position: relative;
+  width: 100%;
+  min-width: 160px;
+}
+
+.inline-form .search-select {
+  width: auto;
+  flex: 0 1 auto;
+  min-width: 200px;
+}
+
+.search-select > input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.search-select-menu {
+  position: absolute;
+  z-index: 40;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  margin: 0;
+  padding: 0.35rem 0;
+  list-style: none;
+  max-height: 240px;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+
+.search-select-menu button {
+  width: 100%;
+  justify-content: flex-start;
+  background: transparent !important;
+  color: var(--text-primary) !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  font-weight: 500;
+  padding: 0.55rem 0.85rem;
+  transform: none !important;
+}
+
+.search-select-menu button:hover,
+.search-select-menu button.is-active {
+  background: #f0fdf4 !important;
+  color: var(--brand-700) !important;
+}
+
+.search-select-label {
+  flex: 1;
+  text-align: left;
+}
+
+.search-select-code {
+  font-size: 0.75rem;
+  font-family: ui-monospace, monospace;
+  margin-left: 0.5rem;
+}
+
+.search-select-empty {
+  padding: 0.65rem 0.85rem;
+  font-size: 0.84rem;
+}
+
+/* 角色折叠面板 */
+.role-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.role-panel-title {
+  min-width: 0;
+  flex: 1;
+}
+
+.role-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.role-collapse-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  background: transparent !important;
+  color: inherit !important;
+  box-shadow: none !important;
+  border: none !important;
+  padding: 0 !important;
+  transform: none !important;
+}
+
+.role-collapse-toggle:hover {
+  background: transparent !important;
+  transform: none !important;
+}
+
+.role-collapse-chevron {
+  flex-shrink: 0;
+  width: 1.75rem;
+  height: 1.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  transition: transform 0.15s ease;
+}
+
+.role-collapse-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.toolbar-search {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 220px;
+  flex: 1;
+  max-width: 360px;
+}
+
+.toolbar-search input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.perm-chip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.perm-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: #f8fafc;
+}
+
+.perm-chip-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.perm-add-row {
+  display: grid;
+  grid-template-columns: 1fr minmax(140px, 180px) auto;
+  gap: 0.5rem;
+  align-items: end;
+}
+
+@media (max-width: 720px) {
+  .perm-add-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 .auto-expand-btn {

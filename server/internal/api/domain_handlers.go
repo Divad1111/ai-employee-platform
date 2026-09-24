@@ -6,25 +6,66 @@ import (
 	"strings"
 
 	"github.com/ai-employee-platform/server/internal/auth"
+	"github.com/ai-employee-platform/server/internal/authz"
 	"github.com/ai-employee-platform/server/internal/feishu"
 	"github.com/ai-employee-platform/server/internal/job"
 	"github.com/ai-employee-platform/server/internal/permission"
 )
 
-// handleDashboard 对齐设计文档 §9：统计 + 活跃 Job + Workstation 资源。
-func (d Deps) handleDashboard(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	emps, _ := d.Employees.List(r.Context())
-	jobs, _ := d.Jobs.List(r.Context())
-	active, _ := d.Jobs.ActiveCount(r.Context())
-	wss := d.Workstations.List(r.Context())
+// handleDashboard 对齐设计文档 §9：统计 + 活跃 Job + Workstation 资源（按当前用户 Scope 过滤）。
+func (d Deps) handleDashboard(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	allEmps, _ := d.Employees.List(r.Context())
+	emps := d.filterEmployees(r, sess, allEmps)
+	empIDs := map[string]struct{}{}
+	for _, e := range emps {
+		empIDs[e.ID] = struct{}{}
+	}
+
+	jobScope := d.resolveScope(r.Context(), sess, "job.read")
+	allJobs, _ := d.Jobs.List(r.Context())
+	jobs := make([]*job.Job, 0, len(allJobs))
+	for _, j := range allJobs {
+		if jobScope == authz.ScopeALL {
+			jobs = append(jobs, j)
+			continue
+		}
+		if _, ok := empIDs[j.EmployeeID]; ok {
+			jobs = append(jobs, j)
+		}
+	}
+
+	allWS := d.Workstations.List(r.Context())
+	ids := make([]string, 0, len(allWS))
+	for _, v := range allWS {
+		ids = append(ids, v.ID)
+	}
+	allowedWS := d.filterWorkstationIDs(r, sess, ids)
+	allowedSet := map[string]struct{}{}
+	for _, id := range allowedWS {
+		allowedSet[id] = struct{}{}
+	}
+	wsScope := d.resolveScope(r.Context(), sess, "workstation.read")
+
 	online := 0
-	errors := 0
-	busy := 0
-	for _, v := range wss {
+	wsRows := make([]any, 0)
+	for _, v := range allWS {
+		if wsScope != authz.ScopeALL {
+			if _, ok := allowedSet[v.ID]; !ok {
+				continue
+			}
+		}
 		if v.Status == "ONLINE" {
 			online++
 		}
+		wsRows = append(wsRows, map[string]any{
+			"id": v.ID, "name": v.Name, "status": v.Status,
+			"cpu_percent": v.CPUPercent, "memory_percent": v.MemoryPercent,
+		})
 	}
+
+	errors := 0
+	busy := 0
+	active := 0
 	activeJobs := make([]any, 0)
 	for _, j := range jobs {
 		st := string(j.Status)
@@ -35,6 +76,7 @@ func (d Deps) handleDashboard(w http.ResponseWriter, r *http.Request, _ *auth.Se
 			busy++
 		}
 		if st != job.StatusSuccess && st != job.StatusFailed && st != job.StatusCancelled && st != job.StatusTimeout {
+			active++
 			if len(activeJobs) < 20 {
 				activeJobs = append(activeJobs, map[string]any{
 					"id": j.ID, "employee_id": j.EmployeeID, "status": st, "prompt": truncate(j.Prompt, 80),
@@ -42,16 +84,10 @@ func (d Deps) handleDashboard(w http.ResponseWriter, r *http.Request, _ *auth.Se
 			}
 		}
 	}
-	wsRows := make([]any, 0, len(wss))
-	for _, v := range wss {
-		wsRows = append(wsRows, map[string]any{
-			"id": v.ID, "name": v.Name, "status": v.Status,
-			"cpu_percent": v.CPUPercent, "memory_percent": v.MemoryPercent,
-		})
-	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"employees":           len(emps),
-		"workstations":        len(wss),
+		"workstations":        len(wsRows),
 		"workstations_online": online,
 		"jobs":                len(jobs),
 		"active_jobs":         active,
@@ -59,6 +95,7 @@ func (d Deps) handleDashboard(w http.ResponseWriter, r *http.Request, _ *auth.Se
 		"errors":              errors,
 		"recent_active_jobs":  activeJobs,
 		"workstations_detail": wsRows,
+		"my_quota":            d.buildMyQuota(r, sess),
 	})
 }
 

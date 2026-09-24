@@ -1,11 +1,13 @@
 /**
  * Skills 技能目录 CRUD + 数字员工赋能绑定。
  */
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../api/client'
 import { IconZap, IconPlus } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { ConfirmDialog } from '../components/ConfirmDialog'
+import { SearchableSelect } from '../components/SearchableSelect'
 
 type Skill = {
   id: string
@@ -31,6 +33,23 @@ export function SkillsPage() {
   const [employees, setEmployees] = useState<Array<{ id: string; name: string }>>([])
   const [bindEmp, setBindEmp] = useState('')
   const [bindSkill, setBindSkill] = useState('')
+  // 删除确认弹窗目标
+  const [deleteTarget, setDeleteTarget] = useState<Skill | null>(null)
+  const [deleting, setDeleting] = useState(false)
+
+  const empOptions = useMemo(
+    () => employees.map((e) => ({ value: e.id, label: e.name, keywords: e.id })),
+    [employees],
+  )
+  const skillOptions = useMemo(
+    () =>
+      items.map((s) => ({
+        value: s.id,
+        label: `${s.name}（${s.category || '通用'}）`,
+        keywords: `${s.id} ${s.category || ''}`,
+      })),
+    [items],
+  )
 
   async function load() {
     const [d, empData] = await Promise.all([
@@ -87,16 +106,24 @@ export function SkillsPage() {
     }
   }
 
-  async function onDelete(id: string) {
-    if (!confirm('确认删除该技能吗？关联该技能的员工将解除赋能。')) return
+  function requestDelete(s: Skill) {
+    setDeleteTarget(s)
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return
+    setDeleting(true)
     setError('')
     setMsg('')
     try {
-      await apiDelete(`/skills/${id}`)
+      await apiDelete(`/skills/${deleteTarget.id}`)
+      setDeleteTarget(null)
       setMsg('技能已删除')
       await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : '删除失败')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -177,29 +204,23 @@ export function SkillsPage() {
           </div>
         </div>
         <form className="inline-form" onSubmit={onBind}>
-          <input
-            list="skills-emp-options"
-            placeholder="选择员工或输入 ID (例: emp-1)"
+          <SearchableSelect
             value={bindEmp}
-            onChange={(e) => setBindEmp(e.target.value)}
+            onChange={setBindEmp}
+            options={empOptions}
+            placeholder="选择或搜索员工…"
+            allowCustom
             required
-            style={{ width: '240px' }}
+            style={{ minWidth: 220 }}
           />
-          <datalist id="skills-emp-options">
-            {employees.map((e) => (
-              <option key={e.id} value={e.id}>
-                {e.name} ({e.id})
-              </option>
-            ))}
-          </datalist>
-          <select value={bindSkill} onChange={(e) => setBindSkill(e.target.value)} required>
-            <option value="">请选择要赋能的技能...</option>
-            {items.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name} ({s.category || '通用'})
-              </option>
-            ))}
-          </select>
+          <SearchableSelect
+            value={bindSkill}
+            onChange={setBindSkill}
+            options={skillOptions}
+            placeholder="请选择要赋能的技能…"
+            required
+            style={{ minWidth: 240 }}
+          />
           <button type="submit">绑定赋能</button>
         </form>
       </div>
@@ -241,7 +262,7 @@ export function SkillsPage() {
                       <button type="button" className="btn-ghost btn-sm" onClick={() => startEdit(s)}>
                         编辑
                       </button>
-                      <button type="button" className="btn-danger btn-sm" onClick={() => void onDelete(s.id)}>
+                      <button type="button" className="btn-danger btn-sm" onClick={() => requestDelete(s)}>
                         删除
                       </button>
                     </div>
@@ -270,6 +291,18 @@ export function SkillsPage() {
           </form>
         </div>
       ) : null}
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="确认删除技能"
+        description="关联该技能的员工将解除赋能，此操作不可撤销。"
+        targetLabel={deleteTarget?.name}
+        targetMeta={deleteTarget?.id}
+        confirmText="确认删除"
+        busy={deleting}
+        onCancel={() => !deleting && setDeleteTarget(null)}
+        onConfirm={() => void confirmDelete()}
+      />
     </section>
   )
 }

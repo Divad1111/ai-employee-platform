@@ -13,6 +13,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/session"
 	"github.com/ai-employee-platform/server/internal/workspace"
 	"github.com/ai-employee-platform/server/internal/workstation"
+	"github.com/ai-employee-platform/server/internal/wsmember"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -66,6 +67,10 @@ func (db *DB) ensureHelperTables() error {
 
 func (db *DB) NewUserStore() auth.UserStore {
 	return &PostgresUserStore{db: db}
+}
+
+func (db *DB) NewWSMemberStore() wsmember.Store {
+	return NewWSMemberStore(db)
 }
 
 func (db *DB) NewWebSessionStore() auth.SessionStore {

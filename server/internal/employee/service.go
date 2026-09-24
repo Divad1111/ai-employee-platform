@@ -20,11 +20,12 @@ const (
 )
 
 // 错误。
-var (
-	ErrNotFound      = errors.New("employee 不存在")
-	ErrInvalidInput  = errors.New("参数无效")
-	ErrAlreadyExists = errors.New("employee 已存在")
-)
+	var (
+		ErrNotFound      = errors.New("employee 不存在")
+		ErrInvalidInput  = errors.New("参数无效")
+		ErrAlreadyExists = errors.New("employee 已存在")
+		ErrWSAccessDenied = errors.New("WORKSTATION_ACCESS_DENIED")
+	)
 
 // Employee 领域对象。
 type Employee struct {
@@ -36,6 +37,7 @@ type Employee struct {
 	WorkstationID     string    `json:"workstation_id"`
 	WorkspaceID       string    `json:"workspace_id"`
 	PermissionProfile string    `json:"permission_profile"`
+	OwnerUserID       string    `json:"owner_user_id,omitempty"`
 	Status            string    `json:"status"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
@@ -50,6 +52,7 @@ type CreateInput struct {
 	WorkstationID     string `json:"workstation_id"`
 	WorkspaceID       string `json:"workspace_id"`
 	PermissionProfile string `json:"permission_profile"`
+	OwnerUserID       string `json:"owner_user_id"`
 }
 
 // UpdateInput 更新参数（空字符串表示不改，除 Status）。
@@ -110,6 +113,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string
 		WorkstationID:     in.WorkstationID,
 		WorkspaceID:       in.WorkspaceID,
 		PermissionProfile: in.PermissionProfile,
+		OwnerUserID:       in.OwnerUserID,
 		Status:            StatusStopped,
 		CreatedAt:         now,
 		UpdatedAt:         now,

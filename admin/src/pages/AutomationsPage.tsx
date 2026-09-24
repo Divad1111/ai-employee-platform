@@ -21,6 +21,7 @@ import {
 } from '../api/automation'
 import { IconAlertTriangle, IconClock, IconMaximize, IconMinimize, IconPlus, IconRefresh, IconTrash } from '../components/Icons'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { SearchableSelect } from '../components/SearchableSelect'
 import { getUser, setSession } from '../stores/session'
 
 type Tab = 'cron' | 'calendar' | 'webhook'
@@ -396,14 +397,17 @@ function CronTab(props: {
             </label>
             <label>
               <FieldLabel required>数字员工</FieldLabel>
-              <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} required>
-                <option value="">选择…</option>
-                {props.employees.map((em) => (
-                  <option key={em.id} value={em.id}>
-                    {em.name} ({em.id})
-                  </option>
-                ))}
-              </select>
+              <SearchableSelect
+                value={employeeId}
+                onChange={setEmployeeId}
+                options={props.employees.map((em) => ({
+                  value: em.id,
+                  label: em.name,
+                  keywords: em.id,
+                }))}
+                placeholder="选择或搜索员工…"
+                required
+              />
             </label>
             <label>
               <FieldLabel required>Prompt</FieldLabel>
@@ -821,14 +825,19 @@ function CalendarTab(props: {
         <div className="stack-form" style={{ marginBottom: '0.75rem' }}>
           <label>
             日历规则
-            <select value={autoId} onChange={(e) => setAutoId(e.target.value)}>
-              <option value="">（新建）</option>
-              {calendarAutos.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
+            <SearchableSelect
+              value={autoId}
+              onChange={setAutoId}
+              options={[
+                { value: '', label: '（新建）' },
+                ...calendarAutos.map((a) => ({
+                  value: a.id,
+                  label: a.name,
+                  keywords: a.id,
+                })),
+              ]}
+              placeholder="选择日历规则…"
+            />
           </label>
           {!autoId && props.writable && (
             <>
@@ -912,22 +921,22 @@ function CalendarTab(props: {
             </div>
             <label>
               <FieldLabel required>数字员工</FieldLabel>
-              <select
+              <SearchableSelect
                 value={d.employee_id}
-                onChange={(e) => {
+                onChange={(val) => {
                   const next = [...drafts]
-                  next[idx] = { ...next[idx], employee_id: e.target.value }
+                  next[idx] = { ...next[idx], employee_id: val }
                   setDrafts(next)
                 }}
+                options={props.employees.map((em) => ({
+                  value: em.id,
+                  label: em.name,
+                  keywords: em.id,
+                }))}
+                placeholder="选择员工…"
                 disabled={!props.writable}
-              >
-                <option value="">选择员工…</option>
-                {props.employees.map((em) => (
-                  <option key={em.id} value={em.id}>
-                    {em.name}
-                  </option>
-                ))}
-              </select>
+                required
+              />
             </label>
             <label>
               <FieldLabel required>Prompt</FieldLabel>
@@ -1119,14 +1128,17 @@ function WebhookTab(props: {
             </label>
             <label>
               <FieldLabel required>数字员工</FieldLabel>
-              <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} required>
-                <option value="">选择…</option>
-                {props.employees.map((em) => (
-                  <option key={em.id} value={em.id}>
-                    {em.name}
-                  </option>
-                ))}
-              </select>
+              <SearchableSelect
+                value={employeeId}
+                onChange={setEmployeeId}
+                options={props.employees.map((em) => ({
+                  value: em.id,
+                  label: em.name,
+                  keywords: em.id,
+                }))}
+                placeholder="选择或搜索员工…"
+                required
+              />
             </label>
             <label>
               <FieldLabel required>Prompt</FieldLabel>

@@ -32,7 +32,7 @@ func TestLoginAndRBAC(t *testing.T) {
 	}
 	// VIEWER 角色用户
 	hash, _ := auth.HashPassword("v")
-	_ = users.Update(ctx, &auth.User{ID: "u2", Username: "viewer", PasswordHash: hash, Roles: []string{"VIEWER"}})
+	_ = users.Create(ctx, &auth.User{ID: "u2", Username: "viewer", PasswordHash: hash, Status: auth.StatusActive, Roles: []string{"VIEWER"}})
 	vs, err := svc.Login(ctx, "viewer", "v", "10.0.0.1")
 	if err != nil {
 		t.Fatal(err)

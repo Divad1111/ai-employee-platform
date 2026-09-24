@@ -36,6 +36,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/metrics"
 	"github.com/ai-employee-platform/server/internal/notification"
 	"github.com/ai-employee-platform/server/internal/permission"
+	"github.com/ai-employee-platform/server/internal/quota"
 	"github.com/ai-employee-platform/server/internal/registry"
 	"github.com/ai-employee-platform/server/internal/reliability"
 	"github.com/ai-employee-platform/server/internal/scheduler"
@@ -45,6 +46,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/workflowmcp"
 	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/workspace"
+	"github.com/ai-employee-platform/server/internal/wsmember"
 )
 
 func main() {
@@ -70,6 +72,8 @@ func main() {
 		mcpTokStore mcpauth.Store         = mcpauth.NewMemoryStore()
 		autoStore   automation.Store      = automation.NewMemoryStore()
 		artStore    artifact.Store        = artifact.NewMemoryStore()
+		wsMembers   wsmember.Store        = wsmember.NewMemoryStore()
+		quotaStore  quota.Store           = quota.NewMemoryStore()
 		pgSQL       *sql.DB
 	)
 
@@ -94,6 +98,8 @@ func main() {
 			mcpTokStore = mcpauth.NewPostgresStore(db.SQL)
 			autoStore = automation.NewPostgresStore(db.SQL)
 			artStore = artifact.NewPostgresStore(db.SQL)
+			wsMembers = db.NewWSMemberStore()
+			quotaStore = quota.NewPostgresStore(db.SQL)
 		}
 	}
 
@@ -419,6 +425,8 @@ func main() {
 		MCPAuth:         mcpAuthSvc,
 		SkillSyncer:     sched,
 		Automation:      autoSvc,
+		WSMembers:       wsMembers,
+		Quota:           quota.NewService(quotaStore),
 	})
 	mcpSrv := &mcpserver.Server{WF: wfSvc, MCPAuth: mcpAuthSvc, Auth: authSvc, Syncer: sched}
 	mux := http.NewServeMux()

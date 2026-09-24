@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,9 +10,32 @@ import (
 	"github.com/ai-employee-platform/server/internal/approval"
 	"github.com/ai-employee-platform/server/internal/audit"
 	"github.com/ai-employee-platform/server/internal/auth"
+	"github.com/ai-employee-platform/server/internal/authz"
 	"github.com/ai-employee-platform/server/internal/permission"
 	"github.com/ai-employee-platform/server/internal/secret"
 )
+
+// roleLabelCN 角色码转中文展示名。
+func roleLabelCN(roles []string) string {
+	if len(roles) == 0 {
+		return "用户"
+	}
+	labels := map[string]string{
+		"SUPER_ADMIN": "超级管理员",
+		"ADMIN":       "管理员",
+		"OPERATOR":    "操作员",
+		"VIEWER":      "只读",
+	}
+	out := make([]string, 0, len(roles))
+	for _, r := range roles {
+		if cn, ok := labels[strings.ToUpper(r)]; ok {
+			out = append(out, cn)
+		} else {
+			out = append(out, r)
+		}
+	}
+	return strings.Join(out, "/")
+}
 
 func (d Deps) handlePutSecret(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var body struct {
@@ -210,8 +234,8 @@ func (d Deps) handleAuditArchive(w http.ResponseWriter, r *http.Request, sess *a
 	writeJSON(w, http.StatusOK, map[string]any{"removed": n})
 }
 
-// 覆盖旧 handleAudit：支持 prefix / target
-func (d Deps) handleAuditEnhanced(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+// 覆盖旧 handleAudit：支持 prefix / target；按 Scope 过滤（§17）
+func (d Deps) handleAuditEnhanced(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 {
 		limit = 50
@@ -220,9 +244,14 @@ func (d Deps) handleAuditEnhanced(w http.ResponseWriter, r *http.Request, _ *aut
 	if q == "" {
 		q = strings.TrimSpace(r.URL.Query().Get("keyword"))
 	}
+	actorFilter := r.URL.Query().Get("actor")
+	if d.resolveScope(r.Context(), sess, "audit.read") != authz.ScopeALL {
+		// OWN：只能看自己
+		actorFilter = sess.UserID
+	}
 	items := d.Audit.Query(audit.Filter{
 		Keyword:      q,
-		Actor:        r.URL.Query().Get("actor"),
+		Actor:        actorFilter,
 		Action:       r.URL.Query().Get("action"),
 		ActionPrefix: r.URL.Query().Get("prefix"),
 		TargetType:   r.URL.Query().Get("target_type"),
@@ -237,14 +266,32 @@ func (d Deps) handleAuditEnhanced(w http.ResponseWriter, r *http.Request, _ *aut
 		if v, ok := items[i].Metadata["value"]; ok && v != "" && v != "***" {
 			items[i].Metadata["value"] = secret.Redact(v)
 		}
-		if _, ok := items[i].Metadata["actor_name"]; !ok {
+		// 补充友好操作主体名称（USER 每次按真实角色解析，避免历史「一律管理员」文案）
+		needName := items[i].Metadata["actor_name"] == ""
+		if items[i].ActorType == "USER" {
+			needName = true
+		}
+		if needName {
 			switch items[i].ActorType {
 			case "USER":
-				if items[i].Metadata["username"] != "" {
-					items[i].Metadata["actor_name"] = items[i].Metadata["username"] + " (管理员)"
-				} else {
-					items[i].Metadata["actor_name"] = "admin (超级管理员)"
+				uname := items[i].Metadata["username"]
+				roleCN := "用户"
+				if d.Auth != nil && items[i].ActorID != "" {
+					if u, err := d.Auth.Users().FindByID(r.Context(), items[i].ActorID); err == nil && u != nil {
+						if uname == "" {
+							uname = u.Username
+						}
+						roleCN = roleLabelCN(u.Roles)
+						items[i].Metadata["username"] = u.Username
+					}
 				}
+				if uname == "" {
+					uname = items[i].ActorID
+					if uname == "" {
+						uname = "未知用户"
+					}
+				}
+				items[i].Metadata["actor_name"] = fmt.Sprintf("%s（%s）", uname, roleCN)
 			case "SYSTEM":
 				items[i].Metadata["actor_name"] = "系统内核 (System)"
 			case "EMPLOYEE":

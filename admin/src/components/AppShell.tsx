@@ -1,10 +1,13 @@
 /**
  * 管理后台布局壳：深色侧栏 + 顶部面包屑状态栏 + 弹性自适应内容区。
+ * 侧栏按权限过滤：无权限的子页签不显示；分组下无可见子项则隐藏整组。
  */
 import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { apiGet, apiPost } from '../api/client'
+import { roleDisplayName } from '../lib/rbacLabels'
 import { clearSession, getUser } from '../stores/session'
+import { usePerm } from '../stores/permissions'
 import {
   IconDashboard,
   IconUsers,
@@ -29,6 +32,8 @@ type NavItem = {
   label: string
   icon: React.ComponentType<{ size?: number; className?: string; style?: React.CSSProperties }>
   end?: boolean
+  /** 查看该页所需权限码；无则登录即可 */
+  perm?: string
 }
 
 type NavSection = {
@@ -36,46 +41,56 @@ type NavSection = {
   items: NavItem[]
 }
 
-/** 侧栏导航分类与结构化映射 */
+/** 侧栏导航：perm 对齐后端 requirePerm */
 const navSections: NavSection[] = [
   {
     title: '全景与监控',
     items: [
-      { to: '/', label: '监控控制台', icon: IconDashboard, end: true },
-      { to: '/sessions', label: '运行会话', icon: IconTerminal },
+      { to: '/', label: '监控控制台', icon: IconDashboard, end: true, perm: 'employee.read' },
+      { to: '/sessions', label: '运行会话', icon: IconTerminal, perm: 'session.read' },
     ],
   },
   {
     title: '员工与计算算力',
     items: [
-      { to: '/employees', label: '数字员工', icon: IconUsers },
-      { to: '/workstations', label: '工作站节点', icon: IconServer },
-      { to: '/workspaces', label: '项目工作区', icon: IconFolder },
+      { to: '/employees', label: '数字员工', icon: IconUsers, perm: 'employee.read' },
+      { to: '/workstations', label: '工作站节点', icon: IconServer, perm: 'workstation.read' },
+      { to: '/workspaces', label: '项目工作区', icon: IconFolder, perm: 'workspace.read' },
     ],
   },
   {
     title: '任务调度流转',
     items: [
-      { to: '/jobs', label: '任务流转中心', icon: IconJobs },
-      { to: '/automations', label: '自动化任务', icon: IconClock },
-      { to: '/artifacts', label: '任务制品产物', icon: IconPackage },
-      { to: '/approvals', label: '人工审批中心', icon: IconCheckCircle },
+      { to: '/jobs', label: '任务流转中心', icon: IconJobs, perm: 'job.read' },
+      { to: '/automations', label: '自动化任务', icon: IconClock, perm: 'automation.read' },
+      { to: '/artifacts', label: '任务制品产物', icon: IconPackage, perm: 'job.read' },
+      { to: '/approvals', label: '人工审批中心', icon: IconCheckCircle, perm: 'approval.read' },
     ],
   },
   {
     title: '能力与协同扩展',
     items: [
-      { to: '/workflows', label: '工作流管理', icon: IconZap },
-      { to: '/feishu', label: '飞书应用协同', icon: IconMessage },
+      { to: '/workflows', label: '工作流管理', icon: IconZap, perm: 'workflow.read' },
+      // 飞书应用配置属系统集成，需 system.write
+      { to: '/feishu', label: '飞书应用协同', icon: IconMessage, perm: 'system.write' },
+    ],
+  },
+  {
+    title: '用户与权限',
+    items: [
+      { to: '/users', label: '用户管理', icon: IconUsers, perm: 'user.read' },
+      { to: '/roles', label: '角色与权限', icon: IconShield, perm: 'role.read' },
+      { to: '/quotas', label: 'Token / 配额', icon: IconPackage, perm: 'quota.read' },
     ],
   },
   {
     title: '安全治理与系统',
     items: [
-      { to: '/permissions', label: '权限策略引擎', icon: IconShield },
-      { to: '/secrets', label: '机密凭证保管箱', icon: IconKey },
-      { to: '/audit', label: '操作审计日志', icon: IconFileText },
-      { to: '/settings', label: '系统架构配置', icon: IconSettings },
+      // 策略引擎 / 系统配置属于运维写操作，需 system.write（VIEWER 仅有 system.read 不应进入）
+      { to: '/permissions', label: '权限策略引擎', icon: IconShield, perm: 'system.write' },
+      { to: '/secrets', label: '机密凭证保管箱', icon: IconKey, perm: 'secret.read' },
+      { to: '/audit', label: '操作审计日志', icon: IconFileText, perm: 'audit.read' },
+      { to: '/settings', label: '系统架构配置', icon: IconSettings, perm: 'system.write' },
     ],
   },
 ]
@@ -101,7 +116,26 @@ export function AppShell() {
   const nav = useNavigate()
   const location = useLocation()
   const user = getUser()
+  const { ready, can: canPerm } = usePerm()
   const [feishuStatus, setFeishuStatus] = useState<FeishuStatus | null>(null)
+  /** 飞书配置页需 system.write；VIEWER 仅可看状态不可跳转 */
+  const canFeishuConfig = ready && canPerm('system.write')
+
+  const can = (perm?: string) => {
+    if (!perm) return true
+    if (!ready) return false
+    return canPerm(perm)
+  }
+
+  const roleLabel = roleDisplayName(user?.roles?.[0] || '')
+
+  // 过滤子项；分组下无可见子项则整组不显示
+  const visibleSections = navSections
+    .map((sec) => ({
+      ...sec,
+      items: sec.items.filter((it) => can(it.perm)),
+    }))
+    .filter((sec) => sec.items.length > 0)
 
   useEffect(() => {
     let active = true
@@ -132,7 +166,6 @@ export function AppShell() {
     nav('/login', { replace: true })
   }
 
-  // 计算当前面包屑与页面标题
   const activeNav = allNavItems.find((n) =>
     n.end ? location.pathname === n.to : location.pathname.startsWith(n.to) && n.to !== '/'
   )
@@ -150,7 +183,7 @@ export function AppShell() {
         </div>
 
         <nav className="nav-group">
-          {navSections.map((sec) => (
+          {visibleSections.map((sec) => (
             <div key={sec.title} className="nav-section">
               <div className="nav-section-title">{sec.title}</div>
               <div className="nav-section-items">
@@ -174,8 +207,8 @@ export function AppShell() {
               {(user?.username || 'A').slice(0, 1).toUpperCase()}
             </div>
             <div className="user-meta">
-              <div className="name">{user?.username || '管理员'}</div>
-              <div className="role">{user?.roles?.[0] || 'ADMIN'} · 系统在线</div>
+              <div className="name">{user?.username || '未登录'}</div>
+              <div className="role">{roleLabel || user?.roles?.[0] || '—'} · 系统在线</div>
             </div>
           </div>
           <button type="button" className="logout-btn" onClick={() => void logout()}>
@@ -199,50 +232,7 @@ export function AppShell() {
               平台服务在线
             </span>
 
-            {/* 飞书应用协同状态 */}
-            {feishuStatus === null ? (
-              <span className="status-pill status-muted" title="正在探测飞书开放平台网关...">
-                <span className="status-dot" />
-                飞书检测中...
-              </span>
-            ) : !feishuStatus.configured ? (
-              <Link to="/feishu" style={{ textDecoration: 'none' }} title="未配置 App ID / Secret，点击前往配置">
-                <span className="status-pill status-neutral">
-                  <span className="status-dot" />
-                  飞书未配置
-                </span>
-              </Link>
-            ) : !feishuStatus.enabled ? (
-              <Link to="/feishu" style={{ textDecoration: 'none' }} title="已配置凭据但未勾选启用协同，点击开启">
-                <span className="status-pill status-muted">
-                  <span className="status-dot" />
-                  飞书未启用
-                </span>
-              </Link>
-            ) : feishuStatus.connected ? (
-              <Link
-                to="/feishu"
-                style={{ textDecoration: 'none' }}
-                title={`飞书通信正常${feishuStatus.ws_state === 'CONNECTED' ? ' (长连接网关已就绪，免公网IP)' : ''} · 机器人: ${feishuStatus.bot_name || '已就绪'} · 响应时延 ${feishuStatus.latency_ms ?? 0}ms · 群内 @机器人 实时响应`}
-              >
-                <span className="status-pill status-success">
-                  <span className="status-dot" />
-                  {feishuStatus.ws_state === 'CONNECTED' ? '飞书长连接在线' : '飞书在线'}
-                  {feishuStatus.bot_name ? ` (${feishuStatus.bot_name})` : ''}
-                </span>
-              </Link>
-            ) : (
-              <Link
-                to="/feishu"
-                style={{ textDecoration: 'none' }}
-                title={`飞书连接失败: ${feishuStatus.error || '通信异常'}，点击排查`}
-              >
-                <span className="status-pill status-danger">
-                  <span className="status-dot" />
-                  飞书连接异常
-                </span>
-              </Link>
-            )}
+            <FeishuStatusPill status={feishuStatus} canConfig={canFeishuConfig} />
 
             <span className="badge" style={{ background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd' }}>
               环境: 本地 Docker
@@ -255,5 +245,62 @@ export function AppShell() {
         </main>
       </div>
     </div>
+  )
+}
+
+/** 顶栏飞书状态：有 system.write 才可跳转配置页，否则仅展示 */
+function FeishuStatusPill({
+  status,
+  canConfig,
+}: {
+  status: FeishuStatus | null
+  canConfig: boolean
+}) {
+  let className = 'status-pill status-muted'
+  let label = '飞书检测中...'
+  let title = '正在探测飞书开放平台网关...'
+
+  if (status !== null) {
+    if (!status.configured) {
+      className = 'status-pill status-neutral'
+      label = '飞书未配置'
+      title = canConfig
+        ? '未配置 App ID / Secret，点击前往配置'
+        : '飞书未配置（需管理员权限才能进入配置页）'
+    } else if (!status.enabled) {
+      className = 'status-pill status-muted'
+      label = '飞书未启用'
+      title = canConfig
+        ? '已配置凭据但未勾选启用协同，点击开启'
+        : '飞书未启用（需管理员权限才能进入配置页）'
+    } else if (status.connected) {
+      className = 'status-pill status-success'
+      label = `${status.ws_state === 'CONNECTED' ? '飞书长连接在线' : '飞书在线'}${
+        status.bot_name ? ` (${status.bot_name})` : ''
+      }`
+      title = `飞书通信正常${status.ws_state === 'CONNECTED' ? ' (长连接网关已就绪，免公网IP)' : ''} · 机器人: ${status.bot_name || '已就绪'} · 响应时延 ${status.latency_ms ?? 0}ms`
+    } else {
+      className = 'status-pill status-danger'
+      label = '飞书连接异常'
+      title = canConfig
+        ? `飞书连接失败: ${status.error || '通信异常'}，点击排查`
+        : `飞书连接失败: ${status.error || '通信异常'}（需管理员权限才能进入配置页）`
+    }
+  }
+
+  const pill = (
+    <span className={className} title={title}>
+      <span className="status-dot" />
+      {label}
+    </span>
+  )
+
+  if (!canConfig || status === null) {
+    return pill
+  }
+  return (
+    <Link to="/feishu" style={{ textDecoration: 'none' }} title={title}>
+      {pill}
+    </Link>
   )
 }

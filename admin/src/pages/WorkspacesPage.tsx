@@ -2,11 +2,14 @@
  * Workspaces 项目工作区管理与绑定。
  * 创建流程：先选工作站节点，再填写该节点上的本机绝对路径。
  */
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
 import { apiDelete, apiGet, apiPost } from '../api/client'
 import { IconFolder, IconPlus, IconRefresh, IconUsers, IconServer } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { ConfirmDialog } from '../components/ConfirmDialog'
+import { SearchableSelect } from '../components/SearchableSelect'
+import { usePerm } from '../stores/permissions'
 
 type Workspace = {
   id: string
@@ -31,6 +34,8 @@ type Workstation = {
 }
 
 export function WorkspacesPage() {
+  const { can } = usePerm()
+  const canWrite = can('workspace.write')
   const [items, setItems] = useState<Workspace[]>([])
   const [employees, setEmployees] = useState<Employee[]>([])
   const [workstations, setWorkstations] = useState<Workstation[]>([])
@@ -42,6 +47,8 @@ export function WorkspacesPage() {
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
   const [loading, setLoading] = useState(false)
+  const [deleteId, setDeleteId] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   async function load() {
     setLoading(true)
@@ -61,6 +68,26 @@ export function WorkspacesPage() {
 
   const empMap = Object.fromEntries(employees.map((e) => [e.id, e.name]))
   const nodeMap = Object.fromEntries(workstations.map((n) => [n.id, n.name || n.id]))
+
+  const nodeOptions = useMemo(
+    () =>
+      workstations.map((n) => ({
+        value: n.id,
+        label: `${n.name || n.id}（${n.status || '未知'}）`,
+        keywords: `${n.id} ${n.name}`,
+      })),
+    [workstations],
+  )
+
+  const empOptions = useMemo(
+    () =>
+      employees.map((e) => ({
+        value: e.id,
+        label: e.name,
+        keywords: e.id,
+      })),
+    [employees],
+  )
 
   useEffect(() => {
     void load().catch((e) => setError(String(e)))
@@ -106,20 +133,25 @@ export function WorkspacesPage() {
     }
   }
 
-  async function onDelete(wsId: string) {
-    if (!confirm(`确定要删除工作区 ${wsId} 吗？此操作不会删除本地文件代码。`)) return
+  async function confirmDelete() {
+    if (!deleteId) return
+    setDeleting(true)
     setError('')
     setMsg('')
     try {
-      await apiDelete(`/workspaces/${wsId}`)
+      await apiDelete(`/workspaces/${deleteId}`)
       setMsg('工作区已删除')
+      setDeleteId(null)
       await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : '删除工作区失败')
+    } finally {
+      setDeleting(false)
     }
   }
 
   const selectedNode = workstations.find((n) => n.id === workstationId)
+  const deleteTarget = items.find((w) => w.id === deleteId)
 
   return (
     <section>
@@ -162,6 +194,7 @@ export function WorkspacesPage() {
       {error ? <div className="error">{error}</div> : null}
       {msg ? <div className="ok-msg">{msg}</div> : null}
 
+      {canWrite ? (
       <div className="panel">
         <div className="panel-header">
           <div>
@@ -170,19 +203,14 @@ export function WorkspacesPage() {
           </div>
         </div>
         <form className="inline-form" onSubmit={onCreate}>
-          <select
+          <SearchableSelect
             value={workstationId}
-            onChange={(e) => setWorkstationId(e.target.value)}
-            style={{ minWidth: '200px' }}
+            onChange={setWorkstationId}
+            options={nodeOptions}
+            placeholder="① 选择或搜索工作站…"
             required
-          >
-            <option value="">① 选择工作站节点...</option>
-            {workstations.map((n) => (
-              <option key={n.id} value={n.id}>
-                {n.name || n.id} ({n.status || 'UNKNOWN'})
-              </option>
-            ))}
-          </select>
+            style={{ minWidth: 220 }}
+          />
           <input
             placeholder={
               selectedNode
@@ -207,20 +235,14 @@ export function WorkspacesPage() {
             onChange={(e) => setBranch(e.target.value)}
             style={{ width: '100px' }}
           />
-          <input
-            list="ws-create-emp-options"
-            placeholder="归属员工 (可选)"
+          <SearchableSelect
             value={employeeId}
-            onChange={(e) => setEmployeeId(e.target.value)}
-            style={{ width: '160px' }}
+            onChange={setEmployeeId}
+            options={empOptions}
+            placeholder="归属员工（可选）"
+            allowCustom
+            style={{ minWidth: 180 }}
           />
-          <datalist id="ws-create-emp-options">
-            {employees.map((e) => (
-              <option key={e.id} value={e.id}>
-                {e.name} ({e.id})
-              </option>
-            ))}
-          </datalist>
           <button type="submit" disabled={!workstationId || !path.trim()}>
             <IconPlus size={15} />
             <span>创建工作区</span>
@@ -232,6 +254,7 @@ export function WorkspacesPage() {
           </p>
         ) : null}
       </div>
+      ) : null}
 
       <div className="panel">
         <div className="panel-header">
@@ -308,38 +331,33 @@ export function WorkspacesPage() {
                         </button>
                       </div>
                     ) : (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                        <select
-                          style={{ fontSize: '0.8rem', padding: '0.2rem 0.4rem' }}
-                          defaultValue=""
-                          onChange={(e) => {
-                            if (e.target.value) {
-                              void onBind(w.id, e.target.value)
-                            }
-                          }}
-                        >
-                          <option value="">点击分配员工...</option>
-                          {employees.map((e) => (
-                            <option key={e.id} value={e.id}>
-                              {e.name} ({e.id})
-                            </option>
-                          ))}
-                        </select>
-                      </div>
+                      <SearchableSelect
+                        value=""
+                        onChange={(v) => {
+                          if (v) void onBind(w.id, v)
+                        }}
+                        options={empOptions}
+                        placeholder="分配员工…"
+                        style={{ minWidth: 160 }}
+                      />
                     )}
                   </td>
                   <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
                     {w.created_at ? new Date(w.created_at).toLocaleString() : '—'}
                   </td>
                   <td>
+                    {canWrite ? (
                     <button
                       type="button"
                       className="btn-ghost btn-sm"
                       style={{ color: '#dc2626' }}
-                      onClick={() => void onDelete(w.id)}
+                      onClick={() => setDeleteId(w.id)}
                     >
                       删除
                     </button>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -354,6 +372,22 @@ export function WorkspacesPage() {
           </table>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={!!deleteId}
+        title="确认删除工作区"
+        description="此操作仅删除平台登记记录，不会删除工作站上的本地文件代码。"
+        targetLabel={
+          deleteTarget
+            ? deleteTarget.repository || deleteTarget.path.split(/[/\\]/).filter(Boolean).pop() || '工作区'
+            : undefined
+        }
+        targetMeta={deleteId || undefined}
+        confirmText="确认删除"
+        busy={deleting}
+        onCancel={() => !deleting && setDeleteId(null)}
+        onConfirm={() => void confirmDelete()}
+      />
     </section>
   )
 }

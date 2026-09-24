@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/ai-employee-platform/workstation/internal/platform"
 )
 
 // LoopbackTransport Windows：127.0.0.1 TCP + 端口文件（仅本机）。
@@ -20,11 +22,21 @@ type LoopbackTransport struct {
 }
 
 func defaultEndpointFile() string {
-	base := os.Getenv("AIE_DATA_DIR")
-	if base == "" {
-		base = filepath.Join(os.Getenv("ProgramData"), "AIEmployee", "data")
+	// 与 platform.Detect() 对齐，避免 CLI 读 ProgramData、Daemon 写 ~/.aie 导致假 OFFLINE
+	if root := os.Getenv("AIE_DATA_DIR"); root != "" {
+		return filepath.Join(root, "aew.ipc")
 	}
-	return filepath.Join(base, "aew.ipc")
+	p := platform.Detect()
+	// 用户态 ~/.aie：ipc 放在根目录（与历史上已写入的 aew.ipc 兼容）
+	// 系统态 ProgramData/.../data：ipc 放在 DataDir 内
+	data := p.DataDir()
+	if filepath.Base(data) == "data" {
+		parent := filepath.Dir(data)
+		if filepath.Base(parent) == ".aie" {
+			return filepath.Join(parent, "aew.ipc")
+		}
+	}
+	return filepath.Join(data, "aew.ipc")
 }
 
 func (t *LoopbackTransport) Addr() string {

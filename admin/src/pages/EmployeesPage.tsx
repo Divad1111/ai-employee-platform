@@ -8,6 +8,7 @@ import { StatusBadge } from '../components/StatusBadge'
 import { EntityName } from '../components/EntityName'
 import { IconAlertTriangle, IconPlus, IconRefresh, IconTrash, IconUsers } from '../components/Icons'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { usePerm } from '../stores/permissions'
 
 type Emp = {
   id: string
@@ -25,6 +26,9 @@ type WsItem = {
 }
 
 export function EmployeesPage() {
+  const { can } = usePerm()
+  const canWrite = can('employee.write')
+  const canDelete = can('employee.delete')
   const [items, setItems] = useState<Emp[]>([])
   const [workstations, setWorkstations] = useState<Array<{ id: string; name: string }>>([])
   const [workspaces, setWorkspaces] = useState<WsItem[]>([])
@@ -179,6 +183,7 @@ export function EmployeesPage() {
         ]}
       />
 
+      {canWrite ? (
       <div className="panel">
         <div className="panel-header">
           <div>
@@ -201,6 +206,9 @@ export function EmployeesPage() {
         </form>
         {error ? <div className="error" style={{ marginTop: '0.6rem' }}>{error}</div> : null}
       </div>
+      ) : (
+        error ? <div className="error" style={{ marginBottom: '1rem' }}>{error}</div> : null
+      )}
 
       <div className="panel">
         <div className="panel-header">
@@ -268,6 +276,7 @@ export function EmployeesPage() {
                       <Link to={`/employees/${e.id}`} className="btn-ghost btn-sm" style={{ display: 'inline-flex' }}>
                         配置详情 →
                       </Link>
+                      {canDelete ? (
                       <button
                         type="button"
                         className="btn-danger btn-sm"
@@ -277,6 +286,7 @@ export function EmployeesPage() {
                         <IconTrash size={13} />
                         <span>删除</span>
                       </button>
+                      ) : null}
                     </div>
                   </td>
                 </tr>

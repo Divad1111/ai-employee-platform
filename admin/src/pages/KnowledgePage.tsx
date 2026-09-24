@@ -1,11 +1,13 @@
 /**
  * Knowledge 知识库条目 CRUD + 数字员工绑定。
  */
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../api/client'
 import { IconBook, IconPlus } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { ConfirmDialog } from '../components/ConfirmDialog'
+import { SearchableSelect } from '../components/SearchableSelect'
 
 type Entry = {
   id: string
@@ -34,6 +36,18 @@ export function KnowledgePage() {
   const [employees, setEmployees] = useState<Array<{ id: string; name: string }>>([])
   const [bindEmp, setBindEmp] = useState('')
   const [bindKid, setBindKid] = useState('')
+  // 删除确认弹窗目标
+  const [deleteTarget, setDeleteTarget] = useState<Entry | null>(null)
+  const [deleting, setDeleting] = useState(false)
+
+  const empOptions = useMemo(
+    () => employees.map((e) => ({ value: e.id, label: e.name, keywords: e.id })),
+    [employees],
+  )
+  const knowledgeOptions = useMemo(
+    () => items.map((k) => ({ value: k.id, label: k.title, keywords: k.id })),
+    [items],
+  )
 
   async function load() {
     const [d, empData] = await Promise.all([
@@ -105,16 +119,24 @@ export function KnowledgePage() {
     }
   }
 
-  async function onDelete(id: string) {
-    if (!confirm('确认删除该知识库文档吗？')) return
+  function requestDelete(entry: Entry) {
+    setDeleteTarget(entry)
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return
+    setDeleting(true)
     setError('')
     setMsg('')
     try {
-      await apiDelete(`/knowledge/${id}`)
+      await apiDelete(`/knowledge/${deleteTarget.id}`)
+      setDeleteTarget(null)
       setMsg('知识文档已删除')
       await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : '删除失败')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -218,29 +240,23 @@ export function KnowledgePage() {
           </div>
         </div>
         <form className="inline-form" onSubmit={onBind}>
-          <input
-            list="knowledge-emp-options"
-            placeholder="选择员工或输入 ID (例: emp-1)"
+          <SearchableSelect
             value={bindEmp}
-            onChange={(e) => setBindEmp(e.target.value)}
+            onChange={setBindEmp}
+            options={empOptions}
+            placeholder="选择或搜索员工…"
+            allowCustom
             required
-            style={{ width: '240px' }}
+            style={{ minWidth: 220 }}
           />
-          <datalist id="knowledge-emp-options">
-            {employees.map((e) => (
-              <option key={e.id} value={e.id}>
-                {e.name} ({e.id})
-              </option>
-            ))}
-          </datalist>
-          <select value={bindKid} onChange={(e) => setBindKid(e.target.value)} required>
-            <option value="">请选择挂载的知识文档...</option>
-            {items.map((k) => (
-              <option key={k.id} value={k.id}>
-                {k.title}
-              </option>
-            ))}
-          </select>
+          <SearchableSelect
+            value={bindKid}
+            onChange={setBindKid}
+            options={knowledgeOptions}
+            placeholder="请选择挂载的知识文档…"
+            required
+            style={{ minWidth: 240 }}
+          />
           <button type="submit">关联挂载</button>
         </form>
       </div>
@@ -288,7 +304,7 @@ export function KnowledgePage() {
                       <button type="button" className="btn-ghost btn-sm" onClick={() => startEdit(k)}>
                         编辑
                       </button>
-                      <button type="button" className="btn-danger btn-sm" onClick={() => void onDelete(k.id)}>
+                      <button type="button" className="btn-danger btn-sm" onClick={() => requestDelete(k)}>
                         删除
                       </button>
                     </div>
@@ -334,6 +350,18 @@ export function KnowledgePage() {
           </form>
         </div>
       ) : null}
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="确认删除知识文档"
+        description="删除后无法恢复，已挂载到员工的关联也将失效。"
+        targetLabel={deleteTarget?.title}
+        targetMeta={deleteTarget?.id}
+        confirmText="确认删除"
+        busy={deleting}
+        onCancel={() => !deleting && setDeleteTarget(null)}
+        onConfirm={() => void confirmDelete()}
+      />
     </section>
   )
 }

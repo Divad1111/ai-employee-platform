@@ -17,6 +17,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/artifact"
 	"github.com/ai-employee-platform/server/internal/audit"
 	"github.com/ai-employee-platform/server/internal/auth"
+	"github.com/ai-employee-platform/server/internal/authz"
 	"github.com/ai-employee-platform/server/internal/automation"
 	"github.com/ai-employee-platform/server/internal/certca"
 	"github.com/ai-employee-platform/server/internal/employee"
@@ -29,6 +30,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/metrics"
 	"github.com/ai-employee-platform/server/internal/notification"
 	"github.com/ai-employee-platform/server/internal/permission"
+	"github.com/ai-employee-platform/server/internal/quota"
 	"github.com/ai-employee-platform/server/internal/registry"
 	"github.com/ai-employee-platform/server/internal/scheduler"
 	"github.com/ai-employee-platform/server/internal/secret"
@@ -36,6 +38,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/workflowmcp"
 	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/workspace"
+	"github.com/ai-employee-platform/server/internal/wsmember"
 )
 
 // Deps HTTP API 依赖。
@@ -66,6 +69,8 @@ type Deps struct {
 	MCPAuth         *mcpauth.Service
 	SkillSyncer     SkillSyncer
 	Automation      *automation.Service
+	WSMembers       wsmember.Store
+	Quota           *quota.Service
 }
 
 // SkillSyncer 向工作站推送技能包同步命令。
@@ -90,7 +95,26 @@ func NewRouter(d Deps) http.Handler {
 
 	mux.HandleFunc("POST /api/auth/login", d.handleLogin)
 	mux.HandleFunc("POST /api/auth/logout", d.requireAuth(d.handleLogout))
-	mux.HandleFunc("GET /api/auth/me", d.requireAuth(d.handleMe))
+	mux.HandleFunc("GET /api/auth/me", d.requireAuth(d.handleMeEnhanced))
+	mux.HandleFunc("GET /api/me", d.requireAuth(d.handleMeEnhanced))
+
+	// 用户 / 角色 / 配额（§35）
+	mux.HandleFunc("GET /api/users", d.requirePerm("user.read", d.handleListUsers))
+	mux.HandleFunc("POST /api/users", d.requirePerm("user.create", d.handleCreateUser))
+	mux.HandleFunc("GET /api/users/{id}", d.requirePerm("user.read", d.handleGetUser))
+	mux.HandleFunc("PATCH /api/users/{id}", d.requirePerm("user.update", d.handlePatchUser))
+	mux.HandleFunc("DELETE /api/users/{id}", d.requirePerm("user.delete", d.handleDeleteUser))
+	mux.HandleFunc("POST /api/users/{id}/disable", d.requirePerm("user.disable", d.handleDisableUser))
+	mux.HandleFunc("POST /api/users/{id}/enable", d.requirePerm("user.disable", d.handleEnableUser))
+	mux.HandleFunc("GET /api/roles", d.requirePerm("role.read", d.handleListRoles))
+	mux.HandleFunc("POST /api/roles", d.requirePerm("role.create", d.handleCreateRole))
+	mux.HandleFunc("DELETE /api/roles/{name}", d.requirePerm("role.delete", d.handleDeleteRole))
+	mux.HandleFunc("PATCH /api/roles/{name}/permissions", d.requirePerm("role.update", d.handlePatchRolePerms))
+	mux.HandleFunc("GET /api/permissions", d.requirePerm("role.read", d.handleListPermissionsCatalog))
+	mux.HandleFunc("GET /api/quotas", d.requirePerm("quota.read", d.handleListQuotas))
+	mux.HandleFunc("GET /api/quotas/me", d.requireAuth(d.handleMyQuota))
+	mux.HandleFunc("POST /api/quotas", d.requirePerm("quota.update", d.handleUpsertQuota))
+	mux.HandleFunc("PUT /api/quotas", d.requirePerm("quota.update", d.handleUpsertQuota))
 
 	mux.HandleFunc("POST /api/enrollment/tokens", d.requirePerm("enrollment.write", d.handleCreateToken))
 	mux.HandleFunc("POST /api/enrollment/enroll", d.handleEnroll)
@@ -122,6 +146,9 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/workstations/{id}", d.requirePerm("workstation.read", d.handleGetWorkstation))
 	mux.HandleFunc("PATCH /api/workstations/{id}", d.requirePerm("workstation.write", d.handleUpdateWorkstation))
 	mux.HandleFunc("DELETE /api/workstations/{id}", d.requirePermStepUp("workstation.write", d.handleDeleteWorkstation))
+	mux.HandleFunc("GET /api/workstations/{id}/members", d.requirePerm("workstation.read", d.handleListWSMembers))
+	mux.HandleFunc("POST /api/workstations/{id}/members", d.requirePerm("workstation.write", d.handleAddWSMember))
+	mux.HandleFunc("DELETE /api/workstations/{id}/members/{userId}", d.requirePerm("workstation.write", d.handleRemoveWSMember))
 
 	// Sessions
 	mux.HandleFunc("GET /api/sessions", d.requirePerm("session.read", d.handleListSessions))
@@ -149,7 +176,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/events", d.requirePerm("employee.read", d.handleSSE))
 
 	// Feishu / Secrets / Scheduler
-	mux.HandleFunc("GET /api/integrations/feishu/config", d.requirePerm("system.read", d.handleFeishuGetConfig))
+	mux.HandleFunc("GET /api/integrations/feishu/config", d.requirePerm("system.write", d.handleFeishuGetConfig))
 	mux.HandleFunc("PUT /api/integrations/feishu/config", d.requirePermStepUp("system.write", d.handleFeishuPutConfig))
 	mux.HandleFunc("GET /api/integrations/feishu/status", d.requireAuth(d.handleFeishuStatus))
 	mux.HandleFunc("POST /api/integrations/feishu/test-message", d.requirePerm("system.write", d.handleFeishuTestMessage))
@@ -349,6 +376,10 @@ func (d Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusLocked, err.Error())
 			return
 		}
+		if err == auth.ErrUserDisabled {
+			writeErr(w, http.StatusForbidden, err.Error())
+			return
+		}
 		writeErr(w, http.StatusUnauthorized, "登录失败: 用户名或密码错误")
 		return
 	}
@@ -523,19 +554,26 @@ func (d Deps) handleGetCA(w http.ResponseWriter, _ *http.Request, _ *auth.Sessio
 	writeJSON(w, http.StatusOK, map[string]string{"ca_pem": string(d.CA.CAPEM())})
 }
 
-func (d Deps) handleListEmployees(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListEmployees(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	list, err := d.Employees.List(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": list})
+	writeJSON(w, http.StatusOK, map[string]any{"items": d.filterEmployees(r, sess, list)})
 }
 
 func (d Deps) handleCreateEmployee(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var in employee.CreateInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效请求体")
+		return
+	}
+	if in.OwnerUserID == "" {
+		in.OwnerUserID = sess.UserID
+	}
+	if err := d.ensureWSAccessForEmployee(r.Context(), sess, in.WorkstationID, in.OwnerUserID); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
 	e, err := d.Employees.Create(r.Context(), in, sess.UserID, clientIP(r))
@@ -546,10 +584,14 @@ func (d Deps) handleCreateEmployee(w http.ResponseWriter, r *http.Request, sess 
 	writeJSON(w, http.StatusCreated, e)
 }
 
-func (d Deps) handleGetEmployee(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleGetEmployee(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	e, err := d.Employees.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !d.canSeeEmployee(r, sess, e) {
+		writeErr(w, http.StatusNotFound, "employee 不存在")
 		return
 	}
 	writeJSON(w, http.StatusOK, e)
@@ -683,12 +725,29 @@ func (d Deps) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request, sess
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-func (d Deps) handleListWorkstations(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	writeJSON(w, http.StatusOK, map[string]any{"items": d.Workstations.List(r.Context())})
+func (d Deps) handleListWorkstations(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	all := d.Workstations.List(r.Context())
+	ids := make([]string, 0, len(all))
+	byID := make(map[string]workstation.View, len(all))
+	for _, v := range all {
+		ids = append(ids, v.ID)
+		byID[v.ID] = v
+	}
+	allowed := d.filterWorkstationIDs(r, sess, ids)
+	items := make([]workstation.View, 0, len(allowed))
+	for _, id := range allowed {
+		items = append(items, byID[id])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-func (d Deps) handleGetWorkstation(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	writeJSON(w, http.StatusOK, d.Workstations.Get(r.Context(), r.PathValue("id")))
+func (d Deps) handleGetWorkstation(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	id := r.PathValue("id")
+	if !d.canAccessWorkstation(r, sess, id) {
+		writeErr(w, http.StatusNotFound, "工作站不存在或无权限")
+		return
+	}
+	writeJSON(w, http.StatusOK, d.Workstations.Get(r.Context(), id))
 }
 
 func (d Deps) handleListSessions(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
@@ -735,9 +794,26 @@ func (d Deps) handleSessionTransition(w http.ResponseWriter, r *http.Request, se
 	writeJSON(w, http.StatusOK, s)
 }
 
-func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	list, _ := d.Jobs.List(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{"items": list})
+	scope := d.resolveScope(r.Context(), sess, "job.read")
+	if scope == authz.ScopeALL {
+		writeJSON(w, http.StatusOK, map[string]any{"items": list})
+		return
+	}
+	emps, _ := d.Employees.List(r.Context())
+	visible := d.filterEmployees(r, sess, emps)
+	allowed := map[string]struct{}{}
+	for _, e := range visible {
+		allowed[e.ID] = struct{}{}
+	}
+	out := make([]*job.Job, 0)
+	for _, j := range list {
+		if _, ok := allowed[j.EmployeeID]; ok {
+			out = append(out, j)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
 func (d Deps) handleCreateJob(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
@@ -894,6 +970,10 @@ func (d Deps) requireAuth(next authed) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess, err := d.Auth.Authenticate(r.Context(), bearer(r))
 		if err != nil {
+			if err == auth.ErrUserDisabled {
+				writeErr(w, http.StatusForbidden, err.Error())
+				return
+			}
 			writeErr(w, http.StatusUnauthorized, "未登录")
 			return
 		}
@@ -902,12 +982,31 @@ func (d Deps) requireAuth(next authed) http.HandlerFunc {
 }
 
 func (d Deps) requirePerm(code string, next authed) http.HandlerFunc {
+	// 上层 AuthZ 管道：鉴权 → 权限码 → Scope 注入 → 业务 handler（§18/§46）
 	return d.requireAuth(func(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
-		if err := d.Auth.Authorize(r.Context(), sess, code); err != nil {
+		grants, err := d.Auth.PermissionGrants(r.Context(), sess)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		az := toAuthzGrants(grants)
+		scope := authz.Resolve(az, code)
+		if scope == authz.ScopeNONE && !authz.Allowed(az, code) {
 			writeErr(w, http.StatusForbidden, "权限不足")
 			return
 		}
-		next(w, r, sess)
+		// 有权限码但 scope 未配置时：ADMIN 类默认 ALL，其余 OWN
+		if scope == authz.ScopeNONE && authz.Allowed(az, code) {
+			scope = authz.ScopeOWN
+			for _, g := range az {
+				if g.Name == "*" {
+					scope = authz.ScopeALL
+					break
+				}
+			}
+		}
+		ctx := authz.WithAuthz(r.Context(), code, scope, az)
+		next(w, r.WithContext(ctx), sess)
 	})
 }
 

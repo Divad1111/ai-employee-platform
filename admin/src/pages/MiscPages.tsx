@@ -6,6 +6,8 @@ import { apiGet, apiPost } from '../api/client'
 import { IconFileText, IconRefresh } from '../components/Icons'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
 import { EntityName } from '../components/EntityName'
+import { AlertDialog } from '../components/AlertDialog'
+import { roleDisplayName } from '../lib/rbacLabels'
 import { getUser } from '../stores/session'
 
 type AuditItem = {
@@ -17,6 +19,20 @@ type AuditItem = {
   ip?: string
   metadata?: Record<string, string>
   created_at: string
+}
+
+/** 审计操作主体展示：优先后端 actor_name，禁止把所有 USER 标成管理员 */
+function formatAuditActor(a: AuditItem, currentUser: ReturnType<typeof getUser>): string {
+  if (a.metadata?.actor_name) return a.metadata.actor_name
+  if (a.actor_type === 'SYSTEM') return '系统内核 (System)'
+  if (a.actor_type === 'EMPLOYEE') return 'AI 员工'
+  if (a.actor_id && a.actor_id === currentUser?.id) {
+    const role = roleDisplayName(currentUser.roles?.[0] || 'VIEWER')
+    return `${currentUser.username}（${role} · 当前账号）`
+  }
+  if (a.metadata?.username) return a.metadata.username
+  if (a.actor_id) return a.actor_id
+  return '—'
 }
 
 export function AuditPage() {
@@ -123,13 +139,7 @@ export function AuditPage() {
                   </td>
                   <td>
                     <EntityName
-                      name={
-                        a.metadata?.actor_name ||
-                        (a.actor_id === currentUser?.id ? `${currentUser.username} (当前管理员)` : '') ||
-                        (a.metadata?.username ? `${a.metadata.username} (管理员)` : '') ||
-                        (a.actor_type === 'USER' ? 'admin (超级管理员)' : '') ||
-                        (a.actor_type === 'SYSTEM' ? '系统内核 (System)' : '')
-                      }
+                      name={formatAuditActor(a, currentUser)}
                       id={a.actor_id}
                       sub={a.actor_type ? `${a.actor_type}${a.ip ? ` · ${a.ip}` : ''}` : undefined}
                     />
@@ -183,6 +193,7 @@ export function SettingsPage() {
   const [totpMsg, setTotpMsg] = useState('')
   const [loading, setLoading] = useState(false)
   const [showRaw, setShowRaw] = useState(false)
+  const [alertMsg, setAlertMsg] = useState('')
 
   const load = () => {
     setLoading(true)
@@ -204,7 +215,7 @@ export function SettingsPage() {
       setTotpEnabled(true)
       setTotpMsg('TOTP 密钥申请成功！请在身份验证器 App 中完成添加绑定。')
     } catch (err) {
-      alert(err instanceof Error ? err.message : '申请 TOTP 密钥失败')
+      setAlertMsg(err instanceof Error ? err.message : '申请 TOTP 密钥失败')
     }
   }
 
@@ -459,6 +470,8 @@ export function SettingsPage() {
           </pre>
         </div>
       )}
+
+      <AlertDialog open={!!alertMsg} message={alertMsg} onClose={() => setAlertMsg('')} />
     </section>
   )
 }

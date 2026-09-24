@@ -1,7 +1,7 @@
 /**
  * Employee 详情：对齐设计文档 §10，聚合 overview + 可编辑绑定。
  */
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../api/client'
 import {
@@ -18,6 +18,14 @@ import {
 import { StatusBadge } from '../components/StatusBadge'
 import { EntityName } from '../components/EntityName'
 import { IconAlertTriangle } from '../components/Icons'
+import { SearchableSelect } from '../components/SearchableSelect'
+
+/** Provider 中文选项 */
+const PROVIDER_OPTIONS = [
+  { value: '', label: '未指定', keywords: 'inherit default' },
+  { value: 'cursor', label: 'Cursor ACP', keywords: 'cursor acp' },
+  { value: 'codex', label: 'Codex', keywords: 'codex runtime' },
+]
 
 type Emp = {
   id: string
@@ -103,6 +111,34 @@ export function EmployeeDetailPage() {
   const [newWsRepo, setNewWsRepo] = useState('')
   const [newWsBranch, setNewWsBranch] = useState('main')
   const [wsCreating, setWsCreating] = useState(false)
+
+  const wsNodeOptions = useMemo(
+    () =>
+      workstations.map((w) => ({
+        value: w.id,
+        label: w.name && w.name !== w.id ? `${w.name} [${w.status}]` : `${w.id} [${w.status}]`,
+        keywords: `${w.id} ${w.name || ''} ${w.status}`,
+      })),
+    [workstations],
+  )
+  const workspaceOptions = useMemo(
+    () =>
+      workspaces.map((ws) => ({
+        value: ws.id,
+        label: ws.path || ws.name || ws.id,
+        keywords: `${ws.id} ${ws.path || ''} ${ws.name || ''}`,
+      })),
+    [workspaces],
+  )
+  const workflowOptions = useMemo(
+    () =>
+      allWorkflows.map((w) => ({
+        value: w.id,
+        label: w.name,
+        keywords: w.id,
+      })),
+    [allWorkflows],
+  )
 
   async function onCreateWsQuick(ev: FormEvent) {
     ev.preventDefault()
@@ -282,28 +318,24 @@ export function EmployeeDetailPage() {
         <form className="inline-form" onSubmit={onSaveBindings}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>
             驱动引擎 (Provider)
-            <select value={provider} onChange={(ev) => setProvider(ev.target.value)}>
-              <option value="">未指定 (继承工作站默认)</option>
-              <option value="cursor">Cursor (ACP 协议)</option>
-              <option value="codex">Codex (本地 Runtime)</option>
-            </select>
+            <SearchableSelect
+              value={provider}
+              onChange={setProvider}
+              options={PROVIDER_OPTIONS}
+              placeholder="选择驱动引擎…"
+              style={{ minWidth: 180 }}
+            />
           </label>
           <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>
             绑定工作站 (Workstation ID)
-            <input
-              list="detail-ws-options"
-              placeholder="选择已有工作站或输入 ID"
+            <SearchableSelect
               value={wsId}
-              onChange={(ev) => setWsId(ev.target.value)}
-              style={{ width: '280px' }}
+              onChange={setWsId}
+              options={wsNodeOptions}
+              placeholder="选择或搜索工作站…"
+              allowCustom
+              style={{ minWidth: 260 }}
             />
-            <datalist id="detail-ws-options">
-              {workstations.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name && w.name !== w.id ? `${w.name} (${w.id})` : w.id} [{w.status}]
-                </option>
-              ))}
-            </datalist>
           </label>
           <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -317,20 +349,14 @@ export function EmployeeDetailPage() {
                 {showCreateWs ? '✕ 取消新建' : '➕ 快速新建'}
               </button>
             </div>
-            <input
-              list="detail-workspace-options"
-              placeholder="选择已有工作区或输入 ID"
+            <SearchableSelect
               value={workspaceId}
-              onChange={(ev) => setWorkspaceId(ev.target.value)}
-              style={{ width: '260px' }}
+              onChange={setWorkspaceId}
+              options={workspaceOptions}
+              placeholder="选择或搜索工作区…"
+              allowCustom
+              style={{ minWidth: 240 }}
             />
-            <datalist id="detail-workspace-options">
-              {workspaces.map((ws) => (
-                <option key={ws.id} value={ws.id}>
-                  {ws.path ? `${ws.path} (${ws.id})` : ws.id}
-                </option>
-              ))}
-            </datalist>
           </label>
           <button type="submit" style={{ alignSelf: 'flex-end' }}>保存配置</button>
         </form>
@@ -455,12 +481,13 @@ export function EmployeeDetailPage() {
                 .catch((err) => setError(err instanceof Error ? err.message : String(err)))
             }}
           >
-            <select value={grantWfId} onChange={(e) => setGrantWfId(e.target.value)}>
-              <option value="">选择工作流...</option>
-              {allWorkflows.map((w) => (
-                <option key={w.id} value={w.id}>{w.name} ({w.id})</option>
-              ))}
-            </select>
+            <SearchableSelect
+              value={grantWfId}
+              onChange={setGrantWfId}
+              options={workflowOptions}
+              placeholder="选择工作流…"
+              style={{ minWidth: 220 }}
+            />
             <button type="submit">授权</button>
           </form>
           {workflows && workflows.length > 0 ? (

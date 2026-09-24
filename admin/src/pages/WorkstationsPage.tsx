@@ -4,6 +4,9 @@ import { StatusBadge } from '../components/StatusBadge'
 import { EntityName } from '../components/EntityName'
 import { IconAlertTriangle, IconCheckCircle, IconPlus, IconRefresh, IconServer, IconTerminal, IconTrash } from '../components/Icons'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { PromptDialog } from '../components/PromptDialog'
+import { AlertDialog } from '../components/AlertDialog'
+import { usePerm } from '../stores/permissions'
 
 type WS = {
   id: string
@@ -24,6 +27,9 @@ type TokenResult = {
 }
 
 export function WorkstationsPage() {
+  const { can } = usePerm()
+  const canEnroll = can('enrollment.write')
+  const canWrite = can('workstation.write')
   const [items, setItems] = useState<WS[]>([])
   const [loading, setLoading] = useState(false)
   const [showEnroll, setShowEnroll] = useState(false)
@@ -58,6 +64,10 @@ export function WorkstationsPage() {
   const [tokenErr, setTokenErr] = useState('')
   const [activeTab, setActiveTab] = useState<'unix' | 'windows'>('unix')
   const [copied, setCopied] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<WS | null>(null)
+  const [renameBusy, setRenameBusy] = useState(false)
+  const [renameErr, setRenameErr] = useState('')
+  const [alertMsg, setAlertMsg] = useState('')
 
   async function load() {
     setLoading(true)
@@ -69,15 +79,23 @@ export function WorkstationsPage() {
     }
   }
 
-  async function renameWorkstation(id: string, oldName: string) {
-    const defaultVal = oldName && oldName !== id ? oldName : ''
-    const newName = prompt('请输入工作站节点的新名称（例如：Mac开发机 / GPU计算节点）：', defaultVal)
-    if (!newName || !newName.trim() || newName.trim() === oldName) return
+  function openRename(ws: WS) {
+    setRenameTarget(ws)
+    setRenameErr('')
+  }
+
+  async function submitRename(newName: string) {
+    if (!renameTarget) return
+    setRenameBusy(true)
+    setRenameErr('')
     try {
-      await apiPatch(`/workstations/${id}`, { name: newName.trim() })
+      await apiPatch(`/workstations/${renameTarget.id}`, { name: newName })
+      setRenameTarget(null)
       await load()
     } catch (e: unknown) {
-      alert('重命名失败: ' + (e instanceof Error ? e.message : '未知错误'))
+      setRenameErr(e instanceof Error ? e.message : '重命名失败')
+    } finally {
+      setRenameBusy(false)
     }
   }
 
@@ -177,19 +195,18 @@ aew service status`
           <p>承载 AI 数字员工本地 Runtime、工具链沙箱与代码操作环境的主机节点</p>
         </div>
         <div style={{ display: 'flex', gap: '0.6rem' }}>
+          {canEnroll ? (
           <button
             type="button"
             className="btn"
             onClick={() => {
               setShowEnroll((prev) => !prev)
-              if (!showEnroll && items.length === 0 && !tokenResult) {
-                // 默认打开
-              }
             }}
           >
             <IconPlus size={15} />
             <span>{showEnroll ? '收起接入向导' : '➕ 接入新工作站'}</span>
           </button>
+          ) : null}
           <button type="button" className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <IconRefresh size={15} />
             <span>刷新列表</span>
@@ -229,7 +246,7 @@ aew service status`
       />
 
       {/* 节点接入向导与令牌生成面板 */}
-      {showEnroll && (
+      {canEnroll && showEnroll && (
         <div className="panel" style={{ border: '2px solid var(--brand-500)', background: '#fcfdfd' }}>
           <div className="panel-header">
             <div>
@@ -458,23 +475,29 @@ aew service status`
                   </td>
                   <td>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                      <button
-                        type="button"
-                        className="btn-ghost btn-sm"
-                        title="点击重命名节点名称"
-                        onClick={() => void renameWorkstation(w.id, w.name)}
-                      >
-                        ✏️ 改名
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-danger btn-sm"
-                        title="从平台删除该工作站并自动吊销证书"
-                        onClick={() => openDeleteModal(w)}
-                      >
-                        <IconTrash size={13} />
-                        <span>删除</span>
-                      </button>
+                      {canWrite ? (
+                        <>
+                          <button
+                            type="button"
+                            className="btn-ghost btn-sm"
+                            title="点击重命名节点名称"
+                            onClick={() => openRename(w)}
+                          >
+                            ✏️ 改名
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-danger btn-sm"
+                            title="从平台删除该工作站并自动吊销证书"
+                            onClick={() => openDeleteModal(w)}
+                          >
+                            <IconTrash size={13} />
+                            <span>删除</span>
+                          </button>
+                        </>
+                      ) : (
+                        <span className="muted">只读</span>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -483,16 +506,20 @@ aew service status`
                 <tr>
                   <td colSpan={6} style={{ textAlign: 'center', padding: '3rem 1rem' }}>
                     <div style={{ color: 'var(--text-muted)', marginBottom: '1rem' }}>
-                      暂无工作站节点接入。请点击上方按钮生成注册令牌并接入计算节点。
+                      {canEnroll
+                        ? '暂无工作站节点接入。请点击上方按钮生成注册令牌并接入计算节点。'
+                        : '暂无工作站节点。当前账号无接入权限，请联系管理员。'}
                     </div>
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={() => setShowEnroll(true)}
-                    >
-                      <IconPlus size={15} />
-                      <span>立即接入第一台工作站</span>
-                    </button>
+                    {canEnroll ? (
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => setShowEnroll(true)}
+                      >
+                        <IconPlus size={15} />
+                        <span>立即接入第一台工作站</span>
+                      </button>
+                    ) : null}
                   </td>
                 </tr>
               ) : null}
@@ -693,6 +720,25 @@ aew service status`
           </div>
         </div>
       ) : null}
+
+      <PromptDialog
+        open={!!renameTarget}
+        title="重命名工作站节点"
+        description="例如：Mac 开发机 / GPU 计算节点"
+        label="节点名称"
+        defaultValue={
+          renameTarget && renameTarget.name && renameTarget.name !== renameTarget.id
+            ? renameTarget.name
+            : ''
+        }
+        placeholder="输入新名称"
+        confirmText="保存"
+        busy={renameBusy}
+        error={renameErr}
+        onCancel={() => !renameBusy && setRenameTarget(null)}
+        onConfirm={(v) => void submitRename(v)}
+      />
+      <AlertDialog open={!!alertMsg} message={alertMsg} onClose={() => setAlertMsg('')} />
     </section>
   )
 }

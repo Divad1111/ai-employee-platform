@@ -1,10 +1,20 @@
 /**
  * Feishu 飞书集成与协同配置。
  */
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { Navigate } from 'react-router-dom'
 import { apiDelete, apiGet, apiPost, apiPut } from '../api/client'
 import { IconPlus } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
+import { ConfirmDialog } from '../components/ConfirmDialog'
+import { SearchableSelect } from '../components/SearchableSelect'
+import { usePerm } from '../stores/permissions'
+
+/** 测试消息接收类型 */
+const TARGET_TYPE_OPTIONS = [
+  { value: 'open_id', label: '用户 OpenID', keywords: 'open_id ou_' },
+  { value: 'chat_id', label: '群聊 Chat ID', keywords: 'chat_id oc_' },
+]
 
 type FeishuConfig = {
   app_id: string
@@ -37,6 +47,8 @@ type FeishuStatus = {
 }
 
 export function FeishuPage() {
+  const { ready, can } = usePerm()
+  const canConfig = can('system.write')
   const [cfg, setCfg] = useState<FeishuConfig | null>(null)
   const [bindings, setBindings] = useState<Binding[]>([])
   const [error, setError] = useState('')
@@ -67,6 +79,9 @@ export function FeishuPage() {
   const [alias, setAlias] = useState('')
   const [chatId, setChatId] = useState('')
   const [editing, setEditing] = useState(false)
+  // 删除绑定确认
+  const [removeTarget, setRemoveTarget] = useState<Binding | null>(null)
+  const [removing, setRemoving] = useState(false)
 
   async function load() {
     const [c, b, empData, st] = await Promise.all([
@@ -85,10 +100,34 @@ export function FeishuPage() {
   }
 
   const empMap = Object.fromEntries(employees.map((e) => [e.id, e.name]))
+  const empOptions = useMemo(
+    () => employees.map((e) => ({ value: e.id, label: e.name, keywords: e.id })),
+    [employees],
+  )
+  // 测试消息目标：按当前类型从已有绑定中生成可选项
+  const testTargetOptions = useMemo(() => {
+    return bindings
+      .map((b) => {
+        const id = testTargetType === 'open_id' ? b.feishu_open_id : b.chat_id
+        if (!id) return null
+        const name = employees.find((e) => e.id === b.employee_id)?.name || b.employee_id
+        return {
+          value: id,
+          label: `${name}（@${b.feishu_bot_alias}）`,
+          keywords: `${b.employee_id} ${b.feishu_bot_alias}`,
+        }
+      })
+      .filter((o): o is { value: string; label: string; keywords: string } => !!o)
+  }, [bindings, testTargetType, employees])
 
   useEffect(() => {
+    if (!ready || !canConfig) return
     void load().catch((e) => setError(e instanceof Error ? e.message : '加载飞书配置失败'))
-  }, [])
+  }, [ready, canConfig])
+
+  if (ready && !canConfig) {
+    return <Navigate to="/" replace />
+  }
 
   function resetBindingForm() {
     setEmpId('')
@@ -225,9 +264,14 @@ export function FeishuPage() {
     }
   }
 
-  async function removeBinding(b: Binding) {
-    const name = empMap[b.employee_id] || b.employee_id
-    if (!confirm(`确定删除员工「${name}」的别名绑定 @${b.feishu_bot_alias} 吗？`)) return
+  function requestRemoveBinding(b: Binding) {
+    setRemoveTarget(b)
+  }
+
+  async function confirmRemoveBinding() {
+    if (!removeTarget) return
+    const b = removeTarget
+    setRemoving(true)
     setError('')
     setMsg('')
     try {
@@ -236,11 +280,14 @@ export function FeishuPage() {
         feishu_bot_alias: b.feishu_bot_alias,
       })
       await apiDelete(`/integrations/feishu/bindings?${q.toString()}`)
+      setRemoveTarget(null)
       setMsg('绑定已删除')
       if (editing && empId === b.employee_id) resetBindingForm()
       await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : '删除绑定失败')
+    } finally {
+      setRemoving(false)
     }
   }
 
@@ -480,25 +527,28 @@ export function FeishuPage() {
               向指定飞书用户（OpenID: <code>ou_xxx</code>）或群聊会话（Chat ID: <code>oc_xxx</code>）投递一条测试消息，检验机器人发信权限
             </p>
             <form onSubmit={onSendTestMessage}>
-              <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr auto', gap: '0.75rem', alignItems: 'center' }}>
-                <select
+              <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr auto', gap: '0.75rem', alignItems: 'center' }}>
+                <SearchableSelect
                   value={testTargetType}
-                  onChange={(e) => setTestTargetType(e.target.value)}
-                  style={{ padding: '0.5rem 0.6rem' }}
-                >
-                  <option value="open_id">用户 OpenID</option>
-                  <option value="chat_id">群聊 Chat ID</option>
-                </select>
-                <input
-                  list="feishu-test-targets"
-                  placeholder={testTargetType === 'open_id' ? '输入接收者飞书用户 OpenID (例: ou_a1b2c3d4)' : '输入接收群聊 Chat ID (例: oc_a1b2c3d4)'}
+                  onChange={setTestTargetType}
+                  options={TARGET_TYPE_OPTIONS}
+                  placeholder="接收类型…"
+                  style={{ minWidth: 140 }}
+                />
+                <SearchableSelect
                   value={testTargetId}
-                  onChange={(e) => {
-                    const val = e.target.value
+                  onChange={(val) => {
                     setTestTargetId(val)
                     if (val.startsWith('ou_')) setTestTargetType('open_id')
                     if (val.startsWith('oc_')) setTestTargetType('chat_id')
                   }}
+                  options={testTargetOptions}
+                  placeholder={
+                    testTargetType === 'open_id'
+                      ? '输入或选择用户 OpenID（例: ou_a1b2c3d4）'
+                      : '输入或选择群聊 Chat ID（例: oc_a1b2c3d4）'
+                  }
+                  allowCustom
                   required
                 />
                 <button type="submit" disabled={sendingTest} style={{ minWidth: '130px' }}>
@@ -513,13 +563,6 @@ export function FeishuPage() {
                   style={{ width: '100%', fontSize: '0.85rem' }}
                 />
               </div>
-              <datalist id="feishu-test-targets">
-                {bindings.map((b) => (
-                  <option key={b.employee_id} value={testTargetType === 'open_id' ? (b.feishu_open_id || '') : (b.chat_id || '')}>
-                    {empMap[b.employee_id] || b.employee_id} (别名 @{b.feishu_bot_alias})
-                  </option>
-                ))}
-              </datalist>
             </form>
 
             {/* 快速获取 OpenID / Chat ID 帮助折叠卡片 */}
@@ -594,22 +637,16 @@ export function FeishuPage() {
         </div>
 
         <form className="inline-form" onSubmit={addBinding}>
-          <input
-            list="feishu-emp-options"
-            placeholder="选择员工或输入 ID (例: emp-1)"
+          <SearchableSelect
             value={empId}
-            onChange={(e) => setEmpId(e.target.value)}
+            onChange={setEmpId}
+            options={empOptions}
+            placeholder="选择或搜索员工…"
+            allowCustom
             required
-            style={{ width: '240px' }}
             disabled={editing}
+            style={{ minWidth: 220 }}
           />
-          <datalist id="feishu-emp-options">
-            {employees.map((e) => (
-              <option key={e.id} value={e.id}>
-                {e.name} ({e.id})
-              </option>
-            ))}
-          </datalist>
           <input placeholder="机器人别名 (例: 小智 / dev)" value={alias} onChange={(e) => setAlias(e.target.value)} required />
           <input placeholder="飞书 OpenID (可选)" value={openId} onChange={(e) => setOpenId(e.target.value)} />
           <input placeholder="默认群聊 Chat ID (可选)" value={chatId} onChange={(e) => setChatId(e.target.value)} />
@@ -659,7 +696,7 @@ export function FeishuPage() {
                         type="button"
                         className="btn-ghost btn-sm"
                         style={{ color: '#dc2626' }}
-                        onClick={() => void removeBinding(b)}
+                        onClick={() => requestRemoveBinding(b)}
                       >
                         删除
                       </button>
@@ -676,6 +713,22 @@ export function FeishuPage() {
           </table>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={!!removeTarget}
+        title="确认删除飞书绑定"
+        description="删除后该员工将无法通过对应机器人别名被呼叫。"
+        targetLabel={
+          removeTarget
+            ? `${empMap[removeTarget.employee_id] || removeTarget.employee_id}（@${removeTarget.feishu_bot_alias}）`
+            : undefined
+        }
+        targetMeta={removeTarget?.employee_id}
+        confirmText="确认删除"
+        busy={removing}
+        onCancel={() => !removing && setRemoveTarget(null)}
+        onConfirm={() => void confirmRemoveBinding()}
+      />
     </section>
   )
 }

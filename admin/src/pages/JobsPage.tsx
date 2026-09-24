@@ -8,6 +8,9 @@ import { StatusBadge } from '../components/StatusBadge'
 import { IconJobs, IconPlus, IconRefresh } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { ConfirmDialog } from '../components/ConfirmDialog'
+import { SearchableSelect } from '../components/SearchableSelect'
+import { usePerm } from '../stores/permissions'
 
 type Job = {
   id: string
@@ -40,16 +43,21 @@ function isErrorStatus(status: string) {
 }
 
 export function JobsPage() {
+  const { can } = usePerm()
+  const canWrite = can('job.write')
+  const canCancel = can('job.cancel')
   const [searchParams, setSearchParams] = useSearchParams()
   const filter = searchParams.get('filter') || 'all'
   const [items, setItems] = useState<Job[]>([])
   const [employees, setEmployees] = useState<Array<{ id: string; name: string }>>([])
-  const [workspaces, setWorkspaces] = useState<Array<{ id: string; path?: string }>>([])
+  const [workspaces, setWorkspaces] = useState<Array<{ id: string; path?: string; repository?: string }>>([])
   const [employeeId, setEmployeeId] = useState('')
   const [workspaceId, setWorkspaceId] = useState('')
   const [prompt, setPrompt] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [cancelId, setCancelId] = useState<string | null>(null)
+  const [cancelling, setCancelling] = useState(false)
 
   async function load() {
     setLoading(true)
@@ -57,7 +65,7 @@ export function JobsPage() {
       const [jobsData, empData, wsData] = await Promise.all([
         apiGet<{ items: Job[] }>('/jobs'),
         apiGet<{ items: Array<{ id: string; name: string }> }>('/employees').catch(() => ({ items: [] })),
-        apiGet<{ items: Array<{ id: string; path?: string }> }>('/workspaces').catch(() => ({ items: [] })),
+        apiGet<{ items: Array<{ id: string; path?: string; repository?: string }> }>('/workspaces').catch(() => ({ items: [] })),
       ])
       setItems(jobsData.items ?? [])
       setEmployees(empData.items ?? [])
@@ -68,6 +76,19 @@ export function JobsPage() {
   }
 
   const empMap = Object.fromEntries(employees.map((e) => [e.id, e.name]))
+  const empOptions = useMemo(
+    () => employees.map((e) => ({ value: e.id, label: e.name, keywords: e.id })),
+    [employees],
+  )
+  const wsOptions = useMemo(
+    () =>
+      workspaces.map((ws) => ({
+        value: ws.id,
+        label: ws.repository || ws.path || ws.id,
+        keywords: `${ws.id} ${ws.path || ''} ${ws.repository || ''}`,
+      })),
+    [workspaces],
+  )
 
   const filteredItems = useMemo(() => {
     if (filter === 'active') return items.filter((j) => isActiveStatus(j.status))
@@ -100,13 +121,17 @@ export function JobsPage() {
     }
   }
 
-  async function onCancel(id: string) {
-    if (!confirm(`确定要取消任务 #${id.slice(0, 8)} 吗？`)) return
+  async function confirmCancel() {
+    if (!cancelId) return
+    setCancelling(true)
     try {
-      await apiPost(`/jobs/${id}/cancel`, {})
+      await apiPost(`/jobs/${cancelId}/cancel`, {})
+      setCancelId(null)
       await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : '取消任务失败')
+    } finally {
+      setCancelling(false)
     }
   }
 
@@ -148,43 +173,32 @@ export function JobsPage() {
         ]}
       />
 
+      {canWrite ? (
       <div className="panel">
         <div className="panel-header">
           <div>
             <h2>手动派发新任务</h2>
-            <p>可直接下拉选择已有数字员工，或手动输入员工编号 ID 与 Prompt 指令</p>
+            <p>可搜索选择已有数字员工与工作区，也可直接输入 ID</p>
           </div>
         </div>
         <form className="inline-form" onSubmit={onCreate}>
-          <input
-            list="jobs-emp-options"
-            placeholder="选择已有员工或输入 ID"
+          <SearchableSelect
             value={employeeId}
-            onChange={(e) => setEmployeeId(e.target.value)}
-            style={{ width: '250px' }}
+            onChange={setEmployeeId}
+            options={empOptions}
+            placeholder="选择或搜索员工…"
+            allowCustom
             required
+            style={{ minWidth: 220 }}
           />
-          <datalist id="jobs-emp-options">
-            {employees.map((e) => (
-              <option key={e.id} value={e.id}>
-                {e.name} ({e.id})
-              </option>
-            ))}
-          </datalist>
-          <input
-            list="jobs-ws-options"
-            placeholder="工作区 (可选，默认继承员工)"
+          <SearchableSelect
             value={workspaceId}
-            onChange={(e) => setWorkspaceId(e.target.value)}
-            style={{ width: '220px' }}
+            onChange={setWorkspaceId}
+            options={wsOptions}
+            placeholder="工作区（可选）"
+            allowCustom
+            style={{ minWidth: 200 }}
           />
-          <datalist id="jobs-ws-options">
-            {workspaces.map((ws) => (
-              <option key={ws.id} value={ws.id}>
-                {ws.path ? `${ws.path} (${ws.id})` : ws.id}
-              </option>
-            ))}
-          </datalist>
           <input
             placeholder="任务指令内容 Prompt (例如: 检查工程并修复单元测试)"
             value={prompt}
@@ -199,6 +213,9 @@ export function JobsPage() {
         </form>
         {error ? <div className="error">{error}</div> : null}
       </div>
+      ) : (
+        error ? <div className="error">{error}</div> : null
+      )}
 
       <div className="panel">
         <div className="panel-header">
@@ -272,16 +289,16 @@ export function JobsPage() {
                       <Link to={`/jobs/${j.id}`} className="btn-ghost btn-sm" style={{ display: 'inline-flex' }}>
                         时间线详情 →
                       </Link>
-                      {!isTerminal(j.status) && (
+                      {!isTerminal(j.status) && canCancel ? (
                         <button
                           type="button"
                           className="btn-danger btn-sm"
-                          onClick={() => void onCancel(j.id)}
+                          onClick={() => setCancelId(j.id)}
                           style={{ padding: '0.2rem 0.6rem', fontSize: '0.8rem' }}
                         >
                           取消
                         </button>
-                      )}
+                      ) : null}
                     </div>
                   </td>
                 </tr>
@@ -301,6 +318,18 @@ export function JobsPage() {
           </table>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={!!cancelId}
+        title="确认取消任务"
+        description="取消后工作站将停止继续执行该任务（若已在执行中，以节点侧实际响应为准）。"
+        targetLabel={cancelId ? `任务 #${cancelId.slice(0, 8)}` : undefined}
+        targetMeta={cancelId || undefined}
+        confirmText="确认取消"
+        busy={cancelling}
+        onCancel={() => !cancelling && setCancelId(null)}
+        onConfirm={() => void confirmCancel()}
+      />
     </section>
   )
 }
@@ -311,17 +340,23 @@ export function JobDetailPage() {
   const [empName, setEmpName] = useState('')
   const [events, setEvents] = useState<JobEvent[]>([])
   const [error, setError] = useState('')
+  const [confirmCancel, setConfirmCancel] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
 
-  async function onCancel() {
-    if (!id || !confirm(`确定要取消此任务吗？`)) return
+  async function doCancel() {
+    if (!id) return
+    setCancelling(true)
     try {
       await apiPost(`/jobs/${id}/cancel`, {})
+      setConfirmCancel(false)
       const jb = await apiGet<Job>(`/jobs/${id}`)
       setJob(jb)
       const ev = await apiGet<{ items: JobEvent[] }>(`/jobs/${id}/events`)
       setEvents(ev.items ?? [])
     } catch (err) {
       setError(err instanceof Error ? err.message : '取消任务失败')
+    } finally {
+      setCancelling(false)
     }
   }
 
@@ -369,7 +404,7 @@ export function JobDetailPage() {
               <button
                 type="button"
                 className="btn-danger btn-sm"
-                onClick={() => void onCancel()}
+                onClick={() => setConfirmCancel(true)}
                 style={{ padding: '0.25rem 0.75rem', fontSize: '0.85rem' }}
               >
                 取消任务
@@ -462,6 +497,18 @@ export function JobDetailPage() {
           <div className="empty-tip">暂无事件轨迹记录</div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={confirmCancel}
+        title="确认取消任务"
+        description="取消后工作站将停止继续执行该任务。"
+        targetLabel={job.prompt ? (job.prompt.length > 40 ? `${job.prompt.slice(0, 40)}…` : job.prompt) : `任务 #${job.id.slice(0, 8)}`}
+        targetMeta={job.id}
+        confirmText="确认取消"
+        busy={cancelling}
+        onCancel={() => !cancelling && setConfirmCancel(false)}
+        onConfirm={() => void doCancel()}
+      />
     </section>
   )
 }

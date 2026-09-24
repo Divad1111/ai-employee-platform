@@ -1,5 +1,5 @@
 /**
- * Dashboard：对齐设计文档 §9 — 统计卡 + Active Jobs + Workstations 资源监控。
+ * Dashboard：对齐设计文档 §9 — 统计卡 + Active Jobs + Workstations 资源监控 + 当前用户 Token 用量。
  */
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -8,6 +8,8 @@ import { StatusBadge } from '../components/StatusBadge'
 import { IconRefresh } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { roleDisplayName } from '../lib/rbacLabels'
+import { usePerm } from '../stores/permissions'
 
 type ActiveJob = {
   id: string
@@ -24,6 +26,21 @@ type WsRow = {
   memory_percent: number
 }
 
+type MyQuota = {
+  user_id: string
+  period_type: string
+  period_key?: string
+  tokens_used: number
+  requests_used: number
+  token_limit: number
+  request_limit: number
+  unlimited: boolean
+  source: string
+  source_role?: string
+  usage_percent: number
+  remaining: number
+}
+
 type Dash = {
   employees: number
   workstations: number
@@ -34,9 +51,19 @@ type Dash = {
   errors: number
   recent_active_jobs: ActiveJob[]
   workstations_detail: WsRow[]
+  my_quota?: MyQuota
+}
+
+function formatTokens(n: number) {
+  if (!Number.isFinite(n)) return '—'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n % 1_000 === 0 ? 0 : 1)}K`
+  return String(Math.round(n))
 }
 
 export function DashboardPage() {
+  const { can } = usePerm()
+  const canQuotaAdmin = can('quota.read')
   const [data, setData] = useState<Dash | null>(null)
   const [empMap, setEmpMap] = useState<Record<string, string>>({})
   const [error, setError] = useState('')
@@ -63,6 +90,22 @@ export function DashboardPage() {
     return () => clearInterval(poll)
   }, [])
 
+  const q = data?.my_quota
+  const quotaPct = q ? Math.min(Math.max(q.usage_percent || 0, 0), 100) : 0
+  const quotaBarColor =
+    quotaPct >= 90 ? 'var(--danger)' : quotaPct >= 70 ? '#d97706' : 'var(--brand-500)'
+  const quotaSourceLabel = q
+    ? q.unlimited || q.token_limit <= 0
+      ? q.source === 'none'
+        ? '未配置策略（不限）'
+        : '不限'
+      : q.source === 'USER'
+        ? '个人例外策略'
+        : q.source === 'ROLE'
+          ? `角色预设 · ${roleDisplayName(q.source_role || '')}`
+          : '未配置策略'
+    : '—'
+
   return (
     <section>
       <header className="page-header">
@@ -88,9 +131,9 @@ export function DashboardPage() {
           },
           {
             step: '2',
-            title: 'mTLS 双向安全保活监控',
-            desc: '通过 gRPC 双向流与客户端证书验证，实时展示各宿主机节点的 CPU 负载率与内存占用率。',
-            tag: '硬件监控',
+            title: '本人 Token 配额水位',
+            desc: '展示当前登录账号本月 Token 已用量与有效限额（个人例外优先，否则取角色预设），便于及时发现额度耗尽风险。',
+            tag: '配额监控',
           },
           {
             step: '3',
@@ -142,6 +185,92 @@ export function DashboardPage() {
               </div>
               <div className="stat-sub">失败或超时的任务 →</div>
             </Link>
+          </div>
+
+          <div className="panel">
+            <div className="panel-header" style={{ alignItems: 'flex-start' }}>
+              <div>
+                <h2>我的 Token 用量（本月）</h2>
+                <p>
+                  限额来源：{quotaSourceLabel}
+                  {q?.period_key ? ` · 周期 ${q.period_key}` : ''}
+                </p>
+              </div>
+              {canQuotaAdmin ? <Link to="/quotas">配额策略 →</Link> : null}
+            </div>
+            <div style={{ padding: '0 1.1rem 1.25rem' }}>
+              {q ? (
+                <>
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+                      gap: '1rem',
+                      marginBottom: '0.85rem',
+                    }}
+                  >
+                    <div>
+                      <div className="stat-label">已使用</div>
+                      <div className="stat-value" style={{ fontSize: '1.55rem' }}>
+                        {formatTokens(q.tokens_used)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="stat-label">月度限额</div>
+                      <div className="stat-value" style={{ fontSize: '1.55rem' }}>
+                        {q.unlimited || q.token_limit <= 0 ? '不限' : formatTokens(q.token_limit)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="stat-label">剩余</div>
+                      <div
+                        className="stat-value"
+                        style={{ fontSize: '1.55rem', color: quotaPct >= 90 ? 'var(--danger)' : undefined }}
+                      >
+                        {q.unlimited || q.token_limit <= 0 ? '—' : formatTokens(q.remaining)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="stat-label">使用率</div>
+                      <div className="stat-value" style={{ fontSize: '1.55rem', color: quotaBarColor }}>
+                        {q.unlimited || q.token_limit <= 0 ? '—' : `${quotaPct.toFixed(1)}%`}
+                      </div>
+                    </div>
+                  </div>
+                  {q.unlimited || q.token_limit <= 0 ? (
+                    <p className="muted" style={{ margin: 0, fontSize: '0.85rem' }}>
+                      当前账号未设置 Token 上限（或限额为 0 表示不限制）。
+                    </p>
+                  ) : (
+                    <>
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          fontSize: '0.78rem',
+                          marginBottom: '0.35rem',
+                        }}
+                      >
+                        <span>
+                          {formatTokens(q.tokens_used)} / {formatTokens(q.token_limit)} Token
+                        </span>
+                        <span style={{ color: quotaBarColor }}>{quotaPct.toFixed(1)}%</span>
+                      </div>
+                      <div className="progress-bar-wrap">
+                        <div
+                          className="progress-bar-fill"
+                          style={{ width: `${quotaPct}%`, background: quotaBarColor }}
+                        />
+                      </div>
+                    </>
+                  )}
+                </>
+              ) : (
+                <p className="muted" style={{ margin: 0 }}>
+                  暂无配额数据
+                </p>
+              )}
+            </div>
           </div>
 
           <div className="panel">

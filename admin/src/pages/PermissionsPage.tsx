@@ -2,10 +2,20 @@
  * Permission 权限策略配置与规则清单。
  */
 import { FormEvent, useEffect, useState } from 'react'
+import { Navigate } from 'react-router-dom'
 import { apiGet, apiPut } from '../api/client'
 import { StatusBadge } from '../components/StatusBadge'
 import { IconShield, IconPlus } from '../components/Icons'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { SearchableSelect } from '../components/SearchableSelect'
+import { usePerm } from '../stores/permissions'
+
+/** 规则 effect 中文选项 */
+const EFFECT_OPTIONS = [
+  { value: 'ALLOW', label: '允许放行', keywords: 'ALLOW' },
+  { value: 'ASK', label: '人工审核', keywords: 'ASK' },
+  { value: 'DENY', label: '强行阻断', keywords: 'DENY' },
+]
 
 type Profile = {
   id: string
@@ -25,6 +35,8 @@ type Rule = {
 }
 
 export function PermissionsPage() {
+  const { ready, can } = usePerm()
+  const canWrite = can('system.write')
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [rules, setRules] = useState<Rule[]>([])
   const [selected, setSelected] = useState('')
@@ -64,12 +76,18 @@ export function PermissionsPage() {
   }
 
   useEffect(() => {
+    if (!ready || !canWrite) return
     void loadProfiles().catch((e) => setError(String(e)))
-  }, [])
+  }, [ready, canWrite])
 
   useEffect(() => {
+    if (!ready || !canWrite) return
     void loadRules(selected).catch((e) => setError(String(e)))
-  }, [selected])
+  }, [selected, ready, canWrite])
+
+  if (ready && !canWrite) {
+    return <Navigate to="/" replace />
+  }
 
   async function onSaveProfile(e: FormEvent) {
     e.preventDefault()
@@ -214,11 +232,14 @@ export function PermissionsPage() {
               required
               style={{ width: '220px' }}
             />
-            <select value={reffect} onChange={(e) => setReffect(e.target.value)}>
-              <option value="ALLOW">ALLOW (允许放行)</option>
-              <option value="ASK">ASK (人工审核)</option>
-              <option value="DENY">DENY (强行阻断)</option>
-            </select>
+            <SearchableSelect
+              value={reffect}
+              onChange={setReffect}
+              options={EFFECT_OPTIONS}
+              placeholder="选择判定效果…"
+              required
+              style={{ minWidth: 140 }}
+            />
             <input
               type="number"
               placeholder="优先级 (数值越大越先判定)"

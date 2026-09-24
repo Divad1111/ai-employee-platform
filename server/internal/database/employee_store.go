@@ -19,8 +19,8 @@ func (s *PostgresEmployeeStore) Save(ctx context.Context, e *employee.Employee) 
 	query := `
 		INSERT INTO employees (
 			id, name, description, role_summary, default_provider,
-			workstation_id, workspace_id, permission_profile, status, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), $8, $9, $10, $11)
+			workstation_id, workspace_id, permission_profile, status, owner_user_id, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), $8, $9, NULLIF($10, '')::uuid, $11, $12)
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
 			description = EXCLUDED.description,
@@ -30,6 +30,7 @@ func (s *PostgresEmployeeStore) Save(ctx context.Context, e *employee.Employee) 
 			workspace_id = EXCLUDED.workspace_id,
 			permission_profile = EXCLUDED.permission_profile,
 			status = EXCLUDED.status,
+			owner_user_id = EXCLUDED.owner_user_id,
 			updated_at = EXCLUDED.updated_at
 	`
 	now := time.Now().UTC()
@@ -39,8 +40,23 @@ func (s *PostgresEmployeeStore) Save(ctx context.Context, e *employee.Employee) 
 	e.UpdatedAt = now
 	_, err := s.db.SQL.ExecContext(ctx, query,
 		e.ID, e.Name, e.Description, e.RoleSummary, e.DefaultProvider,
-		e.WorkstationID, e.WorkspaceID, e.PermissionProfile, e.Status, e.CreatedAt, e.UpdatedAt,
+		e.WorkstationID, e.WorkspaceID, e.PermissionProfile, e.Status, e.OwnerUserID, e.CreatedAt, e.UpdatedAt,
 	)
+	if err != nil {
+		// 兼容未迁移 owner_user_id
+		_, err = s.db.SQL.ExecContext(ctx, `
+			INSERT INTO employees (
+				id, name, description, role_summary, default_provider,
+				workstation_id, workspace_id, permission_profile, status, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), $8, $9, $10, $11)
+			ON CONFLICT (id) DO UPDATE SET
+				name = EXCLUDED.name, description = EXCLUDED.description, role_summary = EXCLUDED.role_summary,
+				default_provider = EXCLUDED.default_provider, workstation_id = EXCLUDED.workstation_id,
+				workspace_id = EXCLUDED.workspace_id, permission_profile = EXCLUDED.permission_profile,
+				status = EXCLUDED.status, updated_at = EXCLUDED.updated_at`,
+			e.ID, e.Name, e.Description, e.RoleSummary, e.DefaultProvider,
+			e.WorkstationID, e.WorkspaceID, e.PermissionProfile, e.Status, e.CreatedAt, e.UpdatedAt)
+	}
 	return err
 }
 
@@ -48,20 +64,54 @@ func (s *PostgresEmployeeStore) Get(ctx context.Context, id string) (*employee.E
 	row := s.db.SQL.QueryRowContext(ctx, `
 		SELECT id, name, description, role_summary, default_provider,
 		       COALESCE(workstation_id, ''), COALESCE(workspace_id, ''),
-		       permission_profile, status, created_at, updated_at
+		       permission_profile, status, COALESCE(owner_user_id::text, ''), created_at, updated_at
 		FROM employees WHERE id = $1`, id)
 	var e employee.Employee
 	if err := row.Scan(&e.ID, &e.Name, &e.Description, &e.RoleSummary, &e.DefaultProvider,
-		&e.WorkstationID, &e.WorkspaceID, &e.PermissionProfile, &e.Status, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		&e.WorkstationID, &e.WorkspaceID, &e.PermissionProfile, &e.Status, &e.OwnerUserID, &e.CreatedAt, &e.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, employee.ErrNotFound
 		}
-		return nil, err
+		// 兼容未迁移
+		row2 := s.db.SQL.QueryRowContext(ctx, `
+			SELECT id, name, description, role_summary, default_provider,
+			       COALESCE(workstation_id, ''), COALESCE(workspace_id, ''),
+			       permission_profile, status, created_at, updated_at
+			FROM employees WHERE id = $1`, id)
+		if err2 := row2.Scan(&e.ID, &e.Name, &e.Description, &e.RoleSummary, &e.DefaultProvider,
+			&e.WorkstationID, &e.WorkspaceID, &e.PermissionProfile, &e.Status, &e.CreatedAt, &e.UpdatedAt); err2 != nil {
+			if errors.Is(err2, sql.ErrNoRows) {
+				return nil, employee.ErrNotFound
+			}
+			return nil, err2
+		}
 	}
 	return &e, nil
 }
 
 func (s *PostgresEmployeeStore) List(ctx context.Context) ([]*employee.Employee, error) {
+	rows, err := s.db.SQL.QueryContext(ctx, `
+		SELECT id, name, description, role_summary, default_provider,
+		       COALESCE(workstation_id, ''), COALESCE(workspace_id, ''),
+		       permission_profile, status, COALESCE(owner_user_id::text, ''), created_at, updated_at
+		FROM employees ORDER BY created_at ASC`)
+	if err != nil {
+		return s.listLegacy(ctx)
+	}
+	defer rows.Close()
+	var list []*employee.Employee
+	for rows.Next() {
+		var e employee.Employee
+		if err := rows.Scan(&e.ID, &e.Name, &e.Description, &e.RoleSummary, &e.DefaultProvider,
+			&e.WorkstationID, &e.WorkspaceID, &e.PermissionProfile, &e.Status, &e.OwnerUserID, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, &e)
+	}
+	return list, nil
+}
+
+func (s *PostgresEmployeeStore) listLegacy(ctx context.Context) ([]*employee.Employee, error) {
 	rows, err := s.db.SQL.QueryContext(ctx, `
 		SELECT id, name, description, role_summary, default_provider,
 		       COALESCE(workstation_id, ''), COALESCE(workspace_id, ''),
