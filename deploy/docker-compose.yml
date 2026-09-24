@@ -28,7 +28,7 @@ services:
     container_name: aie-init-data
     restart: "no"
     command: >
-      sh -c "mkdir -p /data/ca /data/secrets && chown -R 65532:65532 /data 2>/dev/null || true; chmod 700 /data/secrets 2>/dev/null || true"
+      sh -c "mkdir -p /data/ca /data/secrets /data/artifacts && chown -R 65532:65532 /data 2>/dev/null || true; chmod 700 /data/secrets 2>/dev/null || true; chmod 750 /data/artifacts 2>/dev/null || true"
     volumes:
       - ${AIE_SERVER_DATA_DIR:-./data/server}:/data
 
@@ -57,6 +57,7 @@ services:
       AIE_SEED_DEMO: "${AIE_SEED_DEMO:-0}"
       AIE_CA_DIR: "/data/ca"
       AIE_SECRET_DIR: "/data/secrets"
+      AIE_ARTIFACT_DIR: "/data/artifacts"
     ports:
       - "${AIE_HTTP_PORT:-8080}:8080"
       - "${AIE_GRPC_PORT:-9090}:9090"

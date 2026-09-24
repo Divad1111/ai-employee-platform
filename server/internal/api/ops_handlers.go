@@ -1,9 +1,18 @@
 package api
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/pem"
+	"errors"
 	"io"
 	"net/http"
 	"runtime"
+	"strings"
+	"time"
 
 	"github.com/ai-employee-platform/server/internal/artifact"
 	"github.com/ai-employee-platform/server/internal/auth"
@@ -35,37 +44,116 @@ func (d Deps) handleUploadArtifact(w http.ResponseWriter, r *http.Request, sess 
 		writeErr(w, http.StatusServiceUnavailable, "artifacts 未启用")
 		return
 	}
-	jobID := r.FormValue("job_id")
-	name := r.FormValue("name")
-	typ := r.FormValue("type")
-	if jobID == "" {
-		jobID = r.URL.Query().Get("job_id")
+	jobID, name, typ, body, cleanup, err := parseArtifactMultipart(r)
+	if cleanup != nil {
+		defer cleanup()
 	}
-	if name == "" {
-		name = r.URL.Query().Get("name")
-	}
-	if typ == "" {
-		typ = r.URL.Query().Get("type")
-	}
-	var body io.Reader = r.Body
-	if r.MultipartForm == nil {
-		_ = r.ParseMultipartForm(32 << 20)
-	}
-	if f, hdr, err := r.FormFile("file"); err == nil {
-		defer f.Close()
-		if name == "" {
-			name = hdr.Filename
-		}
-		body = f
-	}
-	a, dedup, err := d.Artifacts.Put(r.Context(), jobID, name, typ, body)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	a, dedup, err := d.Artifacts.PutSecure(r.Context(), artifact.PutInput{
+		JobID: jobID, Name: name, Type: typ, Body: body,
+		UploadedBy: "admin:" + sess.UserID,
+	})
+	if err != nil {
+		writeArtifactPutErr(w, err)
+		return
+	}
 	if d.Audit != nil {
 		d.Audit.Log(r.Context(), "USER", sess.UserID, "artifact.upload", "success", clientIP(r), map[string]string{
-			"artifact_id": a.ID, "job_id": jobID, "sha256": a.SHA256, "dedup": boolStr(dedup),
+			"artifact_id": a.ID, "job_id": jobID, "sha256": a.SHA256, "dedup": boolStr(dedup), "via": "admin",
+		})
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"artifact": a, "deduplicated": dedup})
+}
+
+// handleWorkstationUploadArtifact 工作站出站上传。
+// 鉴权：本 CA 签发且未吊销的客户端证书 + ECDSA 签名 + Job.WorkstationID 绑定。
+func (d Deps) handleWorkstationUploadArtifact(w http.ResponseWriter, r *http.Request) {
+	if d.Artifacts == nil || d.CA == nil {
+		writeErr(w, http.StatusServiceUnavailable, "artifacts 未启用")
+		return
+	}
+	wsID := strings.TrimSpace(r.Header.Get("X-AIE-Workstation-Id"))
+	ts := strings.TrimSpace(r.Header.Get("X-AIE-Timestamp"))
+	sig := strings.TrimSpace(r.Header.Get("X-AIE-Signature"))
+	certPEM := strings.TrimSpace(r.Header.Get("X-AIE-Client-Cert"))
+	// Header 中 PEM 换行常用字面量 \n 传输
+	certPEM = strings.ReplaceAll(certPEM, `\n`, "\n")
+	if wsID == "" || ts == "" || sig == "" || certPEM == "" {
+		writeErr(w, http.StatusUnauthorized, "缺少工作站鉴权头")
+		return
+	}
+	if err := artifact.CheckTimestampSkew(ts, time.Now().UTC(), 5*time.Minute); err != nil {
+		writeErr(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil || block.Type != "CERTIFICATE" {
+		writeErr(w, http.StatusUnauthorized, "无效客户端证书")
+		return
+	}
+	cn, _, err := d.CA.VerifyClientRaw(block.Bytes)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "证书校验失败")
+		return
+	}
+	if cn != wsID {
+		writeErr(w, http.StatusUnauthorized, "证书身份与 Workstation-Id 不一致")
+		return
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "证书解析失败")
+		return
+	}
+	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "证书公钥类型不支持")
+		return
+	}
+
+	jobID, name, typ, body, cleanup, err := parseArtifactMultipart(r)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(body, artifact.DefaultMaxBytes+1))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "读取文件失败")
+		return
+	}
+	if int64(len(data)) > artifact.DefaultMaxBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, artifact.ErrTooLarge.Error())
+		return
+	}
+	safeName, err := artifact.SanitizeName(name)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	sum := sha256Hex(data)
+	payload := artifact.CanonicalSignPayload(wsID, ts, jobID, safeName, sum, int64(len(data)))
+	if err := artifact.VerifyECDSASignatureASN1(pub, payload, sig); err != nil {
+		writeErr(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	a, dedup, err := d.Artifacts.PutSecure(r.Context(), artifact.PutInput{
+		JobID: jobID, Name: safeName, Type: typ, Body: bytes.NewReader(data),
+		RequireWSBind: true, WorkstationID: wsID, UploadedBy: "workstation",
+	})
+	if err != nil {
+		writeArtifactPutErr(w, err)
+		return
+	}
+	if d.Audit != nil {
+		d.Audit.Log(r.Context(), "WORKSTATION", wsID, "artifact.upload", "success", clientIP(r), map[string]string{
+			"artifact_id": a.ID, "job_id": jobID, "sha256": a.SHA256, "dedup": boolStr(dedup), "via": "workstation",
 		})
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"artifact": a, "deduplicated": dedup})
@@ -158,6 +246,58 @@ func (d Deps) handleSchedulerStatus(w http.ResponseWriter, _ *http.Request, _ *a
 		reasons = d.Scheduler.RejectReasons()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reject_reasons": reasons})
+}
+
+func parseArtifactMultipart(r *http.Request) (jobID, name, typ string, body io.Reader, cleanup func(), err error) {
+	jobID = r.FormValue("job_id")
+	name = r.FormValue("name")
+	typ = r.FormValue("type")
+	if jobID == "" {
+		jobID = r.URL.Query().Get("job_id")
+	}
+	if name == "" {
+		name = r.URL.Query().Get("name")
+	}
+	if typ == "" {
+		typ = r.URL.Query().Get("type")
+	}
+	body = r.Body
+	if r.MultipartForm == nil {
+		_ = r.ParseMultipartForm(artifact.DefaultMaxBytes + (1 << 20))
+	}
+	if f, hdr, ferr := r.FormFile("file"); ferr == nil {
+		cleanup = func() { _ = f.Close() }
+		if name == "" {
+			name = hdr.Filename
+		}
+		body = f
+	}
+	if jobID == "" || name == "" {
+		err = errors.New("需要 job_id 与 name（或 file）")
+		return
+	}
+	return
+}
+
+func writeArtifactPutErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, artifact.ErrTooLarge):
+		writeErr(w, http.StatusRequestEntityTooLarge, err.Error())
+	case errors.Is(err, artifact.ErrJobForbidden):
+		writeErr(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, artifact.ErrJobRequired),
+		errors.Is(err, artifact.ErrInvalidName),
+		errors.Is(err, artifact.ErrInvalidType),
+		errors.Is(err, artifact.ErrEmptyBody):
+		writeErr(w, http.StatusBadRequest, err.Error())
+	default:
+		writeErr(w, http.StatusBadRequest, err.Error())
+	}
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func boolStr(v bool) string {

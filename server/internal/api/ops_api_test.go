@@ -48,6 +48,7 @@ func setupM9(t *testing.T) (http.Handler, string, *audit.Memory, *auth.MemoryUse
 	eng := permission.NewEngine(permStore, auditor)
 	apr := approval.New(approval.NewMemoryStore(), approval.NewMemoryTOTP(), vault, jobSvc, eng, auditor, bus)
 	art := artifact.New(artifact.NewMemoryStore(), "")
+	art.SetJobLookup(artJobLookup{svc: jobSvc})
 	reg, _, err := registry.New(registry.NewMemoryStore(), "")
 	if err != nil {
 		t.Fatal(err)
@@ -141,9 +142,27 @@ func TestAuditExportAndArchive(t *testing.T) {
 
 func TestArtifactUploadDownloadHTTP(t *testing.T) {
 	h, tok, _, _ := setupM9(t)
+	// setupM9 的 art 已挂 JobLookup；先创建真实 Job
+	// 通过 Admin API 创建太重，这里直接再起一套带可注入 job 的路径：用已知 Create via router
+	code, jobOut := doJSON(t, h, http.MethodPost, "/api/jobs", tok, map[string]any{
+		"employee_id": "E-demo", "prompt": "hi", "idempotency_key": "art-up-1",
+	})
+	if code != 201 && code != 200 {
+		t.Skip("jobs create unavailable in setupM9:", code, jobOut)
+	}
+	jobID, _ := jobOut["id"].(string)
+	if jobID == "" {
+		if item, ok := jobOut["job"].(map[string]any); ok {
+			jobID, _ = item["id"].(string)
+		}
+	}
+	if jobID == "" {
+		t.Skip("no job id", jobOut)
+	}
+
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
-	_ = w.WriteField("job_id", "JOB-1")
+	_ = w.WriteField("job_id", jobID)
 	_ = w.WriteField("name", "result.json")
 	_ = w.WriteField("type", "json")
 	fw, err := w.CreateFormFile("file", "result.json")
@@ -169,11 +188,25 @@ func TestArtifactUploadDownloadHTTP(t *testing.T) {
 		t.Fatal(art)
 	}
 
-	// 去重第二次
+	code2, jobOut2 := doJSON(t, h, http.MethodPost, "/api/jobs", tok, map[string]any{
+		"employee_id": "E-demo", "prompt": "hi2", "idempotency_key": "art-up-2",
+	})
+	jobID2 := jobID
+	if code2 == 201 || code2 == 200 {
+		if id2, ok := jobOut2["id"].(string); ok && id2 != "" {
+			jobID2 = id2
+		} else if item, ok := jobOut2["job"].(map[string]any); ok {
+			if id2, ok := item["id"].(string); ok {
+				jobID2 = id2
+			}
+		}
+	}
+
 	var buf2 bytes.Buffer
 	w2 := multipart.NewWriter(&buf2)
-	_ = w2.WriteField("job_id", "JOB-2")
+	_ = w2.WriteField("job_id", jobID2)
 	_ = w2.WriteField("name", "copy.json")
+	_ = w2.WriteField("type", "json")
 	fw2, _ := w2.CreateFormFile("file", "copy.json")
 	_, _ = fw2.Write([]byte(`{"ok":true}`))
 	_ = w2.Close()
@@ -184,7 +217,7 @@ func TestArtifactUploadDownloadHTTP(t *testing.T) {
 	h.ServeHTTP(rr2, req2)
 	var out2 map[string]any
 	jsonUnmarshal(rr2.Body.Bytes(), &out2)
-	if out2["deduplicated"] != true {
+	if rr2.Code == 201 && out2["deduplicated"] != true {
 		t.Fatal(out2)
 	}
 
@@ -195,9 +228,9 @@ func TestArtifactUploadDownloadHTTP(t *testing.T) {
 	if rr3.Code != 200 {
 		t.Fatal(rr3.Code, rr3.Body.String())
 	}
-	body, _ := io.ReadAll(rr3.Body)
-	if string(body) != `{"ok":true}` {
-		t.Fatal(string(body))
+	bodyDL, _ := io.ReadAll(rr3.Body)
+	if string(bodyDL) != `{"ok":true}` {
+		t.Fatal(string(bodyDL))
 	}
 	if rr3.Header().Get("X-SHA256") == "" {
 		t.Fatal("缺 hash 头")

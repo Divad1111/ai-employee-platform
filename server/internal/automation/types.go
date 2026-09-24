@@ -68,9 +68,15 @@ type Run struct {
 }
 
 // CronConfig 周期触发配置。
+// 优先使用 Expr；若为空则按 Preset + Hour/Minute 等字段生成。
 type CronConfig struct {
-	Expr   string `json:"expr"`
-	Preset string `json:"preset,omitempty"` // daily|weekly|monthly|yearly|custom
+	Expr    string `json:"expr"`
+	Preset  string `json:"preset,omitempty"` // daily|weekly|monthly|yearly|custom
+	Hour    *int   `json:"hour,omitempty"`    // 0-23，默认 9
+	Minute  *int   `json:"minute,omitempty"`  // 0-59，默认 0
+	Weekday *int   `json:"weekday,omitempty"` // 0=周日…6=周六，weekly 用，默认 1（周一）
+	Day     *int   `json:"day,omitempty"`     // 1-31，monthly/yearly 用，默认 1
+	Month   *int   `json:"month,omitempty"`   // 1-12，yearly 用，默认 1
 }
 
 // WebhookConfig Webhook 触发配置（密钥仅存引用）。

@@ -59,8 +59,9 @@ export function deleteAutomation(id: string) {
   return apiDelete<{ status: string }>(`/automations/${id}`)
 }
 
-export function listCalendarItems(id: string, date: string) {
-  return apiGet<{ items: CalendarItem[] }>(`/automations/${id}/calendar-items?date=${encodeURIComponent(date)}`)
+export function listCalendarItems(id: string, date?: string) {
+  const q = date ? `?date=${encodeURIComponent(date)}` : ''
+  return apiGet<{ items: CalendarItem[] }>(`/automations/${id}/calendar-items${q}`)
 }
 
 export function putCalendarItems(id: string, date: string, items: Array<{ employee_id: string; prompt: string; enabled?: boolean }>) {

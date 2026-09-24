@@ -8,41 +8,82 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // Pending 待上传项。
 type Pending struct {
-	JobID    string `json:"job_id"`
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	SHA256   string `json:"sha256"`
+	JobID     string `json:"job_id"`
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	SHA256    string `json:"sha256"`
 	LocalPath string `json:"local_path"`
-	Uploaded bool   `json:"uploaded"`
+	Uploaded  bool   `json:"uploaded"`
 }
 
 // Queue 本地队列；上传失败不删本地副本。
 type Queue struct {
-	mu   sync.Mutex
-	root string
+	mu    sync.Mutex
+	root  string
 	items []Pending
 }
 
-// New 创建。
+var safeNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,178}$`)
+
+// New 创建并尝试加载 queue.json。
 func New(root string) *Queue {
 	_ = os.MkdirAll(filepath.Join(root, "artifacts"), 0o755)
-	return &Queue{root: root}
+	q := &Queue{root: root}
+	q.load()
+	return q
+}
+
+func (q *Queue) load() {
+	b, err := os.ReadFile(filepath.Join(q.root, "artifacts", "queue.json"))
+	if err != nil {
+		return
+	}
+	var items []Pending
+	if json.Unmarshal(b, &items) == nil {
+		q.items = items
+	}
+}
+
+// SanitizeName 与 Control Plane 同规则。
+func SanitizeName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", os.ErrInvalid
+	}
+	if strings.Contains(name, "..") || strings.ContainsAny(name, `/\`) {
+		return "", os.ErrInvalid
+	}
+	base := filepath.Base(name)
+	if base == "." || base == ".." || !utf8.ValidString(base) || !safeNameRe.MatchString(base) {
+		return "", os.ErrInvalid
+	}
+	return base, nil
 }
 
 // Stage 写入本地并入队。
 func (q *Queue) Stage(jobID, name, typ string, data []byte) (Pending, error) {
+	safe, err := SanitizeName(name)
+	if err != nil {
+		return Pending{}, err
+	}
+	if typ == "" {
+		typ = "bin"
+	}
 	sum := sha256.Sum256(data)
 	sha := hex.EncodeToString(sum[:])
-	path := filepath.Join(q.root, "artifacts", sha+"_"+name)
+	path := filepath.Join(q.root, "artifacts", sha+"_"+safe)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return Pending{}, err
 	}
-	p := Pending{JobID: jobID, Name: name, Type: typ, SHA256: sha, LocalPath: path}
+	p := Pending{JobID: jobID, Name: safe, Type: typ, SHA256: sha, LocalPath: path}
 	q.mu.Lock()
 	q.items = append(q.items, p)
 	q.persistLocked()

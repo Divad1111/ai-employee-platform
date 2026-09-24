@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -19,7 +20,8 @@ type Config struct {
 		Name string `yaml:"name"`
 	} `yaml:"workstation"`
 	ControlPlane struct {
-		Endpoint string `yaml:"endpoint"`
+		Endpoint     string `yaml:"endpoint"`
+		HTTPEndpoint string `yaml:"http_endpoint"` // 制品上传等 REST；空则由 gRPC host 推导 :8080
 	} `yaml:"control_plane"`
 	Runtime struct {
 		MaxSessions    int `yaml:"max_sessions"`
@@ -30,10 +32,11 @@ type Config struct {
 		RequireMTLS bool `yaml:"require_mtls"`
 	} `yaml:"security"`
 	// 解析后的便捷字段
-	Name                 string
-	ControlPlaneEndpoint string
-	MaxSessions          int
-	IdleTimeoutSec       int
+	Name                   string
+	ControlPlaneEndpoint   string
+	ControlPlaneHTTPEndpoint string
+	MaxSessions            int
+	IdleTimeoutSec         int
 }
 
 // ProviderCfg 单个 Provider 配置（无密钥）。
@@ -74,6 +77,21 @@ func (c *Config) normalize() {
 	if c.ControlPlaneEndpoint == "" {
 		c.ControlPlaneEndpoint = "localhost:9090"
 	}
+	c.ControlPlaneHTTPEndpoint = strings.TrimSpace(c.ControlPlane.HTTPEndpoint)
+	if c.ControlPlaneHTTPEndpoint == "" {
+		c.ControlPlaneHTTPEndpoint = deriveHTTPEndpoint(c.ControlPlaneEndpoint)
+	}
+}
+
+func deriveHTTPEndpoint(grpcAddr string) string {
+	host := grpcAddr
+	if i := strings.LastIndex(grpcAddr, ":"); i > 0 {
+		host = grpcAddr[:i]
+	}
+	if host == "" || host == "localhost" || host == "127.0.0.1" {
+		return "http://127.0.0.1:8080"
+	}
+	return "http://" + host + ":8080"
 }
 
 // LoadFile 从 YAML 加载；文件不存在则返回 Default。

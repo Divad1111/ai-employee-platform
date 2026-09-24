@@ -235,6 +235,8 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/artifacts", d.requirePerm("job.read", d.handleListArtifacts))
 	mux.HandleFunc("POST /api/artifacts", d.requirePerm("job.write", d.handleUploadArtifact))
 	mux.HandleFunc("GET /api/artifacts/{id}/download", d.requirePerm("job.read", d.handleDownloadArtifact))
+	// 工作站出站上传（证书+签名+Job 绑定），禁止匿名
+	mux.HandleFunc("POST /api/integrations/workstation/artifacts", d.handleWorkstationUploadArtifact)
 	mux.HandleFunc("GET /api/providers", d.requirePerm("system.read", d.handleListProviders))
 	mux.HandleFunc("PUT /api/providers/{id}", d.requirePerm("system.write", d.handlePutProvider))
 	mux.HandleFunc("POST /api/providers/versions", d.requirePerm("system.write", d.handleAddProviderVersion))

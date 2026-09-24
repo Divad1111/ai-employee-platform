@@ -5,11 +5,13 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -67,6 +69,8 @@ func main() {
 		wfStore     workflowmcp.Store     = workflowmcp.NewMemoryStore()
 		mcpTokStore mcpauth.Store         = mcpauth.NewMemoryStore()
 		autoStore   automation.Store      = automation.NewMemoryStore()
+		artStore    artifact.Store        = artifact.NewMemoryStore()
+		pgSQL       *sql.DB
 	)
 
 	if cfg.DatabaseURL != "" {
@@ -74,8 +78,9 @@ func main() {
 		if err != nil {
 			fmt.Printf("⚠️ 连接 PostgreSQL 失败 (%v)，回退到内存存储\n", err)
 		} else {
-			fmt.Println("✅ 数据库: 已连接 PostgreSQL，启用全量持久化 (Users, Employees, Workspaces, Jobs, Sessions, Workstations, TOTP, Certificates, WorkflowMCP, Automation)")
+			fmt.Println("✅ 数据库: 已连接 PostgreSQL，启用全量持久化 (Users, Employees, Workspaces, Jobs, Sessions, Workstations, TOTP, Certificates, WorkflowMCP, Automation, Artifacts)")
 			defer db.Close()
+			pgSQL = db.SQL
 			users = db.NewUserStore()
 			webSessions = db.NewWebSessionStore()
 			empStore = db.NewEmployeeStore()
@@ -88,6 +93,7 @@ func main() {
 			wfStore = workflowmcp.NewPostgresStore(db.SQL)
 			mcpTokStore = mcpauth.NewPostgresStore(db.SQL)
 			autoStore = automation.NewPostgresStore(db.SQL)
+			artStore = artifact.NewPostgresStore(db.SQL)
 		}
 	}
 
@@ -298,7 +304,14 @@ func main() {
 	secretMgr := secret.NewManager(vault, secret.NewMemoryBindings(), auditor)
 	approvalSvc := approval.New(approval.NewMemoryStore(), totpStore, vault, jobSvc, permEng, auditor, bus)
 	artRoot := getenv("AIE_ARTIFACT_DIR", "")
-	artSvc := artifact.New(artifact.NewMemoryStore(), artRoot)
+	if artRoot == "" {
+		secretDir := getenv("AIE_SECRET_DIR", "/data/secrets")
+		artRoot = filepath.Join(filepath.Dir(secretDir), "artifacts")
+	}
+	_ = os.MkdirAll(artRoot, 0o750)
+	artSvc := artifact.New(artStore, artRoot)
+	artSvc.SetJobLookup(artifactJobLookup{jobs: jobSvc})
+	_ = pgSQL // 保留连接引用供未来扩展；制品已走 artStore
 	regSvc, _, err := registry.New(registry.NewMemoryStore(), getenv("AIE_PROVIDER_SIGNING_PUBKEY", ""))
 	if err != nil {
 		fatal("初始化 Provider Registry 失败: %v", err)
@@ -444,4 +457,20 @@ func getenv(k, def string) string {
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
+}
+
+// artifactJobLookup 将 job.Service 适配为 artifact.JobLookup。
+type artifactJobLookup struct {
+	jobs *job.Service
+}
+
+func (a artifactJobLookup) LookupJob(ctx context.Context, id string) (*artifact.JobInfo, error) {
+	if a.jobs == nil {
+		return nil, artifact.ErrJobRequired
+	}
+	j, err := a.jobs.Get(ctx, id)
+	if err != nil || j == nil {
+		return nil, artifact.ErrJobRequired
+	}
+	return &artifact.JobInfo{ID: j.ID, WorkstationID: j.WorkstationID, Status: j.Status}, nil
 }

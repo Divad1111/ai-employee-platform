@@ -8,23 +8,71 @@ import (
 	"time"
 )
 
-// PresetCron 将预设转为 5 段 cron（分 时 日 月 周）。
+// PresetCron 兼容旧调用：仅预设名时默认 09:00。
 func PresetCron(preset string) string {
-	switch strings.ToLower(strings.TrimSpace(preset)) {
+	return BuildCronExpr(CronConfig{Preset: preset})
+}
+
+// BuildCronExpr 由 preset + 时刻字段生成 5 段 cron；已有 Expr 则原样返回。
+func BuildCronExpr(cfg CronConfig) string {
+	if strings.TrimSpace(cfg.Expr) != "" {
+		return strings.TrimSpace(cfg.Expr)
+	}
+	h, m := 9, 0
+	if cfg.Hour != nil {
+		h = *cfg.Hour
+	}
+	if cfg.Minute != nil {
+		m = *cfg.Minute
+	}
+	if h < 0 || h > 23 {
+		h = 9
+	}
+	if m < 0 || m > 59 {
+		m = 0
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Preset)) {
 	case "daily":
-		return "0 9 * * *"
+		return fmt.Sprintf("%d %d * * *", m, h)
 	case "weekly":
-		return "0 9 * * 1"
+		wd := 1 // 周一
+		if cfg.Weekday != nil {
+			wd = *cfg.Weekday
+		}
+		if wd < 0 || wd > 7 {
+			wd = 1
+		}
+		return fmt.Sprintf("%d %d * * %d", m, h, wd)
 	case "monthly":
-		return "0 9 1 * *"
+		dom := 1
+		if cfg.Day != nil {
+			dom = *cfg.Day
+		}
+		if dom < 1 || dom > 31 {
+			dom = 1
+		}
+		return fmt.Sprintf("%d %d %d * *", m, h, dom)
 	case "yearly":
-		return "0 9 1 1 *"
+		dom, mon := 1, 1
+		if cfg.Day != nil {
+			dom = *cfg.Day
+		}
+		if cfg.Month != nil {
+			mon = *cfg.Month
+		}
+		if dom < 1 || dom > 31 {
+			dom = 1
+		}
+		if mon < 1 || mon > 12 {
+			mon = 1
+		}
+		return fmt.Sprintf("%d %d %d %d *", m, h, dom, mon)
 	default:
 		return ""
 	}
 }
 
-// ParseCronConfig 从 TriggerConfig 解析 cron；支持 preset 自动填 expr。
+// ParseCronConfig 从 TriggerConfig 解析 cron；支持 preset + 自选时刻生成 expr。
 func ParseCronConfig(raw []byte) (CronConfig, error) {
 	var cfg CronConfig
 	if len(raw) > 0 {
@@ -32,8 +80,8 @@ func ParseCronConfig(raw []byte) (CronConfig, error) {
 			return cfg, err
 		}
 	}
-	if cfg.Expr == "" && cfg.Preset != "" {
-		cfg.Expr = PresetCron(cfg.Preset)
+	if cfg.Expr == "" {
+		cfg.Expr = BuildCronExpr(cfg)
 	}
 	if cfg.Expr == "" {
 		return cfg, fmt.Errorf("%w: cron expr 为空", ErrInvalidInput)
@@ -83,7 +131,6 @@ func (f fieldSet) match(v int) bool {
 }
 
 func (s cronSched) matches(t time.Time) bool {
-	// Go weekday: Sunday=0；cron 常用 0/7=Sun
 	dow := int(t.Weekday())
 	return s.min.match(t.Minute()) &&
 		s.hour.match(t.Hour()) &&

@@ -1,5 +1,3 @@
-// Package artifact Job 产物元数据与本地存储（SHA256 去重）。
-// 设计依据：设计文档 §63、§96。
 package artifact
 
 import (
@@ -11,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,14 +23,16 @@ var (
 
 // Artifact 元数据。
 type Artifact struct {
-	ID        string    `json:"id"`
-	JobID     string    `json:"job_id"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type"`
-	SizeBytes int64     `json:"size_bytes"`
-	SHA256    string    `json:"sha256"`
-	Storage   string    `json:"storage"`
-	CreatedAt time.Time `json:"created_at"`
+	ID            string    `json:"id"`
+	JobID         string    `json:"job_id"`
+	Name          string    `json:"name"`
+	Type          string    `json:"type"`
+	SizeBytes     int64     `json:"size_bytes"`
+	SHA256        string    `json:"sha256"`
+	Storage       string    `json:"storage"`
+	UploadedBy    string    `json:"uploaded_by,omitempty"`    // admin:<user> | workstation
+	WorkstationID string    `json:"workstation_id,omitempty"` // 工作站上传时必填
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // Store 元数据。
@@ -43,33 +44,107 @@ type Store interface {
 	List(ctx context.Context) ([]*Artifact, error)
 }
 
+// JobInfo 上传鉴权所需的最小 Job 视图。
+type JobInfo struct {
+	ID            string
+	WorkstationID string
+	Status        string
+}
+
+// JobLookup 查询 Job（解耦 job 包）。
+type JobLookup interface {
+	LookupJob(ctx context.Context, id string) (*JobInfo, error)
+}
+
+// PutInput 安全上传入参。
+type PutInput struct {
+	JobID         string
+	Name          string
+	Type          string
+	Body          io.Reader
+	MaxBytes      int64  // 0 = DefaultMaxBytes
+	UploadedBy    string // admin:uid / workstation
+	WorkstationID string // 工作站上传时必填，须与 Job.WorkstationID 一致
+	RequireWSBind bool   // true：强制 Job 已分配给该工作站
+}
+
 // Service 产物服务。
 type Service struct {
 	store Store
 	root  string
+	jobs  JobLookup
 }
 
-// New 创建。
+// New 创建；jobs 可为 nil（仅测试内存路径，生产必须注入）。
 func New(store Store, root string) *Service {
 	return &Service{store: store, root: root}
 }
 
-// Put 写入并登记；相同 SHA256 去重引用。返回 (artifact, deduped, err)。
+// SetJobLookup 注入 Job 查询（启动时接线）。
+func (s *Service) SetJobLookup(j JobLookup) {
+	s.jobs = j
+}
+
+// Put 兼容旧调用：无策略校验，测试用；生产请用 PutSecure。
 func (s *Service) Put(ctx context.Context, jobID, name, typ string, r io.Reader) (*Artifact, bool, error) {
-	if jobID == "" || name == "" {
-		return nil, false, errors.New("需要 job_id/name")
+	return s.PutSecure(ctx, PutInput{
+		JobID: jobID, Name: name, Type: typ, Body: r,
+		UploadedBy: "legacy",
+	})
+}
+
+// PutSecure 写入并登记；校验 Job/文件名/类型/大小；相同 SHA256 去重引用。
+func (s *Service) PutSecure(ctx context.Context, in PutInput) (*Artifact, bool, error) {
+	if in.JobID == "" {
+		return nil, false, ErrJobRequired
 	}
-	data, err := io.ReadAll(r)
+	name, err := SanitizeName(in.Name)
 	if err != nil {
 		return nil, false, err
 	}
+	typ, err := NormalizeType(in.Type)
+	if err != nil {
+		return nil, false, err
+	}
+	max := in.MaxBytes
+	if max <= 0 {
+		max = DefaultMaxBytes
+	}
+
+	if s.jobs != nil {
+		j, err := s.jobs.LookupJob(ctx, in.JobID)
+		if err != nil || j == nil {
+			return nil, false, ErrJobRequired
+		}
+		if in.RequireWSBind {
+			if in.WorkstationID == "" || j.WorkstationID == "" || j.WorkstationID != in.WorkstationID {
+				return nil, false, ErrJobForbidden
+			}
+		}
+	} else if in.RequireWSBind {
+		return nil, false, ErrJobForbidden
+	}
+
+	limited := io.LimitReader(in.Body, max+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) > max {
+		return nil, false, ErrTooLarge
+	}
+	if len(data) == 0 {
+		return nil, false, ErrEmptyBody
+	}
+
 	sumArr := sha256.Sum256(data)
 	sum := hex.EncodeToString(sumArr[:])
 
 	if existing, _ := s.store.GetByHash(ctx, sum); existing != nil {
 		a := &Artifact{
-			ID: idgen.New("ART"), JobID: jobID, Name: name, Type: typ,
+			ID: idgen.New("ART"), JobID: in.JobID, Name: name, Type: typ,
 			SizeBytes: int64(len(data)), SHA256: sum, Storage: existing.Storage,
+			UploadedBy: in.UploadedBy, WorkstationID: in.WorkstationID,
 			CreatedAt: time.Now().UTC(),
 		}
 		if err := s.store.Save(ctx, a); err != nil {
@@ -80,7 +155,7 @@ func (s *Service) Put(ctx context.Context, jobID, name, typ string, r io.Reader)
 
 	storage := "mem:" + sum
 	if s.root != "" {
-		if err := os.MkdirAll(s.root, 0o755); err != nil {
+		if err := os.MkdirAll(s.root, 0o750); err != nil {
 			return nil, false, err
 		}
 		final := filepath.Join(s.root, sum)
@@ -95,8 +170,9 @@ func (s *Service) Put(ctx context.Context, jobID, name, typ string, r io.Reader)
 	}
 
 	a := &Artifact{
-		ID: idgen.New("ART"), JobID: jobID, Name: name, Type: typ,
+		ID: idgen.New("ART"), JobID: in.JobID, Name: name, Type: typ,
 		SizeBytes: int64(len(data)), SHA256: sum, Storage: storage,
+		UploadedBy: in.UploadedBy, WorkstationID: in.WorkstationID,
 		CreatedAt: time.Now().UTC(),
 	}
 	if err := s.store.Save(ctx, a); err != nil {
@@ -111,21 +187,33 @@ func (s *Service) Open(ctx context.Context, id string) (io.ReadCloser, *Artifact
 	if err != nil || a == nil {
 		return nil, nil, ErrNotFound
 	}
+	storage := a.Storage
+	if strings.HasPrefix(storage, "local:") {
+		path := storage[len("local:"):]
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		return f, a, nil
+	}
+	if strings.HasPrefix(storage, "mem:") {
+		if ms, ok := s.store.(*MemoryStore); ok {
+			ms.mu.RLock()
+			b := append([]byte{}, ms.blobs[a.SHA256]...)
+			ms.mu.RUnlock()
+			return io.NopCloser(bytes.NewReader(b)), a, nil
+		}
+	}
+	// 兼容：MemoryStore 且 storage 未带前缀
 	if ms, ok := s.store.(*MemoryStore); ok {
 		ms.mu.RLock()
 		b := append([]byte{}, ms.blobs[a.SHA256]...)
 		ms.mu.RUnlock()
-		return io.NopCloser(bytes.NewReader(b)), a, nil
+		if len(b) > 0 {
+			return io.NopCloser(bytes.NewReader(b)), a, nil
+		}
 	}
-	path := a.Storage
-	if len(path) > 6 && path[:6] == "local:" {
-		path = path[6:]
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	return f, a, nil
+	return nil, nil, ErrNotFound
 }
 
 func (s *Service) Get(ctx context.Context, id string) (*Artifact, error) {

@@ -112,6 +112,23 @@ func TestParseCronPresets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h, m := 14, 30
+	cfg, err := ParseCronConfig([]byte(`{"preset":"daily","hour":14,"minute":30}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Expr != "30 14 * * *" {
+		t.Fatalf("期望 30 14 * * *, got %s", cfg.Expr)
+	}
+	_ = h
+	_ = m
+	cfg2, err := ParseCronConfig([]byte(`{"preset":"weekly","hour":8,"minute":0,"weekday":5}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.Expr != "0 8 * * 5" {
+		t.Fatalf("got %s", cfg2.Expr)
+	}
 }
 
 func TestCalendarChainAdvanceAndStop(t *testing.T) {

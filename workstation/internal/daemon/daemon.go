@@ -15,6 +15,7 @@ import (
 	"time"
 
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
+	"github.com/ai-employee-platform/workstation/internal/artifactlocal"
 	"github.com/ai-employee-platform/workstation/internal/config"
 	"github.com/ai-employee-platform/workstation/internal/controlplane/ack"
 	grpcclient "github.com/ai-employee-platform/workstation/internal/controlplane/grpc"
@@ -47,18 +48,20 @@ type Options struct {
 
 // Daemon 运行时实例。
 type Daemon struct {
-	Opts      Options
-	Runtime   *runtime.Managers
-	Recovery  *recovery.Manager
-	Proc      *process.Manager
-	Registry  *providers.Registry
-	Monitor   *monitor.Sampler
-	Outbox    *outbox.MemoryStore
-	Backoff   *reconnect.Backoff
-	Ready     bool
-	Sample    monitor.Sample
-	eventSeq  atomic.Uint64 // Control Plane 事件严格递增序号（不可为 0）
-	wsID      string
+	Opts       Options
+	Runtime    *runtime.Managers
+	Recovery   *recovery.Manager
+	Proc       *process.Manager
+	Registry   *providers.Registry
+	Monitor    *monitor.Sampler
+	Outbox     *outbox.MemoryStore
+	Backoff    *reconnect.Backoff
+	Ready      bool
+	Sample     monitor.Sample
+	eventSeq   atomic.Uint64 // Control Plane 事件严格递增序号（不可为 0）
+	wsID       string
+	Artifacts  *artifactlocal.Queue
+	ArtUpload  *artifactlocal.Uploader
 }
 
 // New 组装 Daemon。
@@ -112,8 +115,18 @@ func New(opts Options) *Daemon {
 		Outbox:   ob,
 		Backoff:  reconnect.NewBackoff(60 * time.Second),
 	}
+	artRoot := opts.Paths.DataDir()
+	if artRoot == "" {
+		artRoot = opts.Paths.IdentityDir()
+	}
+	d.Artifacts = artifactlocal.New(artRoot)
 	if b, err := identity.Load(opts.Paths); err == nil && b != nil {
 		d.wsID = b.WorkstationID
+		d.ArtUpload = &artifactlocal.Uploader{
+			HTTPBase: opts.Config.ControlPlaneHTTPEndpoint,
+			Bundle:   b,
+			Queue:    d.Artifacts,
+		}
 	}
 	return d
 }
@@ -211,6 +224,15 @@ func (d *Daemon) maintainControlPlane(ctx context.Context) {
 		sess := grpcclient.NewSession(cli, d.Opts.Journal)
 		sess.Outbox = &outbox.Dispatcher{Store: d.Outbox}
 		sess.HeartbeatInterval = 5 * time.Second
+		// 连接成功后刷新 ArtUpload 身份，并冲刷待上传队列
+		d.ArtUpload = &artifactlocal.Uploader{
+			HTTPBase: d.Opts.Config.ControlPlaneHTTPEndpoint,
+			Bundle:   b,
+			Queue:    d.Artifacts,
+		}
+		go func() {
+			_, _ = d.ArtUpload.Flush()
+		}()
 		sess.Stats = func() heartbeat.Stats {
 			e, _, s, _ := d.Runtime.Snapshot()
 			sample := d.Sample
@@ -352,12 +374,21 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 					"error": rerr.Error(), "session_id": sessID, "reply": reply,
 				})
 				_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_FAILED, string(pl)))
+				// 失败时若有部分 reply，仍归档为制品（尽力）
+				if reply != "" {
+					d.stageJobArtifact(jobID, "result-partial.txt", "txt", []byte(reply))
+				}
 				return
 			}
 			pl, _ := json.Marshal(map[string]string{
 				"status": "success", "session_id": sessID, "reply": reply, "message": "Job executed successfully",
 			})
 			_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_SUCCESS, string(pl)))
+			// Job 产物：至少归档 reply 为 result.txt，并尝试上传 Control Plane
+			if reply == "" {
+				reply = `{"status":"success","message":"empty reply"}`
+			}
+			d.stageJobArtifact(jobID, "result.txt", "txt", []byte(reply))
 			// Job 结束后会话回到 READY（可复用）
 			_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_READY,
 				`{"status":"READY"}`))
@@ -574,4 +605,16 @@ func okResult(v any) ipc.Response {
 
 func errResp(err error) ipc.Response {
 	return ipc.Response{OK: false, Error: err.Error()}
+}
+
+// stageJobArtifact 本地 Stage 并尽力上传（失败保留队列）。
+func (d *Daemon) stageJobArtifact(jobID, name, typ string, data []byte) {
+	if d.Artifacts == nil || len(data) == 0 {
+		return
+	}
+	if d.ArtUpload != nil {
+		_, _ = d.ArtUpload.StageAndTryUpload(jobID, name, typ, data)
+		return
+	}
+	_, _ = d.Artifacts.Stage(jobID, name, typ, data)
 }
