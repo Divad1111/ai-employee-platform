@@ -1,5 +1,7 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { apiGet } from '../../api/client'
+import { getUser } from '../../stores/session'
 import {
   createCredential,
   createMCPServer,
@@ -26,10 +28,17 @@ import {
 
 type Tab = 'servers' | 'credentials'
 
+type SimpleUser = {
+  id: string
+  username: string
+  display_name?: string
+}
+
 export function McpServersPage() {
   const [tab, setTab] = useState<Tab>('servers')
   const [servers, setServers] = useState<MCPServer[]>([])
   const [credentials, setCredentials] = useState<Credential[]>([])
+  const [users, setUsers] = useState<SimpleUser[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
@@ -53,13 +62,26 @@ export function McpServersPage() {
   const [credAuthType, setCredAuthType] = useState('pat')
   const [credSecret, setCredSecret] = useState('')
 
+  const userMap = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const u of users) {
+      map[u.id] = u.display_name ? `${u.display_name} (${u.username})` : u.username
+    }
+    return map
+  }, [users])
+
   async function loadData() {
     setLoading(true)
     setError('')
     try {
-      const [sRes, cRes] = await Promise.all([listMCPServers(), listCredentials()])
+      const [sRes, cRes, uRes] = await Promise.all([
+        listMCPServers(),
+        listCredentials(),
+        apiGet<{ items: SimpleUser[] }>('/users').catch(() => ({ items: [] })),
+      ])
       setServers(sRes.items || [])
       setCredentials(cRes.items || [])
+      setUsers(uRes.items || [])
     } catch (e: any) {
       setError(e.message || String(e))
     } finally {
@@ -145,10 +167,11 @@ export function McpServersPage() {
   }
 
   function openCreateCred() {
+    const currentUser = getUser()
     setEditingCred(null)
     setCredName('')
     setCredOwnerType('USER')
-    setCredOwnerId('')
+    setCredOwnerId(currentUser?.id || (users[0]?.id ?? ''))
     setCredProvider('github')
     setCredAuthType('pat')
     setCredSecret('')
@@ -170,12 +193,20 @@ export function McpServersPage() {
     e.preventDefault()
     setError('')
     setMsg('')
+    const currentUser = getUser()
+    let effectiveOwnerId = credOwnerId.trim()
+    if (credOwnerType === 'USER' && !effectiveOwnerId) {
+      effectiveOwnerId = currentUser?.id || users[0]?.id || ''
+    }
+    if (credOwnerType === 'ORGANIZATION') {
+      effectiveOwnerId = 'ORGANIZATION'
+    }
     try {
       if (editingCred) {
         await updateCredential(editingCred.id, {
           credential_name: credName,
           owner_type: credOwnerType,
-          owner_id: credOwnerId,
+          owner_id: effectiveOwnerId,
           provider: credProvider,
           auth_type: credAuthType,
           secret_value: credSecret || undefined,
@@ -189,7 +220,7 @@ export function McpServersPage() {
         await createCredential({
           credential_name: credName,
           owner_type: credOwnerType,
-          owner_id: credOwnerId,
+          owner_id: effectiveOwnerId,
           provider: credProvider,
           auth_type: credAuthType,
           secret_value: credSecret,
@@ -274,14 +305,15 @@ export function McpServersPage() {
       {msg ? <div className="banner banner-ok">{msg}</div> : null}
 
       {/* Tabs */}
-      <div className="tab-nav" style={{ marginBottom: '1.2rem' }}>
+      <div className="tab-nav">
         <button
           type="button"
           className={`tab-btn ${tab === 'servers' ? 'active' : ''}`}
           onClick={() => setTab('servers')}
         >
           <IconPlug size={16} />
-          <span>MCP 服务列表 ({servers.length})</span>
+          <span>MCP 服务列表</span>
+          <span className="tab-count">{servers.length}</span>
         </button>
         <button
           type="button"
@@ -289,7 +321,8 @@ export function McpServersPage() {
           onClick={() => setTab('credentials')}
         >
           <IconKey size={16} />
-          <span>身份凭证保管库 ({credentials.length})</span>
+          <span>身份凭证保管库</span>
+          <span className="tab-count">{credentials.length}</span>
         </button>
       </div>
 
@@ -306,13 +339,13 @@ export function McpServersPage() {
             <table className="table">
               <thead>
                 <tr>
-                  <th>服务标识 / 名称</th>
-                  <th>类型</th>
-                  <th>协议与端点</th>
-                  <th>描述说明</th>
-                  <th>绑定员工数</th>
-                  <th>状态</th>
-                  <th style={{ textAlign: 'right' }}>操作</th>
+                  <th style={{ minWidth: 220 }}>服务名称与标识</th>
+                  <th style={{ width: 140 }}>服务类型</th>
+                  <th style={{ minWidth: 240 }}>通信协议与端点</th>
+                  <th style={{ minWidth: 220 }}>能力描述说明</th>
+                  <th style={{ width: 110, textAlign: 'center' }}>绑定员工</th>
+                  <th style={{ width: 100 }}>服务状态</th>
+                  <th style={{ width: 190, minWidth: 190, textAlign: 'right' }}>操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -321,11 +354,35 @@ export function McpServersPage() {
                   return (
                     <tr key={s.id}>
                       <td>
-                        <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
-                          {isBuiltin ? <IconZap size={16} style={{ color: 'var(--primary)' }} /> : <IconPlug size={16} />}
-                          <span>{s.name}</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <div
+                            style={{
+                              width: 34,
+                              height: 34,
+                              borderRadius: 8,
+                              background: isBuiltin
+                                ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
+                                : '#eff6ff',
+                              color: isBuiltin ? '#ffffff' : '#2563eb',
+                              border: isBuiltin ? 'none' : '1px solid #bfdbfe',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              flexShrink: 0,
+                              boxShadow: isBuiltin ? '0 2px 4px rgba(16, 185, 129, 0.25)' : 'none',
+                            }}
+                          >
+                            {isBuiltin ? <IconZap size={17} /> : <IconPlug size={17} />}
+                          </div>
+                          <div>
+                            <div style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: '0.92rem' }}>
+                              {s.name}
+                            </div>
+                            <div className="mono" style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: 2 }}>
+                              ID: {s.id}
+                            </div>
+                          </div>
                         </div>
-                        <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>ID: {s.id}</div>
                       </td>
                       <td>
                         {isBuiltin ? (
@@ -337,32 +394,43 @@ export function McpServersPage() {
                         )}
                       </td>
                       <td>
-                        <span className="badge" style={{ marginRight: 6, textTransform: 'uppercase' }}>
-                          {s.transport}
-                        </span>
-                        <code style={{ fontSize: '0.84rem' }}>{s.endpoint || '—'}</code>
-                      </td>
-                      <td style={{ maxWidth: 300, fontSize: '0.86rem', color: 'var(--text-secondary)' }}>
-                        {s.description || '—'}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          <div>
+                            <span
+                              className="badge badge-neutral"
+                              style={{ textTransform: 'uppercase', fontSize: '0.72rem', padding: '0.1rem 0.45rem', fontWeight: 600 }}
+                            >
+                              {s.transport}
+                            </span>
+                          </div>
+                          <div style={{ wordBreak: 'break-all' }}>
+                            <code style={{ fontSize: '0.78rem' }}>{s.endpoint || '—'}</code>
+                          </div>
+                        </div>
                       </td>
                       <td>
-                        <span className="badge badge-neutral">
-                          {s.bound_employee_count ?? 0} 位员工绑定
+                        <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.45, maxWidth: 320 }}>
+                          {s.description || '暂无描述说明'}
+                        </div>
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        <span className="badge badge-neutral" style={{ fontWeight: 600 }}>
+                          {s.bound_employee_count ?? 0} 人
                         </span>
                       </td>
                       <td>
                         <StatusBadge status={s.status} />
                       </td>
-                      <td style={{ textAlign: 'right' }}>
-                        <div style={{ display: 'inline-flex', gap: 8 }}>
+                      <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6, whiteSpace: 'nowrap' }}>
                           {isBuiltin ? (
                             <Link
                               to="/mcp-servers/workflow-mcp"
                               className="btn-primary btn-sm"
-                              style={{ display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: 5, textDecoration: 'none', whiteSpace: 'nowrap', flexShrink: 0 }}
                             >
                               <IconSettings size={14} />
-                              <span>进入配置与详情</span>
+                              <span style={{ whiteSpace: 'nowrap' }}>进入配置与详情</span>
                             </Link>
                           ) : (
                             <>
@@ -370,14 +438,16 @@ export function McpServersPage() {
                                 type="button"
                                 className="btn-ghost btn-sm"
                                 onClick={() => openEditServer(s)}
+                                style={{ whiteSpace: 'nowrap' }}
                               >
                                 编辑
                               </button>
                               <button
                                 type="button"
                                 className="btn-ghost btn-sm"
-                                style={{ color: 'var(--danger)' }}
+                                style={{ color: '#dc2626', borderColor: '#fecaca', whiteSpace: 'nowrap' }}
                                 onClick={() => handleDeleteServer(s.id, s.name)}
+                                title="删除此 MCP 服务"
                               >
                                 <IconTrash size={14} />
                               </button>
@@ -390,8 +460,8 @@ export function McpServersPage() {
                 })}
                 {servers.length === 0 ? (
                   <tr>
-                    <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
-                      暂无已注册的 MCP 服务
+                    <td colSpan={7} style={{ textAlign: 'center', padding: '2.5rem', color: 'var(--text-muted)' }}>
+                      暂无已注册的 MCP 服务，点击右上角「添加 MCP 服务」注册
                     </td>
                   </tr>
                 ) : null}
@@ -412,59 +482,100 @@ export function McpServersPage() {
             <table className="table">
               <thead>
                 <tr>
-                  <th>凭证名称</th>
-                  <th>Provider</th>
-                  <th>所有者类型</th>
-                  <th>认证类型</th>
-                  <th>脱敏凭证</th>
-                  <th>绑定员工数</th>
-                  <th>状态</th>
-                  <th style={{ textAlign: 'right' }}>操作</th>
+                  <th style={{ minWidth: 220 }}>凭证名称与标识</th>
+                  <th style={{ width: 130 }}>提供方 (Provider)</th>
+                  <th style={{ width: 180, minWidth: 180 }}>所有者 / 归属</th>
+                  <th style={{ width: 120 }}>认证方式</th>
+                  <th style={{ minWidth: 170 }}>脱敏凭证敏感值</th>
+                  <th style={{ width: 100, textAlign: 'center' }}>绑定员工</th>
+                  <th style={{ width: 90 }}>状态</th>
+                  <th style={{ width: 130, textAlign: 'right' }}>操作</th>
                 </tr>
               </thead>
               <tbody>
                 {credentials.map((c) => (
                   <tr key={c.id}>
                     <td>
-                      <div style={{ fontWeight: 600 }}>{c.credential_name}</div>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>ID: {c.id}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <div
+                          style={{
+                            width: 34,
+                            height: 34,
+                            borderRadius: 8,
+                            background: '#fef3c7',
+                            color: '#b45309',
+                            border: '1px solid #fde68a',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            flexShrink: 0,
+                          }}
+                        >
+                          <IconKey size={17} />
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: '0.92rem' }}>
+                            {c.credential_name}
+                          </div>
+                          <div className="mono" style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: 2 }}>
+                            ID: {c.id}
+                          </div>
+                        </div>
+                      </div>
                     </td>
                     <td>
-                      <span className="badge badge-info" style={{ textTransform: 'uppercase' }}>
+                      <span className="badge badge-info" style={{ textTransform: 'uppercase', fontWeight: 600 }}>
                         {c.provider}
                       </span>
                     </td>
                     <td>
-                      <span className="badge badge-neutral">
-                        {c.owner_type === 'USER'
-                          ? '个人用户'
-                          : c.owner_type === 'ORGANIZATION'
-                          ? '组织公共'
-                          : '服务账号'}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <span className="badge badge-neutral" style={{ alignSelf: 'flex-start' }}>
+                          {c.owner_type === 'USER'
+                            ? '个人用户'
+                            : c.owner_type === 'ORGANIZATION'
+                            ? '组织公共'
+                            : '服务账号'}
+                        </span>
+                        {c.owner_type === 'USER' && (
+                          <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                            {userMap[c.owner_id] || (c.owner_id ? c.owner_id.slice(0, 8) + '...' : '—')}
+                          </span>
+                        )}
+                        {c.owner_type === 'SERVICE_ACCOUNT' && (
+                          <span className="mono" style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                            {c.owner_id || '—'}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      <code style={{ fontSize: '0.8rem' }}>{c.auth_type.toUpperCase()}</code>
+                    </td>
+                    <td>
+                      <span className="mono" style={{ fontSize: '0.8rem', color: '#047857', background: '#ecfdf5', borderColor: '#a7f3d0' }}>
+                        🔒 {c.masked_value || '***'}
                       </span>
                     </td>
-                    <td>
-                      <code style={{ fontSize: '0.84rem' }}>{c.auth_type}</code>
-                    </td>
-                    <td>
-                      <code style={{ fontSize: '0.84rem' }}>{c.masked_value || '***'}</code>
-                    </td>
-                    <td>
-                      <span className="badge badge-neutral">{c.bound_employee_count ?? 0}</span>
+                    <td style={{ textAlign: 'center' }}>
+                      <span className="badge badge-neutral" style={{ fontWeight: 600 }}>
+                        {c.bound_employee_count ?? 0} 人
+                      </span>
                     </td>
                     <td>
                       <StatusBadge status={c.status} />
                     </td>
                     <td style={{ textAlign: 'right' }}>
-                      <div style={{ display: 'inline-flex', gap: 8 }}>
+                      <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
                         <button type="button" className="btn-ghost btn-sm" onClick={() => openEditCred(c)}>
                           编辑
                         </button>
                         <button
                           type="button"
                           className="btn-ghost btn-sm"
-                          style={{ color: 'var(--danger)' }}
+                          style={{ color: '#dc2626', borderColor: '#fecaca' }}
                           onClick={() => handleDeleteCred(c.id, c.credential_name)}
+                          title="销毁此凭证"
                         >
                           <IconTrash size={14} />
                         </button>
@@ -474,7 +585,7 @@ export function McpServersPage() {
                 ))}
                 {credentials.length === 0 ? (
                   <tr>
-                    <td colSpan={8} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+                    <td colSpan={8} style={{ textAlign: 'center', padding: '2.5rem', color: 'var(--text-muted)' }}>
                       暂无凭证记录，点击右上角「新建身份凭证」录入
                     </td>
                   </tr>
@@ -485,83 +596,106 @@ export function McpServersPage() {
         </div>
       )}
 
-      {/* Modal: MCP Server */}
+      {/* Modal: MCP Server (添加 / 编辑) */}
       {showServerModal ? (
         <div className="modal-backdrop">
-          <div className="modal-card" style={{ maxWidth: 540 }}>
+          <div className="modal-card">
             <div className="modal-header">
-              <h3>{editingServer ? '编辑 MCP 服务' : '添加自定义 MCP 服务'}</h3>
-              <button type="button" className="btn-ghost" onClick={() => setShowServerModal(false)}>
+              <h3>
+                <IconPlug size={18} style={{ color: 'var(--brand-600)' }} />
+                <span>{editingServer ? '编辑 MCP 服务' : '添加自定义 MCP 服务'}</span>
+              </h3>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => setShowServerModal(false)}
+                title="关闭"
+              >
                 ✕
               </button>
             </div>
             <form onSubmit={handleSaveServer}>
-              <div className="form-group" style={{ marginBottom: 12 }}>
-                <label>服务标识名 (Name) *</label>
-                <input
-                  value={serverName}
-                  onChange={(e) => setServerName(e.target.value)}
-                  placeholder="例如 github-mcp 或 jira-mcp"
-                  required
-                />
+              <div className="modal-body">
+                <div className="modal-form-group">
+                  <label>
+                    <span>服务标识名 (Name) <span className="req-star">*</span></span>
+                  </label>
+                  <input
+                    value={serverName}
+                    onChange={(e) => setServerName(e.target.value)}
+                    placeholder="例如 github-mcp 或 jira-mcp"
+                    required
+                  />
+                  <div className="form-hint">英文字符、数字或中划线，用于数字员工与任务调度引擎寻址</div>
+                </div>
+
+                <div className="modal-grid-2">
+                  <div className="modal-form-group">
+                    <label>
+                      <span>传输协议 (Transport) <span className="req-star">*</span></span>
+                    </label>
+                    <select
+                      value={serverTransport}
+                      onChange={(e) => setServerTransport(e.target.value as any)}
+                    >
+                      <option value="http">HTTP (Streamable JSON-RPC)</option>
+                      <option value="sse">SSE (Server-Sent Events)</option>
+                      <option value="stdio">Stdio (本地子进程命令行)</option>
+                    </select>
+                  </div>
+                  <div className="modal-form-group">
+                    <label>
+                      <span>
+                        {serverTransport === 'stdio' ? '执行命令 (Command) ' : '端点 URL (Endpoint) '}
+                        <span className="req-star">*</span>
+                      </span>
+                    </label>
+                    <input
+                      value={serverEndpoint}
+                      onChange={(e) => setServerEndpoint(e.target.value)}
+                      placeholder={
+                        serverTransport === 'stdio'
+                          ? '例如 npx -y @modelcontextprotocol/server-filesystem'
+                          : '例如 https://mcp.github.com/v1 或 http://host:8080/mcp'
+                      }
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="modal-form-group">
+                  <label>
+                    <span>服务功能描述 (Description)</span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={serverDesc}
+                    onChange={(e) => setServerDesc(e.target.value)}
+                    placeholder="说明此 MCP 服务所提供的工具集能力及适用业务场景..."
+                  />
+                </div>
+
+                <div className="modal-form-group">
+                  <label>
+                    <span>自定义请求头 (Headers JSON, 可选)</span>
+                  </label>
+                  <textarea
+                    rows={3}
+                    className="mono"
+                    value={serverHeaders}
+                    onChange={(e) => setServerHeaders(e.target.value)}
+                    placeholder='{"X-Custom-Header": "value"}'
+                  />
+                  <div className="form-hint">JSON 键值对格式，在与外部 MCP 服务握手连接时由网关自动携带</div>
+                </div>
               </div>
 
-              <div className="form-group" style={{ marginBottom: 12 }}>
-                <label>传输协议 (Transport) *</label>
-                <select
-                  value={serverTransport}
-                  onChange={(e) => setServerTransport(e.target.value as any)}
-                >
-                  <option value="http">HTTP (Streamable / JSON-RPC)</option>
-                  <option value="sse">SSE (Server-Sent Events)</option>
-                  <option value="stdio">Stdio (本地子进程命令行)</option>
-                </select>
-              </div>
-
-              <div className="form-group" style={{ marginBottom: 12 }}>
-                <label>
-                  {serverTransport === 'stdio' ? '执行命令 (Command / Executable) *' : '端点 URL (Endpoint) *'}
-                </label>
-                <input
-                  value={serverEndpoint}
-                  onChange={(e) => setServerEndpoint(e.target.value)}
-                  placeholder={
-                    serverTransport === 'stdio'
-                      ? '例如 npx -y @modelcontextprotocol/server-filesystem 或 python3'
-                      : '例如 https://mcp.github.com/v1 或 http://10.0.0.8:8080/mcp'
-                  }
-                  required
-                />
-              </div>
-
-              <div className="form-group" style={{ marginBottom: 12 }}>
-                <label>服务描述说明</label>
-                <textarea
-                  rows={2}
-                  value={serverDesc}
-                  onChange={(e) => setServerDesc(e.target.value)}
-                  placeholder="说明此 MCP 服务所提供的工具集能力及适用场景..."
-                />
-              </div>
-
-              <div className="form-group" style={{ marginBottom: 16 }}>
-                <label>自定义请求头 (Headers JSON, 可选)</label>
-                <textarea
-                  rows={3}
-                  className="mono"
-                  style={{ fontSize: '0.84rem' }}
-                  value={serverHeaders}
-                  onChange={(e) => setServerHeaders(e.target.value)}
-                  placeholder='{"X-Custom-Header": "value"}'
-                />
-              </div>
-
-              <div className="modal-actions" style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <div className="modal-footer">
                 <button type="button" className="btn-ghost" onClick={() => setShowServerModal(false)}>
                   取消
                 </button>
                 <button type="submit" className="btn-primary">
-                  保存
+                  {editingServer ? '保存修改' : '确认添加'}
                 </button>
               </div>
             </form>
@@ -569,94 +703,180 @@ export function McpServersPage() {
         </div>
       ) : null}
 
-      {/* Modal: Credential */}
+      {/* Modal: Credential (录入 / 编辑) */}
       {showCredModal ? (
         <div className="modal-backdrop">
-          <div className="modal-card" style={{ maxWidth: 540 }}>
+          <div className="modal-card">
             <div className="modal-header">
-              <h3>{editingCred ? '编辑身份凭证' : '录入新身份凭证'}</h3>
-              <button type="button" className="btn-ghost" onClick={() => setShowCredModal(false)}>
+              <h3>
+                <IconKey size={18} style={{ color: 'var(--brand-600)' }} />
+                <span>{editingCred ? '编辑身份凭证' : '录入新身份凭证'}</span>
+              </h3>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => setShowCredModal(false)}
+                title="关闭"
+              >
                 ✕
               </button>
             </div>
             <form onSubmit={handleSaveCred}>
-              <div className="form-group" style={{ marginBottom: 12 }}>
-                <label>凭证名称 *</label>
-                <input
-                  value={credName}
-                  onChange={(e) => setCredName(e.target.value)}
-                  placeholder="例如 张三的个人 GitHub PAT 或 公司 Jira Bot"
-                  required
-                />
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                <div className="form-group">
-                  <label>Provider 提供方 *</label>
-                  <select value={credProvider} onChange={(e) => setCredProvider(e.target.value)}>
-                    <option value="github">GitHub</option>
-                    <option value="feishu">Feishu (飞书)</option>
-                    <option value="jira">Jira</option>
-                    <option value="gitlab">GitLab</option>
-                    <option value="custom">通用自定义 (Custom)</option>
-                  </select>
-                </div>
-                <div className="form-group">
-                  <label>认证方式 (Auth Type) *</label>
-                  <select value={credAuthType} onChange={(e) => setCredAuthType(e.target.value)}>
-                    <option value="pat">Personal Access Token (PAT)</option>
-                    <option value="api_key">API Key</option>
-                    <option value="bearer">Bearer Token</option>
-                    <option value="oauth">OAuth 2.0</option>
-                    <option value="basic">Basic Auth</option>
-                  </select>
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                <div className="form-group">
-                  <label>所有者类型 *</label>
-                  <select
-                    value={credOwnerType}
-                    onChange={(e) => setCredOwnerType(e.target.value as any)}
-                  >
-                    <option value="USER">个人用户 (USER)</option>
-                    <option value="ORGANIZATION">组织公共 (ORGANIZATION)</option>
-                    <option value="SERVICE_ACCOUNT">服务账号 (SERVICE_ACCOUNT)</option>
-                  </select>
-                </div>
-                <div className="form-group">
-                  <label>归属用户/机构 ID</label>
+              <div className="modal-body">
+                <div className="modal-form-group">
+                  <label>
+                    <span>凭证名称 (Credential Name) <span className="req-star">*</span></span>
+                  </label>
                   <input
-                    value={credOwnerId}
-                    onChange={(e) => setCredOwnerId(e.target.value)}
-                    placeholder="留空则默认归属当前登录用户"
+                    value={credName}
+                    onChange={(e) => setCredName(e.target.value)}
+                    placeholder="例如 张三的个人 GitHub PAT 或 运维工单 Jira 访问令牌"
+                    required
                   />
+                  <div className="form-hint">便于管理员与员工辨识该凭证适用的账号与业务场景</div>
+                </div>
+
+                <div className="modal-grid-2">
+                  <div className="modal-form-group">
+                    <label>
+                      <span>Provider 服务提供方 <span className="req-star">*</span></span>
+                    </label>
+                    <select value={credProvider} onChange={(e) => setCredProvider(e.target.value)}>
+                      <option value="github">GitHub</option>
+                      <option value="feishu">Feishu (飞书)</option>
+                      <option value="jira">Jira</option>
+                      <option value="gitlab">GitLab</option>
+                      <option value="custom">通用自定义 (Custom)</option>
+                    </select>
+                  </div>
+                  <div className="modal-form-group">
+                    <label>
+                      <span>认证方式 (Auth Type) <span className="req-star">*</span></span>
+                    </label>
+                    <select value={credAuthType} onChange={(e) => setCredAuthType(e.target.value)}>
+                      <option value="pat">Personal Access Token (PAT)</option>
+                      <option value="api_key">API Key</option>
+                      <option value="bearer">Bearer Token</option>
+                      <option value="oauth">OAuth 2.0</option>
+                      <option value="basic">Basic Auth</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="modal-grid-2">
+                  <div className="modal-form-group">
+                    <label>
+                      <span>所有者类型 (Owner Type) <span className="req-star">*</span></span>
+                    </label>
+                    <select
+                      value={credOwnerType}
+                      onChange={(e) => {
+                        const newType = e.target.value as any
+                        setCredOwnerType(newType)
+                        if (newType === 'USER') {
+                          const cur = getUser()
+                          setCredOwnerId(cur?.id || (users[0]?.id ?? ''))
+                        } else if (newType === 'ORGANIZATION') {
+                          setCredOwnerId('ORGANIZATION')
+                        } else {
+                          setCredOwnerId('')
+                        }
+                      }}
+                    >
+                      <option value="USER">个人用户 (USER)</option>
+                      <option value="ORGANIZATION">组织公共 (ORGANIZATION)</option>
+                      <option value="SERVICE_ACCOUNT">服务账号 (SERVICE_ACCOUNT)</option>
+                    </select>
+                  </div>
+                  <div className="modal-form-group">
+                    {credOwnerType === 'USER' ? (
+                      <>
+                        <label>
+                          <span>归属用户 (User) <span className="req-star">*</span></span>
+                        </label>
+                        <select
+                          value={credOwnerId}
+                          onChange={(e) => setCredOwnerId(e.target.value)}
+                          required
+                        >
+                          {users.length === 0 ? (
+                            <option value={credOwnerId || ''}>
+                              {userMap[credOwnerId] || credOwnerId || '加载用户列表中...'}
+                            </option>
+                          ) : (
+                            users.map((u) => {
+                              const isSelf = u.id === getUser()?.id
+                              return (
+                                <option key={u.id} value={u.id}>
+                                  {u.display_name ? `${u.display_name} (${u.username})` : u.username}
+                                  {isSelf ? ' [当前登录]' : ''}
+                                </option>
+                              )
+                            })
+                          )}
+                          {credOwnerId && !users.some((u) => u.id === credOwnerId) && (
+                            <option value={credOwnerId}>
+                              {userMap[credOwnerId] || credOwnerId}
+                            </option>
+                          )}
+                        </select>
+                        <div className="form-hint">选择此凭证归属的平台用户，数字员工执行该用户任务时优先采用</div>
+                      </>
+                    ) : credOwnerType === 'ORGANIZATION' ? (
+                      <>
+                        <label>
+                          <span>归属范围</span>
+                        </label>
+                        <input
+                          value="全平台组织公共 (全员共享，无需用户ID)"
+                          disabled
+                          style={{ background: 'var(--bg-card-hover)', color: 'var(--text-muted)' }}
+                        />
+                        <div className="form-hint">组织公共凭证对全平台授权数字员工可用</div>
+                      </>
+                    ) : (
+                      <>
+                        <label>
+                          <span>服务账号标识 (Service Account) <span className="req-star">*</span></span>
+                        </label>
+                        <input
+                          value={credOwnerId}
+                          onChange={(e) => setCredOwnerId(e.target.value)}
+                          placeholder="例如 system-bot 或 automation"
+                          required
+                        />
+                        <div className="form-hint">填入系统服务账号名称或应用 ID</div>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div className="modal-form-group">
+                  <label>
+                    <span>
+                      {editingCred ? '更新密钥 / 敏感值 (留空则保持原密钥不变)' : '凭证密钥 / Token 明文 '}
+                      {!editingCred && <span className="req-star">*</span>}
+                    </span>
+                  </label>
+                  <input
+                    type="password"
+                    value={credSecret}
+                    onChange={(e) => setCredSecret(e.target.value)}
+                    placeholder={editingCred ? '留空保持已有加密密钥不变' : '输入 ghp_xxx 或对应 API Token 明文'}
+                    required={!editingCred}
+                  />
+                  <div className="form-hint" style={{ color: '#059669', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <span>🔒 凭证提交后将存入加密机密保管箱，在界面中仅脱敏展示，保障访问安全。</span>
+                  </div>
                 </div>
               </div>
 
-              <div className="form-group" style={{ marginBottom: 16 }}>
-                <label>
-                  {editingCred ? '更新密钥 / 敏感值 (留空则保持原值不变)' : '凭证密钥 / Token 明文 *'}
-                </label>
-                <input
-                  type="password"
-                  value={credSecret}
-                  onChange={(e) => setCredSecret(e.target.value)}
-                  placeholder={editingCred ? '留空保持已有加密密钥不变' : '输入 ghp_xxx 或 API Key'}
-                  required={!editingCred}
-                />
-                <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: 4 }}>
-                  凭证提交后将存入加密保管箱，在界面中仅脱敏展示，保障凭据安全。
-                </div>
-              </div>
-
-              <div className="modal-actions" style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <div className="modal-footer">
                 <button type="button" className="btn-ghost" onClick={() => setShowCredModal(false)}>
                   取消
                 </button>
                 <button type="submit" className="btn-primary">
-                  保存凭证
+                  {editingCred ? '保存凭证' : '确认录入'}
                 </button>
               </div>
             </form>

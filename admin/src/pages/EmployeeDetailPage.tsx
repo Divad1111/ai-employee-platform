@@ -664,36 +664,50 @@ export function EmployeeDetailPage() {
           <form
             className="inline-form"
             onSubmit={handleAddMcpBinding}
-            style={{ marginTop: '0.75rem', padding: '0.75rem', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0', display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'flex-end' }}
+            style={{
+              marginTop: '0.85rem',
+              padding: '0.9rem 1.1rem',
+              background: '#f8fafc',
+              borderRadius: '10px',
+              border: '1px solid #e2e8f0',
+              display: 'flex',
+              gap: '1rem',
+              flexWrap: 'wrap',
+              alignItems: 'flex-end',
+            }}
           >
-            <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', fontSize: '0.84rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
               选择要挂载的 MCP 服务
               <SearchableSelect
                 value={selectedServerId}
                 onChange={setSelectedServerId}
                 options={mcpServerOptions}
                 placeholder="选择未挂载的 MCP 服务…"
-                style={{ minWidth: 260 }}
+                style={{ minWidth: 280, height: 38 }}
               />
             </label>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', fontSize: '0.84rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
               选择执行身份凭证 (可选)
               <select
-                className="select"
                 value={selectedCredId}
                 onChange={(e) => setSelectedCredId(e.target.value)}
-                style={{ minWidth: 220, height: '36px' }}
+                style={{ minWidth: 240, height: 38, borderRadius: 8 }}
               >
-                <option value="">（无 / 使用默认配置）</option>
+                <option value="">（无凭证 / 免鉴权访问）</option>
                 {credentials.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.credential_name} ({c.provider} · {c.auth_type})
+                    {c.credential_name} ({c.provider} · {c.auth_type.toUpperCase()})
                   </option>
                 ))}
               </select>
             </label>
-            <button type="submit" disabled={!selectedServerId || mcpBindingSubmitting}>
-              {mcpBindingSubmitting ? '添加中...' : '绑定 MCP 能力'}
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={!selectedServerId || mcpBindingSubmitting}
+              style={{ height: 38, padding: '0 1.25rem' }}
+            >
+              {mcpBindingSubmitting ? '正在绑定...' : '＋ 绑定 MCP 能力'}
             </button>
           </form>
         ) : (
@@ -707,11 +721,11 @@ export function EmployeeDetailPage() {
           <table className="table">
             <thead>
               <tr>
-                <th>MCP 服务名称</th>
-                <th>服务类型 / 传输协议</th>
-                <th>绑定身份凭证 (Credential)</th>
-                <th>状态</th>
-                <th style={{ textAlign: 'right' }}>操作</th>
+                <th style={{ minWidth: 220 }}>MCP 服务名称</th>
+                <th style={{ width: 170 }}>服务类型 / 协议</th>
+                <th style={{ minWidth: 230 }}>绑定身份凭证 (Credential)</th>
+                <th style={{ width: 110 }}>运行状态</th>
+                <th style={{ width: 160, textAlign: 'right' }}>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -722,39 +736,71 @@ export function EmployeeDetailPage() {
                   return (
                     <tr key={b.id}>
                       <td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          <span style={{ fontWeight: 600 }}>{server?.name || b.mcp_server_name || b.mcp_server_id}</span>
-                          {isBuiltinWorkflow && (
-                            <span className="badge badge-ok" style={{ fontSize: '0.7rem' }}>系统内置</span>
-                          )}
-                        </div>
-                        <div className="mono" style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                          ID: {b.mcp_server_id}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <div
+                            style={{
+                              width: 32,
+                              height: 32,
+                              borderRadius: 8,
+                              background: isBuiltinWorkflow
+                                ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
+                                : '#eff6ff',
+                              color: isBuiltinWorkflow ? '#ffffff' : '#2563eb',
+                              border: isBuiltinWorkflow ? 'none' : '1px solid #bfdbfe',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              flexShrink: 0,
+                            }}
+                          >
+                            {isBuiltinWorkflow ? '⚡' : '🔌'}
+                          </div>
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                                {server?.name || b.mcp_server_name || b.mcp_server_id}
+                              </span>
+                              {isBuiltinWorkflow && (
+                                <span className="badge badge-ok" style={{ fontSize: '0.7rem', padding: '0.1rem 0.35rem' }}>
+                                  系统内置
+                                </span>
+                              )}
+                            </div>
+                            <div className="mono" style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: 2 }}>
+                              ID: {b.mcp_server_id}
+                            </div>
+                          </div>
                         </div>
                       </td>
                       <td>
-                        <div style={{ fontSize: '0.85rem' }}>
-                          <span className="badge" style={{ textTransform: 'uppercase', marginRight: '0.35rem' }}>
-                            {server?.transport || 'http'}
-                          </span>
-                          <span style={{ color: 'var(--text-secondary)' }}>
-                            {server?.server_type === 'builtin' ? '系统核心' : '自定义扩展'}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                          <div>
+                            <span
+                              className="badge badge-neutral"
+                              style={{ textTransform: 'uppercase', fontSize: '0.72rem', padding: '0.1rem 0.4rem', fontWeight: 600 }}
+                            >
+                              {server?.transport || 'http'}
+                            </span>
+                          </div>
+                          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                            {server?.server_type === 'builtin' ? '核心基础服务' : '自定义扩展能力'}
                           </span>
                         </div>
-                        {server?.endpoint && (
-                          <div className="mono" style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
-                            {server.endpoint}
-                          </div>
-                        )}
                       </td>
                       <td>
                         <select
-                          className="select"
                           value={b.credential_id || ''}
                           onChange={(e) => void handleChangeBindingCredential(b.id, e.target.value)}
-                          style={{ fontSize: '0.82rem', padding: '0.25rem 0.5rem', minWidth: 180 }}
+                          style={{
+                            fontSize: '0.84rem',
+                            padding: '0.35rem 0.65rem',
+                            minWidth: 200,
+                            maxWidth: 260,
+                            height: 34,
+                            borderRadius: 6,
+                          }}
                         >
-                          <option value="">（无凭证 / 免鉴权）</option>
+                          <option value="">（无凭证 / 免鉴权访问）</option>
                           {credentials.map((c) => (
                             <option key={c.id} value={c.id}>
                               {c.credential_name} ({c.provider})
@@ -765,8 +811,8 @@ export function EmployeeDetailPage() {
                       <td>
                         <button
                           type="button"
-                          className={b.enabled ? 'badge badge-ok' : 'badge badge-muted'}
-                          style={{ cursor: 'pointer', border: 'none' }}
+                          className={b.enabled ? 'badge badge-ok' : 'badge badge-neutral'}
+                          style={{ cursor: 'pointer', border: '1px solid transparent', padding: '0.25rem 0.6rem' }}
                           onClick={() => void handleToggleMcpBinding(b)}
                           title="点击切换启用状态"
                         >
@@ -774,7 +820,7 @@ export function EmployeeDetailPage() {
                         </button>
                       </td>
                       <td style={{ textAlign: 'right' }}>
-                        <div style={{ display: 'flex', gap: '0.4rem', justifyContent: 'flex-end', alignItems: 'center' }}>
+                        <div style={{ display: 'inline-flex', gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}>
                           {isBuiltinWorkflow && (
                             <Link to="/mcp-servers/workflow-mcp" className="btn-ghost btn-sm">
                               工作流配置 →
@@ -782,7 +828,8 @@ export function EmployeeDetailPage() {
                           )}
                           <button
                             type="button"
-                            className="btn-danger btn-sm"
+                            className="btn-ghost btn-sm"
+                            style={{ color: '#dc2626', borderColor: '#fecaca' }}
                             onClick={() => void handleUnbindMcp(b)}
                           >
                             解绑
