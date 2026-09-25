@@ -12,12 +12,12 @@ import (
 
 // Validator 校验 Server→Worker 命令序号与时间窗。
 type Validator struct {
-	mu       sync.Mutex
-	lastSeq  uint64
-	seenID   map[string]uint64 // command_id → sequence
-	seenMsg  map[string]struct{}
-	skewMs   int64
-	nowFunc  func() time.Time
+	mu      sync.Mutex
+	lastSeq uint64
+	seenID  map[string]uint64 // command_id → sequence
+	seenMsg map[string]struct{}
+	skewMs  int64
+	nowFunc func() time.Time
 }
 
 // NewValidator 创建校验器。skewMs<=0 时默认 ±5 分钟。
@@ -84,6 +84,10 @@ func (v *Validator) Check(cmd *aiev1.Command) Result {
 	seq := meta.Sequence
 	if seq == 0 {
 		return Result{Error: "sequence 无效"}
+	}
+	// 控制平面重启后序号从 1 重新计。工作站仍记着旧序号时，收到更小的序号视为新纪元。
+	if v.lastSeq > 0 && seq < v.lastSeq {
+		v.lastSeq = seq - 1
 	}
 	if seq <= v.lastSeq {
 		return Result{Error: fmt.Sprintf("sequence <= last_sequence (%d <= %d)", seq, v.lastSeq)}

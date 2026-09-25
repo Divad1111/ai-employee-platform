@@ -5,6 +5,7 @@ import { StatusBadge } from '../components/StatusBadge'
 import { IconTerminal, IconRefresh } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { formatDateTime } from '../lib/time'
 
 type Sess = {
   id: string
@@ -135,7 +136,7 @@ export function SessionsPage() {
                     </span>
                   </td>
                   <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                    {s.last_activity_at ? new Date(s.last_activity_at).toLocaleString() : '—'}
+                    {s.last_activity_at ? formatDateTime(s.last_activity_at) : '—'}
                   </td>
                 </tr>
               ))}

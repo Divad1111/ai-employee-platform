@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,7 +40,7 @@ func (d Deps) handleGetWorkflow(w http.ResponseWriter, r *http.Request, _ *auth.
 	writeJSON(w, http.StatusOK, map[string]any{"workflow": wf, "yaml": yamlOut})
 }
 
-func (d Deps) handleUpsertWorkflow(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleUpsertWorkflow(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var body struct {
 		YAML   string `json:"yaml"`
 		Bump   string `json:"bump"`
@@ -66,14 +67,17 @@ func (d Deps) handleUpsertWorkflow(w http.ResponseWriter, r *http.Request, _ *au
 	if action == "created" {
 		code = http.StatusCreated
 	}
+	d.auditUser(r, sess, "workflow.upsert", map[string]string{"id": wf.ID, "action": action})
 	writeJSON(w, code, map[string]any{"status": "ok", "action": action, "workflow": wf})
 }
 
-func (d Deps) handleDeleteWorkflow(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	if err := d.WorkflowMCP.DeleteWorkflow(r.Context(), r.PathValue("id")); err != nil {
+func (d Deps) handleDeleteWorkflow(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	id := r.PathValue("id")
+	if err := d.WorkflowMCP.DeleteWorkflow(r.Context(), id); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
+	d.auditUser(r, sess, "workflow.delete", map[string]string{"id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -107,7 +111,7 @@ func (d Deps) handleExportSkillPackage(w http.ResponseWriter, r *http.Request, _
 	writeJSON(w, http.StatusOK, map[string]any{"skill": sp, "skill_md": md})
 }
 
-func (d Deps) handleUpsertSkillPackage(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleUpsertSkillPackage(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var body struct {
 		SkillMD string                   `json:"skill_md"`
 		Content string                   `json:"content"`
@@ -131,14 +135,17 @@ func (d Deps) handleUpsertSkillPackage(w http.ResponseWriter, r *http.Request, _
 	if action == "created" {
 		code = http.StatusCreated
 	}
+	d.auditUser(r, sess, "skill.upsert", map[string]string{"id": sp.ID, "action": action})
 	writeJSON(w, code, map[string]any{"status": "ok", "action": action, "skill": sp})
 }
 
-func (d Deps) handleDeleteSkillPackage(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	if err := d.WorkflowMCP.DeleteSkill(r.Context(), r.PathValue("id")); err != nil {
+func (d Deps) handleDeleteSkillPackage(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	id := r.PathValue("id")
+	if err := d.WorkflowMCP.DeleteSkill(r.Context(), id); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
+	d.auditUser(r, sess, "skill.delete", map[string]string{"id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -163,7 +170,7 @@ func (d Deps) handleGetKnowledgeDoc(w http.ResponseWriter, r *http.Request, _ *a
 	writeJSON(w, http.StatusOK, map[string]any{"doc": doc})
 }
 
-func (d Deps) handleUpsertKnowledgeDoc(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleUpsertKnowledgeDoc(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var body struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -186,14 +193,17 @@ func (d Deps) handleUpsertKnowledgeDoc(w http.ResponseWriter, r *http.Request, _
 	if action == "created" {
 		code = http.StatusCreated
 	}
+	d.auditUser(r, sess, "knowledge.upsert", map[string]string{"id": doc.ID, "path": doc.Path, "action": action})
 	writeJSON(w, code, map[string]any{"status": "ok", "action": action, "doc": doc})
 }
 
-func (d Deps) handleDeleteKnowledgeDoc(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	if err := d.WorkflowMCP.DeleteKnowledge(r.Context(), r.PathValue("id")); err != nil {
+func (d Deps) handleDeleteKnowledgeDoc(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	id := r.PathValue("id")
+	if err := d.WorkflowMCP.DeleteKnowledge(r.Context(), id); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
+	d.auditUser(r, sess, "knowledge.delete", map[string]string{"id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -208,12 +218,13 @@ func (d Deps) handleSearchKnowledgeDocs(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusOK, map[string]any{"items": hits})
 }
 
-func (d Deps) handleReindexKnowledge(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleReindexKnowledge(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	n, err := d.WorkflowMCP.ReindexKnowledge(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	d.auditUser(r, sess, "knowledge.reindex", map[string]string{"count": strconv.Itoa(n)})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "reindexed": n})
 }
 
@@ -252,23 +263,27 @@ func (d Deps) handleGrantEmployeeWorkflow(w http.ResponseWriter, r *http.Request
 	if sess != nil {
 		grantedBy = sess.UserID
 	}
-	if err := d.WorkflowMCP.GrantWorkflow(r.Context(), r.PathValue("id"), body.WorkflowID, grantedBy); err != nil {
+	empID := r.PathValue("id")
+	if err := d.WorkflowMCP.GrantWorkflow(r.Context(), empID, body.WorkflowID, grantedBy); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	d.auditUser(r, sess, "workflow.grant", map[string]string{"employee_id": empID, "workflow_id": body.WorkflowID})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
-func (d Deps) handleRevokeEmployeeWorkflow(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleRevokeEmployeeWorkflow(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	wfID := r.URL.Query().Get("workflow_id")
 	if wfID == "" {
 		writeErr(w, http.StatusBadRequest, "缺少 workflow_id")
 		return
 	}
-	if err := d.WorkflowMCP.RevokeWorkflow(r.Context(), r.PathValue("id"), wfID); err != nil {
+	empID := r.PathValue("id")
+	if err := d.WorkflowMCP.RevokeWorkflow(r.Context(), empID, wfID); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
+	d.auditUser(r, sess, "workflow.revoke", map[string]string{"employee_id": empID, "workflow_id": wfID})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -309,6 +324,13 @@ func (d Deps) handleIssueEmployeeMCPToken(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	tokenID := ""
+	if res.Token != nil {
+		tokenID = res.Token.ID
+	}
+	d.auditUser(r, sess, "mcp.token.issue", map[string]string{
+		"employee_id": r.PathValue("id"), "token_id": tokenID,
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"token": res.Token, "secret": res.Secret,
 		"mcp_json_hint": map[string]any{
@@ -318,17 +340,19 @@ func (d Deps) handleIssueEmployeeMCPToken(w http.ResponseWriter, r *http.Request
 	})
 }
 
-func (d Deps) handleRevokeMCPToken(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
-	if err := d.MCPAuth.Revoke(r.Context(), r.PathValue("id")); err != nil {
+func (d Deps) handleRevokeMCPToken(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	id := r.PathValue("id")
+	if err := d.MCPAuth.Revoke(r.Context(), id); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
+	d.auditUser(r, sess, "mcp.token.revoke", map[string]string{"token_id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---------- Import from PersonalWorkMCP data zip ----------
 
-func (d Deps) handleImportWorkflowMCP(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleImportWorkflowMCP(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if err := r.ParseMultipartForm(64 << 20); err != nil {
 		writeErr(w, http.StatusBadRequest, "需要 multipart zip")
 		return
@@ -425,11 +449,16 @@ func (d Deps) handleImportWorkflowMCP(w http.ResponseWriter, r *http.Request, _ 
 			stats["skills"]++
 		}
 	}
+	d.auditUser(r, sess, "workflow.import", map[string]string{
+		"workflows": strconv.Itoa(stats["workflows"]),
+		"skills":    strconv.Itoa(stats["skills"]),
+		"knowledge": strconv.Itoa(stats["knowledge"]),
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "stats": stats})
 }
 
 // handleSyncSkillsToWorkstation 触发技能包同步命令（需 Scheduler/Pusher）。
-func (d Deps) handleSyncSkillsToWorkstation(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleSyncSkillsToWorkstation(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var body struct {
 		WorkstationID string   `json:"workstation_id"`
 		EmployeeID    string   `json:"employee_id"`
@@ -447,5 +476,8 @@ func (d Deps) handleSyncSkillsToWorkstation(w http.ResponseWriter, r *http.Reque
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	d.auditUser(r, sess, "skill.sync", map[string]string{
+		"workstation_id": body.WorkstationID, "employee_id": body.EmployeeID,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }

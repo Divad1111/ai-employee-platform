@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { apiGet, apiPost } from '../api/client'
 import { roleDisplayName } from '../lib/rbacLabels'
+import { formatTime, localTimeZone, timeZoneLabel } from '../lib/time'
 import { clearSession, getUser } from '../stores/session'
 import { usePerm } from '../stores/permissions'
 import {
@@ -227,6 +228,7 @@ export function AppShell() {
           </div>
 
           <div className="topbar-status">
+            <TopbarClock />
             <span className="status-pill status-success" title="平台微服务与数据库运行中">
               <span className="status-dot" />
               平台服务在线
@@ -245,6 +247,21 @@ export function AppShell() {
         </main>
       </div>
     </div>
+  )
+}
+
+/** 顶栏左侧时钟：本机时区，读不到时用上海。 */
+function TopbarClock() {
+  const tz = localTimeZone()
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 1000)
+    return () => window.clearInterval(id)
+  }, [])
+  return (
+    <span className="topbar-clock" title={tz}>
+      {timeZoneLabel(tz)} {formatTime(now)}
+    </span>
   )
 }
 

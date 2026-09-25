@@ -36,7 +36,13 @@ type StdioSession struct {
 	acpSessionID string
 	collecting   bool
 	replyBuf     strings.Builder
+	replyText    string
+	inTok        int64
+	outTok       int64
+	agentModel   string
+	promptText   string
 	mcpServers   []any
+	model        string
 }
 
 type rpcResult struct {
@@ -66,6 +72,9 @@ func (s *StdioSession) SetEnv(env []string) { s.env = append([]string{}, env...)
 func (s *StdioSession) SetMCPServers(servers []any) {
 	s.mcpServers = append([]any{}, servers...)
 }
+
+// SetModel 设置 session/new 使用的模型。空表示引擎默认。
+func (s *StdioSession) SetModel(model string) { s.model = model }
 
 func (s *StdioSession) Start(ctx context.Context) error {
 	s.mu.Lock()
@@ -142,14 +151,12 @@ func (s *StdioSession) Start(ctx context.Context) error {
 	if cwd == "" {
 		cwd = os.TempDir()
 	}
-	mcpServers := s.mcpServers
-	if mcpServers == nil {
-		mcpServers = []any{}
-	}
-	raw, err := s.call(ctx, "session/new", map[string]any{
+	mcpServers := normalizeMCPServers(s.mcpServers)
+	params := map[string]any{
 		"cwd":        cwd,
 		"mcpServers": mcpServers,
-	})
+	}
+	raw, err := s.call(ctx, "session/new", params)
 	if err != nil {
 		_ = s.Stop(ctx)
 		if strings.Contains(err.Error(), "Authentication required") {
@@ -167,6 +174,26 @@ func (s *StdioSession) Start(ctx context.Context) error {
 	} else {
 		s.acpSessionID = s.id
 	}
+	sid := s.acpSessionID
+	model := s.model
+	s.mu.Unlock()
+	// Cursor 忽略 session/new 的 model 字段，不设置就会停在 default[]（Auto）。
+	if model != "" {
+		setRaw, setErr := s.call(ctx, "session/set_config_option", map[string]any{
+			"sessionId": sid,
+			"configId":  "model",
+			"value":     model,
+		})
+		if setErr != nil {
+			_ = s.Stop(ctx)
+			return fmt.Errorf("%w: 设置模型 %s 失败: %v", ErrHandshake, model, setErr)
+		}
+		if cur := configOptionValue(setRaw, "model"); cur != "" && cur != model {
+			_ = s.Stop(ctx)
+			return fmt.Errorf("%w: 模型未生效，请求 %s，会话仍是 %s", ErrHandshake, model, cur)
+		}
+	}
+	s.mu.Lock()
 	s.ready = true
 	s.mu.Unlock()
 	select {
@@ -176,7 +203,28 @@ func (s *StdioSession) Start(ctx context.Context) error {
 	return nil
 }
 
+func configOptionValue(raw json.RawMessage, id string) string {
+	var body struct {
+		ConfigOptions []struct {
+			ID           string `json:"id"`
+			ConfigID     string `json:"configId"`
+			Category     string `json:"category"`
+			CurrentValue string `json:"currentValue"`
+		} `json:"configOptions"`
+	}
+	if json.Unmarshal(raw, &body) != nil {
+		return ""
+	}
+	for _, opt := range body.ConfigOptions {
+		if opt.ID == id || opt.ConfigID == id || opt.Category == id {
+			return opt.CurrentValue
+		}
+	}
+	return ""
+}
+
 func (s *StdioSession) Send(ctx context.Context, input []byte) (string, error) {
+	s.resetUsage(string(input))
 	s.mu.Lock()
 	ready := s.ready && !s.stopped
 	sid := s.acpSessionID
@@ -195,7 +243,7 @@ func (s *StdioSession) Send(ctx context.Context, input []byte) (string, error) {
 		s.mu.Unlock()
 	}()
 
-	_, err := s.call(ctx, "session/prompt", map[string]any{
+	raw, err := s.call(ctx, "session/prompt", map[string]any{
 		"sessionId": sid,
 		"prompt":    []map[string]any{{"type": "text", "text": string(input)}},
 	})
@@ -205,6 +253,8 @@ func (s *StdioSession) Send(ctx context.Context, input []byte) (string, error) {
 	s.mu.Lock()
 	reply := s.replyBuf.String()
 	s.mu.Unlock()
+	s.absorbUsage(raw)
+	s.rememberReply(reply)
 	if err != nil {
 		return reply, err
 	}
@@ -329,8 +379,9 @@ func (s *StdioSession) readLoop(stdout io.Reader) {
 			Params  json.RawMessage `json:"params"`
 			Result  json.RawMessage `json:"result"`
 			Error   *struct {
-				Code    int    `json:"code"`
-				Message string `json:"message"`
+				Code    int             `json:"code"`
+				Message string          `json:"message"`
+				Data    json.RawMessage `json:"data"`
 			} `json:"error"`
 		}
 		if err := json.Unmarshal(line, &msg); err != nil {
@@ -346,7 +397,15 @@ func (s *StdioSession) readLoop(stdout io.Reader) {
 			s.mu.Unlock()
 			if ok {
 				if msg.Error != nil {
-					ch <- rpcResult{err: fmt.Errorf("rpc %d: %s", msg.Error.Code, msg.Error.Message)}
+					detail := msg.Error.Message
+					if len(msg.Error.Data) > 0 && string(msg.Error.Data) != "null" {
+						data := string(msg.Error.Data)
+						if len(data) > 400 {
+							data = data[:400] + "…"
+						}
+						detail = detail + ": " + data
+					}
+					ch <- rpcResult{err: fmt.Errorf("rpc %d: %s", msg.Error.Code, detail)}
 				} else {
 					ch <- rpcResult{result: msg.Result}
 				}
@@ -357,6 +416,7 @@ func (s *StdioSession) readLoop(stdout io.Reader) {
 		if msg.Method != "" {
 			if msg.Method == "session/update" {
 				s.appendReply(extractAgentTextFromUpdate(msg.Params))
+				s.absorbUsage(msg.Params)
 			}
 			payload, _ := json.Marshal(map[string]any{"method": msg.Method, "params": msg.Params})
 			select {

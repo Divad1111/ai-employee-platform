@@ -99,7 +99,7 @@ func TestStartSessionWithMCP(t *testing.T) {
 			"url":  "http://127.0.0.1:8080/mcp",
 		},
 	}
-	sess, err := rt.StartSessionWithMCP(context.Background(), "SES-MCP", "EMP-MCP", ws.ID, "cursor", mcpServers)
+	sess, err := rt.StartSessionWithMCP(context.Background(), "SES-MCP", "EMP-MCP", ws.ID, "cursor", mcpServers, "")
 	if err != nil {
 		t.Fatalf("StartSessionWithMCP failed: %v", err)
 	}

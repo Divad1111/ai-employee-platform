@@ -7,6 +7,7 @@ import { PageFeatureGuide } from '../components/PageFeatureGuide'
 import { PromptDialog } from '../components/PromptDialog'
 import { AlertDialog } from '../components/AlertDialog'
 import { usePerm } from '../stores/permissions'
+import { formatDateTime } from '../lib/time'
 
 type WS = {
   id: string
@@ -326,7 +327,7 @@ aew service status`
                   </div>
                 </div>
                 <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                  有效期至: {new Date(tokenResult.expires_at).toLocaleString()}
+                  有效期至: {formatDateTime(tokenResult.expires_at)}
                 </div>
               </div>
 
@@ -470,7 +471,7 @@ aew service status`
                   </td>
                   <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
                     {w.last_heartbeat_at && !w.last_heartbeat_at.startsWith('0001')
-                      ? new Date(w.last_heartbeat_at).toLocaleString()
+                      ? formatDateTime(w.last_heartbeat_at)
                       : '等待初次心跳'}
                   </td>
                   <td>

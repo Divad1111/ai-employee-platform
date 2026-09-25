@@ -181,7 +181,7 @@ func (d Deps) handleListProviders(w http.ResponseWriter, r *http.Request, _ *aut
 	writeJSON(w, http.StatusOK, map[string]any{"items": list})
 }
 
-func (d Deps) handlePutProvider(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handlePutProvider(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var p registry.Provider
 	if err := decodeJSON(r, &p); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效请求体")
@@ -198,10 +198,11 @@ func (d Deps) handlePutProvider(w http.ResponseWriter, r *http.Request, _ *auth.
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	d.auditUser(r, sess, "provider.upsert", map[string]string{"id": p.ID, "name": p.Name})
 	writeJSON(w, http.StatusOK, p)
 }
 
-func (d Deps) handleAddProviderVersion(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleAddProviderVersion(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var v registry.Version
 	if err := decodeJSON(r, &v); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效请求体")
@@ -212,6 +213,9 @@ func (d Deps) handleAddProviderVersion(w http.ResponseWriter, r *http.Request, _
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	d.auditUser(r, sess, "provider.version.add", map[string]string{
+		"provider_id": out.ProviderID, "version": out.Version,
+	})
 	writeJSON(w, http.StatusCreated, out)
 }
 

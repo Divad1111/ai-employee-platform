@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -48,20 +50,24 @@ type Options struct {
 
 // Daemon 运行时实例。
 type Daemon struct {
-	Opts       Options
-	Runtime    *runtime.Managers
-	Recovery   *recovery.Manager
-	Proc       *process.Manager
-	Registry   *providers.Registry
-	Monitor    *monitor.Sampler
-	Outbox     *outbox.MemoryStore
-	Backoff    *reconnect.Backoff
-	Ready      bool
-	Sample     monitor.Sample
-	eventSeq   atomic.Uint64 // Control Plane 事件严格递增序号（不可为 0）
-	wsID       string
-	Artifacts  *artifactlocal.Queue
-	ArtUpload  *artifactlocal.Uploader
+	Opts      Options
+	Runtime   *runtime.Managers
+	Recovery  *recovery.Manager
+	Proc      *process.Manager
+	Registry  *providers.Registry
+	Monitor   *monitor.Sampler
+	Outbox    *outbox.MemoryStore
+	Backoff   *reconnect.Backoff
+	Ready     bool
+	Sample    monitor.Sample
+	eventSeq  atomic.Uint64 // Control Plane 事件严格递增序号（不可为 0）
+	wsID      string
+	Artifacts *artifactlocal.Queue
+	ArtUpload *artifactlocal.Uploader
+
+	modelMu    sync.Mutex
+	modelAt    time.Time
+	modelCache []heartbeat.ModelInfo
 }
 
 // New 组装 Daemon。
@@ -245,6 +251,8 @@ func (d *Daemon) maintainControlPlane(ctx context.Context) {
 				CPU:       sample.CPUPercent,
 				Memory:    sample.MemoryPercent,
 				Disk:      sample.DiskPercent,
+				Providers: d.installedProviders(context.Background()),
+				Models:    d.providerModels(context.Background()),
 			}
 		}
 		sess.OnCommand = func(cctx context.Context, cmd *aiev1.Command) error {
@@ -281,6 +289,7 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			Prompt        string `json:"prompt"`
 			WorkspaceID   string `json:"workspace_id"`
 			WorkspacePath string `json:"workspace_path"`
+			Model         string `json:"model"`
 		}
 		if pJSON := cmd.GetPayloadJson(); pJSON != "" {
 			_ = json.Unmarshal([]byte(pJSON), &payload)
@@ -300,8 +309,12 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			_, _ = skillsync.SyncFromStartJob(startJob)
 		}
 
-		// 确保本地员工视图
-		_, _ = d.Runtime.EnsureEmployee(empID, empID, "cursor")
+		// 确保本地员工视图，驱动引擎来自中心下发的员工配置
+		provider := "cursor"
+		if startJob != nil && startJob.GetProvider() != "" {
+			provider = startJob.GetProvider()
+		}
+		_, _ = d.Runtime.EnsureEmployee(empID, empID, provider)
 
 		// 确保工作区视图（使用 Control Plane 下发的本机路径，禁止静默落到默认目录）
 		wsID := payload.WorkspaceID
@@ -339,7 +352,7 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 		// 会话复用或按需创建；MCP 变化时需重建
 		var sessID string
 		activeSess := d.Runtime.FindActiveSession(empID)
-		if activeSess != nil && len(mcpServers) == 0 {
+		if activeSess != nil && len(mcpServers) == 0 && activeSess.Provider == provider && activeSess.Model == payload.Model {
 			sessID = activeSess.ID
 		} else {
 			if activeSess != nil {
@@ -347,9 +360,9 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			}
 			sessID = "ses-" + empID
 			_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_STARTED,
-				fmt.Sprintf(`{"status":"STARTING","provider":"cursor","workspace_id":%q}`, wsID)))
+				fmt.Sprintf(`{"status":"STARTING","provider":%q,"workspace_id":%q}`, provider, wsID)))
 			startCtx, startCancel := context.WithTimeout(ctx, 2*time.Minute)
-			_, err := d.Runtime.StartSessionWithMCP(startCtx, sessID, empID, wsID, "cursor", mcpServers)
+			_, err := d.Runtime.StartSessionWithMCP(startCtx, sessID, empID, wsID, provider, mcpServers, payload.Model)
 			startCancel()
 			if err != nil && err != runtime.ErrActiveSession {
 				_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_ERROR,
@@ -359,7 +372,7 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 				return err
 			}
 			_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_READY,
-				fmt.Sprintf(`{"status":"READY","provider":"cursor","workspace_id":%q}`, wsID)))
+				fmt.Sprintf(`{"status":"READY","provider":%q,"workspace_id":%q}`, provider, wsID)))
 		}
 
 		_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_STARTED,
@@ -368,21 +381,33 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 		go func() {
 			jobCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
-			_, reply, rerr := d.Runtime.RunJob(jobCtx, jobID, empID, sessID, payload.Prompt)
+			localJob, reply, rerr := d.Runtime.RunJob(jobCtx, jobID, empID, sessID, payload.Prompt)
+			usage := map[string]string{
+				"session_id":    sessID,
+				"reply":         reply,
+				"input_tokens":  "0",
+				"output_tokens": "0",
+				"agent":         "",
+				"token_source":  "",
+			}
+			if localJob != nil {
+				usage["input_tokens"] = strconv.FormatInt(localJob.InputTokens, 10)
+				usage["output_tokens"] = strconv.FormatInt(localJob.OutputTokens, 10)
+				usage["agent"] = localJob.Agent
+				usage["token_source"] = localJob.TokenSource
+			}
 			if rerr != nil {
-				pl, _ := json.Marshal(map[string]string{
-					"error": rerr.Error(), "session_id": sessID, "reply": reply,
-				})
+				usage["error"] = rerr.Error()
+				pl, _ := json.Marshal(usage)
 				_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_FAILED, string(pl)))
-				// 失败时若有部分 reply，仍归档为制品（尽力）
 				if reply != "" {
 					d.stageJobArtifact(jobID, "result-partial.txt", "txt", []byte(reply))
 				}
 				return
 			}
-			pl, _ := json.Marshal(map[string]string{
-				"status": "success", "session_id": sessID, "reply": reply, "message": "Job executed successfully",
-			})
+			usage["status"] = "success"
+			usage["message"] = "Job executed successfully"
+			pl, _ := json.Marshal(usage)
 			_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_SUCCESS, string(pl)))
 			// Job 产物：至少归档 reply 为 result.txt，并尝试上传 Control Plane
 			if reply == "" {
@@ -409,17 +434,17 @@ func (d *Daemon) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 	case "status":
 		e, w, s, j := d.Runtime.Snapshot()
 		return okResult(map[string]any{
-			"ready":       d.Ready,
-			"version":     config.Version,
-			"employees":   e,
-			"workspaces":  w,
-			"sessions":    s,
-			"jobs":        j,
-			"reconnect":   d.Backoff.State(),
-			"cpu_percent": d.Sample.CPUPercent,
-			"mem_percent": d.Sample.MemoryPercent,
+			"ready":        d.Ready,
+			"version":      config.Version,
+			"employees":    e,
+			"workspaces":   w,
+			"sessions":     s,
+			"jobs":         j,
+			"reconnect":    d.Backoff.State(),
+			"cpu_percent":  d.Sample.CPUPercent,
+			"mem_percent":  d.Sample.MemoryPercent,
 			"disk_percent": d.Sample.DiskPercent,
-			"providers":   d.Registry.List(),
+			"providers":    d.Registry.List(),
 		})
 	case "doctor":
 		return d.doctor()
@@ -596,6 +621,85 @@ func (d *Daemon) doctor() ipc.Response {
 		add("daemon", "FAIL", "not ready")
 	}
 	return okResult(map[string]any{"checks": checks})
+}
+
+func (d *Daemon) installedProviders(ctx context.Context) []string {
+	if d.Registry == nil {
+		return nil
+	}
+	var out []string
+	for _, name := range d.Registry.List() {
+		prov, err := d.Registry.Get(name)
+		if err != nil {
+			continue
+		}
+		info, err := prov.Detect(ctx)
+		if err != nil || info == nil || info.Path == "" {
+			continue
+		}
+		base := strings.ToLower(filepath.Base(info.Path))
+		if strings.Contains(base, "fake") {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+// providerModels 缓存各引擎模型列表，避免每次心跳都启动 CLI。失败时保留上次成功的结果。
+func (d *Daemon) providerModels(ctx context.Context) []heartbeat.ModelInfo {
+	const ttl = 10 * time.Minute
+	d.modelMu.Lock()
+	fresh := !d.modelAt.IsZero() && time.Since(d.modelAt) < ttl
+	cached := append([]heartbeat.ModelInfo(nil), d.modelCache...)
+	d.modelMu.Unlock()
+	if fresh || d.Registry == nil {
+		return cached
+	}
+
+	byProv := map[string][]heartbeat.ModelInfo{}
+	for _, item := range cached {
+		byProv[item.Provider] = append(byProv[item.Provider], item)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	for _, name := range d.Registry.List() {
+		prov, err := d.Registry.Get(name)
+		if err != nil {
+			continue
+		}
+		lister, ok := prov.(interface {
+			ListModels(context.Context) ([]providers.Model, error)
+		})
+		if !ok {
+			continue
+		}
+		models, err := lister.ListModels(ctx)
+		if err != nil {
+			continue
+		}
+		items := make([]heartbeat.ModelInfo, 0, len(models))
+		for _, m := range models {
+			if m.ID == "" {
+				continue
+			}
+			label := m.Label
+			if label == "" {
+				label = m.ID
+			}
+			items = append(items, heartbeat.ModelInfo{Provider: name, ID: m.ID, Label: label})
+		}
+		byProv[name] = items
+	}
+	var out []heartbeat.ModelInfo
+	for _, name := range d.Registry.List() {
+		out = append(out, byProv[name]...)
+	}
+	d.modelMu.Lock()
+	d.modelAt = time.Now()
+	d.modelCache = out
+	d.modelMu.Unlock()
+	return out
 }
 
 func okResult(v any) ipc.Response {

@@ -126,11 +126,15 @@ func NewMarkdownCard(title string, template CardTemplate, markdownContent string
 }
 
 // BuildTaskCreatedCard 构建协同任务已创建的即时回执卡片
-func BuildTaskCreatedCard(jobID, employeeName, instructionPreview string) *Card {
+func BuildTaskCreatedCard(jobID, employeeName, instructionPreview, identityNote string) *Card {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("**任务编号**：`%s`\n", jobID))
 	sb.WriteString(fmt.Sprintf("• 负责员工: %s\n", employeeName))
 	sb.WriteString(fmt.Sprintf("• 任务指令: %s", instructionPreview))
+	if identityNote != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(identityNote)
+	}
 
 	return NewMarkdownCard(
 		"⏳ 协同任务已创建",
@@ -246,10 +250,14 @@ func BuildNotAssignableCard(employeeName string, err error) *Card {
 }
 
 // BuildTaskFailedCard 构建协同任务创建失败报警卡片
-func BuildTaskFailedCard(err error) *Card {
+func BuildTaskFailedCard(err error, identityNote string) *Card {
 	var sb strings.Builder
 	sb.WriteString("协同任务创建遇到异常：\n\n")
 	sb.WriteString(fmt.Sprintf("```\n%v\n```", err))
+	if identityNote != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(identityNote)
+	}
 
 	return NewMarkdownCard(
 		"❌ 协同任务创建失败",

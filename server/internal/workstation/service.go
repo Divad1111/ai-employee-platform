@@ -14,16 +14,24 @@ import (
 
 // View 列表/详情视图。
 type View struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	Status          string    `json:"status"`
-	Fingerprint     string    `json:"fingerprint"`
-	CertStatus      string    `json:"cert_status"`
-	LastHeartbeatAt time.Time `json:"last_heartbeat_at,omitempty"`
-	Version         string    `json:"version,omitempty"`
-	CPUPercent      float64   `json:"cpu_percent,omitempty"`
-	MemoryPercent   float64   `json:"memory_percent,omitempty"`
-	DiskPercent     float64   `json:"disk_percent,omitempty"`
+	ID              string                   `json:"id"`
+	Name            string                   `json:"name"`
+	Status          string                   `json:"status"`
+	Fingerprint     string                   `json:"fingerprint"`
+	CertStatus      string                   `json:"cert_status"`
+	LastHeartbeatAt time.Time                `json:"last_heartbeat_at,omitempty"`
+	Version         string                   `json:"version,omitempty"`
+	CPUPercent      float64                  `json:"cpu_percent"`
+	MemoryPercent   float64                  `json:"memory_percent"`
+	DiskPercent     float64                  `json:"disk_percent"`
+	Providers       []string                 `json:"providers,omitempty"`
+	Models          map[string][]ModelOption `json:"models,omitempty"`
+}
+
+// ModelOption 某个驱动引擎下可选的模型。
+type ModelOption struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
 }
 
 // MetaStore 可选的名称等元数据。
@@ -95,6 +103,15 @@ func (s *Service) Get(ctx context.Context, id string) View {
 			v.CPUPercent = cpu
 			v.MemoryPercent = mem
 			v.DiskPercent = disk
+		}
+		v.Providers = s.Presence.Providers(id)
+		if reported := s.Presence.Models(id); len(reported) > 0 {
+			v.Models = make(map[string][]ModelOption, len(reported))
+			for name, list := range reported {
+				for _, item := range list {
+					v.Models[name] = append(v.Models[name], ModelOption{ID: item.ID, Label: item.Label})
+				}
+			}
 		}
 	}
 	if v.CertStatus == "" && v.Status == reliability.StatusOnline {

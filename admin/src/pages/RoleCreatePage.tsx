@@ -9,6 +9,11 @@ import { permLabel, SCOPE_LABEL, SCOPE_OPTIONS } from '../lib/rbacLabels'
 
 type PermInfo = { code: string; description: string }
 type DraftGrant = { code: string; scope: string }
+type RoleItem = {
+  name: string
+  description: string
+  grants?: Array<{ code?: string; scope?: string }>
+}
 
 export function RoleCreatePage() {
   const nav = useNavigate()
@@ -18,6 +23,8 @@ export function RoleCreatePage() {
   const [grants, setGrants] = useState<DraftGrant[]>([])
   const [pickPerm, setPickPerm] = useState('')
   const [pickScope, setPickScope] = useState('OWN')
+  const [roles, setRoles] = useState<RoleItem[]>([])
+  const [cloneFrom, setCloneFrom] = useState('')
   const [err, setErr] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -38,6 +45,16 @@ export function RoleCreatePage() {
     [],
   )
 
+  const cloneOptions = useMemo(
+    () =>
+      roles.map((r) => ({
+        value: r.name,
+        label: `${r.description || r.name}（${r.name}，${r.grants?.length || 0} 项权限）`,
+        keywords: `${r.name} ${r.description || ''}`,
+      })),
+    [roles],
+  )
+
   const permDesc = useMemo(() => {
     const m: Record<string, string> = {}
     for (const p of perms) m[p.code] = p.description
@@ -45,10 +62,33 @@ export function RoleCreatePage() {
   }, [perms])
 
   useEffect(() => {
-    apiGet<{ items: PermInfo[] }>('/permissions')
-      .then((r) => setPerms(r.items || []))
+    Promise.all([
+      apiGet<{ items: PermInfo[] }>('/permissions'),
+      apiGet<{ items: RoleItem[] }>('/roles'),
+    ])
+      .then(([permRes, roleRes]) => {
+        setPerms(permRes.items || [])
+        setRoles(roleRes.items || [])
+      })
       .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)))
   }, [])
+
+  const applyClone = (roleName: string) => {
+    setCloneFrom(roleName)
+    const role = roles.find((r) => r.name === roleName)
+    if (!role) return
+    const next: DraftGrant[] = []
+    const seen = new Set<string>()
+    for (const g of role.grants || []) {
+      const code = (g.code || '').trim()
+      if (!code || seen.has(code)) continue
+      seen.add(code)
+      next.push({ code, scope: (g.scope || 'NONE').toUpperCase() })
+    }
+    setGrants(next)
+    setDescription((prev) => (prev.trim() ? prev : `${role.description || role.name} 副本`))
+    setErr('')
+  }
 
   const addGrant = () => {
     if (!pickPerm) {
@@ -88,7 +128,7 @@ export function RoleCreatePage() {
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
         <div>
           <h1>新建角色</h1>
-          <p>填写角色标识与显示名，再添加该角色拥有的权限</p>
+          <p>可从已有角色复制权限，创建后再自行增删</p>
         </div>
         <Link to="/roles" className="btn-ghost btn-sm" style={{ textDecoration: 'none' }}>
           ← 返回角色列表
@@ -116,6 +156,15 @@ export function RoleCreatePage() {
               pattern="[A-Z0-9_]+"
               placeholder="例：CUSTOM_OPS"
               title="仅大写字母、数字与下划线"
+            />
+          </label>
+          <label>
+            <span className="field-caption">从现有角色复制权限（可选）</span>
+            <SearchableSelect
+              value={cloneFrom}
+              onChange={applyClone}
+              options={cloneOptions}
+              placeholder="选择一个角色作为模板…"
             />
           </label>
           <label>

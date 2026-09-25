@@ -30,6 +30,67 @@ func TestCheckUser_RolePresetThenUserOverride(t *testing.T) {
 	}
 }
 
+func TestEffective_ExceptionReplacesRoleAndBonusAdds(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	svc := NewService(store)
+	userID := "u-bonus"
+
+	eff, err := svc.ResolveEffective(ctx, userID, []string{"VIEWER"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eff.TokenLimit != 1_000_000 || eff.Source != TypeRole {
+		t.Fatalf("role only: %+v", eff)
+	}
+
+	_ = store.UpsertPolicy(ctx, &Policy{
+		ResourceType: TypeUserBonus, ResourceID: userID, PeriodType: PeriodMonthly,
+		TokenLimit: 250_000, Enabled: true,
+	})
+	eff, err = svc.ResolveEffective(ctx, userID, []string{"VIEWER"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eff.TokenLimit != 1_250_000 || eff.ExtraTokenLimit != 250_000 || eff.RoleTokenLimit != 1_000_000 {
+		t.Fatalf("role+extra: %+v", eff)
+	}
+
+	_ = store.UpsertPolicy(ctx, &Policy{
+		ResourceType: TypeUser, ResourceID: userID, PeriodType: PeriodMonthly,
+		TokenLimit: 2_000_000, Enabled: true,
+	})
+	eff, err = svc.ResolveEffective(ctx, userID, []string{"VIEWER"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eff.Source != TypeUser || eff.TokenLimit != 2_250_000 || eff.ExceptionTokenLimit != 2_000_000 {
+		t.Fatalf("exception replaces role then extra adds: %+v", eff)
+	}
+	_, _ = store.AddUsage(ctx, TypeUser, userID, PeriodMonthly, 2_200_000, 0)
+	if err := svc.CheckUser(ctx, userID, []string{"VIEWER"}, 100_000, 0); err != ErrExceeded {
+		t.Fatalf("want exceeded at exception+extra, got %v", err)
+	}
+}
+
+func TestDeletePolicy(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	_ = store.UpsertPolicy(ctx, &Policy{
+		ResourceType: TypeUserBonus, ResourceID: "u-del", PeriodType: PeriodMonthly,
+		TokenLimit: 100, Enabled: true,
+	})
+	if err := store.DeletePolicy(ctx, TypeUserBonus, "u-del", PeriodMonthly); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetPolicy(ctx, TypeUserBonus, "u-del", PeriodMonthly); err != ErrNotFound {
+		t.Fatalf("want not found, got %v", err)
+	}
+	if err := store.DeletePolicy(ctx, TypeUserBonus, "u-del", ""); err != ErrNotFound {
+		t.Fatalf("repeat delete: %v", err)
+	}
+}
+
 func TestResolveUserPolicy_MultiRoleTakesMax(t *testing.T) {
 	ctx := context.Background()
 	svc := NewService(NewMemoryStore())

@@ -36,8 +36,8 @@ import (
 	"github.com/ai-employee-platform/server/internal/secret"
 	"github.com/ai-employee-platform/server/internal/session"
 	"github.com/ai-employee-platform/server/internal/workflowmcp"
-	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/workspace"
+	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/wsmember"
 )
 
@@ -115,6 +115,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/quotas/me", d.requireAuth(d.handleMyQuota))
 	mux.HandleFunc("POST /api/quotas", d.requirePerm("quota.update", d.handleUpsertQuota))
 	mux.HandleFunc("PUT /api/quotas", d.requirePerm("quota.update", d.handleUpsertQuota))
+	mux.HandleFunc("DELETE /api/quotas", d.requirePerm("quota.update", d.handleDeleteQuota))
 
 	mux.HandleFunc("POST /api/enrollment/tokens", d.requirePerm("enrollment.write", d.handleCreateToken))
 	mux.HandleFunc("POST /api/enrollment/enroll", d.handleEnroll)
@@ -176,8 +177,8 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/events", d.requirePerm("employee.read", d.handleSSE))
 
 	// Feishu / Secrets / Scheduler
-	mux.HandleFunc("GET /api/integrations/feishu/config", d.requirePerm("system.write", d.handleFeishuGetConfig))
-	mux.HandleFunc("PUT /api/integrations/feishu/config", d.requirePermStepUp("system.write", d.handleFeishuPutConfig))
+	mux.HandleFunc("GET /api/integrations/feishu/config", d.requirePerm("system.write", d.requireSuperAdmin(d.handleFeishuGetConfig)))
+	mux.HandleFunc("PUT /api/integrations/feishu/config", d.requirePermStepUp("system.write", d.requireSuperAdmin(d.handleFeishuPutConfig)))
 	mux.HandleFunc("GET /api/integrations/feishu/status", d.requireAuth(d.handleFeishuStatus))
 	mux.HandleFunc("POST /api/integrations/feishu/test-message", d.requirePerm("system.write", d.handleFeishuTestMessage))
 	mux.HandleFunc("GET /api/integrations/feishu/bindings", d.requirePerm("employee.read", d.handleListFeishuBindings))
@@ -504,12 +505,20 @@ func (d Deps) handleUpdateWorkstation(w http.ResponseWriter, r *http.Request, se
 		writeErr(w, http.StatusBadRequest, "工作站名称不能为空")
 		return
 	}
+	oldName := ""
+	if d.Workstations != nil && d.Workstations.Meta != nil {
+		oldName = d.Workstations.Meta.GetName(r.Context(), id)
+	}
 	if d.Workstations != nil && d.Workstations.Meta != nil {
 		if err := d.Workstations.Meta.Upsert(r.Context(), id, req.Name); err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
+	d.auditUser(r, sess, "workstation.update", map[string]string{
+		"id": id, "name": req.Name,
+		"summary": audit.FormatChange("名称", oldName, req.Name),
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "name": req.Name})
 }
 
@@ -537,7 +546,7 @@ type revokeReq struct {
 	Fingerprint string `json:"fingerprint"`
 }
 
-func (d Deps) handleRevoke(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleRevoke(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var req revokeReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Fingerprint == "" {
 		writeErr(w, http.StatusBadRequest, "需要 fingerprint")
@@ -547,6 +556,7 @@ func (d Deps) handleRevoke(w http.ResponseWriter, r *http.Request, _ *auth.Sessi
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
+	d.auditUser(r, sess, "workstation.cert.revoke", map[string]string{"fingerprint": req.Fingerprint})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
@@ -615,6 +625,9 @@ func (d Deps) handleUpdateEmployee(w http.ResponseWriter, r *http.Request, sess 
 	}
 	if v, ok := raw["default_provider"].(string); ok {
 		in.DefaultProvider = &v
+	}
+	if v, ok := raw["default_model"].(string); ok {
+		in.DefaultModel = &v
 	}
 	if v, ok := raw["workstation_id"].(string); ok {
 		in.WorkstationID = &v
@@ -816,10 +829,38 @@ func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request, sess *auth.
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
+func (d Deps) ensureUserQuota(w http.ResponseWriter, r *http.Request, sess *auth.Session) error {
+	if d.Quota == nil || sess == nil || sess.UserID == "" {
+		return nil
+	}
+	roles := sess.Roles
+	if u, err := d.Auth.Users().FindByID(r.Context(), sess.UserID); err == nil && u != nil && len(u.Roles) > 0 {
+		roles = u.Roles
+	}
+	if err := d.Quota.CheckUser(r.Context(), sess.UserID, roles, 1, 1); err != nil {
+		if err == quota.ErrExceeded {
+			writeErr(w, http.StatusTooManyRequests, "本月 Token 配额已用尽，无法创建新任务")
+			return err
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return err
+	}
+	return nil
+}
+
 func (d Deps) handleCreateJob(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var in job.CreateInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效请求体")
+		return
+	}
+	if in.CreatedBy == "" {
+		in.CreatedBy = sess.UserID
+	}
+	if in.Source == "" {
+		in.Source = job.SourceWeb
+	}
+	if err := d.ensureUserQuota(w, r, sess); err != nil {
 		return
 	}
 	j, dup, err := d.Jobs.Create(r.Context(), in, sess.UserID, clientIP(r))
@@ -922,10 +963,10 @@ func (d Deps) handleAudit(w http.ResponseWriter, r *http.Request, sess *auth.Ses
 
 func (d Deps) handleSettings(w http.ResponseWriter, _ *http.Request, _ *auth.Session) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"heartbeat_interval_sec": 5,
-		"offline_after_sec":      15,
+		"heartbeat_interval_sec":    5,
+		"offline_after_sec":         15,
 		"max_sessions_per_employee": 1,
-		"note": "Secret 类配置不在此回显",
+		"note":                      "Secret 类配置不在此回显",
 	})
 }
 
@@ -965,6 +1006,18 @@ func writeSSE(w http.ResponseWriter, flusher http.Flusher, ev eventbus.Event) {
 }
 
 type authed func(http.ResponseWriter, *http.Request, *auth.Session)
+
+func (d Deps) requireSuperAdmin(next authed) authed {
+	return func(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+		for _, role := range sess.Roles {
+			if role == "SUPER_ADMIN" {
+				next(w, r, sess)
+				return
+			}
+		}
+		writeErr(w, http.StatusForbidden, "仅超级管理员可配置飞书开放平台凭证")
+	}
+}
 
 func (d Deps) requireAuth(next authed) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1027,6 +1080,13 @@ func bearer(r *http.Request) string {
 		return strings.TrimSpace(h[7:])
 	}
 	return r.Header.Get("X-Session-Token")
+}
+
+func (d Deps) auditUser(r *http.Request, sess *auth.Session, action string, meta map[string]string) {
+	if d.Audit == nil || sess == nil || sess.UserID == "" {
+		return
+	}
+	d.Audit.Log(r.Context(), "USER", sess.UserID, action, "success", clientIP(r), meta)
 }
 
 func clientIP(r *http.Request) string {

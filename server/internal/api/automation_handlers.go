@@ -127,12 +127,18 @@ func (d Deps) handlePutCalendarItems(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 	var body struct {
-		Date  string                         `json:"date"`
-		Items []automation.CalendarItemInput `json:"items"`
+		Date     string                         `json:"date"`
+		RunClock string                         `json:"run_clock"`
+		Items    []automation.CalendarItemInput `json:"items"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Date == "" {
 		writeErr(w, http.StatusBadRequest, "需要 date 与 items")
 		return
+	}
+	if body.RunClock != "" {
+		for i := range body.Items {
+			body.Items[i].RunClock = body.RunClock
+		}
 	}
 	items, err := d.Automation.ReplaceCalendarItems(r.Context(), r.PathValue("id"), body.Date, body.Items, sess.UserID)
 	if err != nil {

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -118,7 +119,7 @@ func (d Deps) handleFeishuPutConfig(w http.ResponseWriter, r *http.Request, sess
 	writeJSON(w, http.StatusOK, d.Feishu.GetConfigPublic())
 }
 
-func (d Deps) handleFeishuBinding(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleFeishuBinding(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.Feishu == nil {
 		writeErr(w, http.StatusServiceUnavailable, "feishu 未启用")
 		return
@@ -133,10 +134,14 @@ func (d Deps) handleFeishuBinding(w http.ResponseWriter, r *http.Request, _ *aut
 		return
 	}
 	d.Feishu.UpsertBinding(b)
+	d.auditUser(r, sess, "feishu.binding.upsert", map[string]string{
+		"employee_id": b.EmployeeID, "alias": b.FeishuAlias,
+		"summary": fmt.Sprintf("员工 %s 绑定别名 @%s", b.EmployeeID, b.FeishuAlias),
+	})
 	writeJSON(w, http.StatusOK, b)
 }
 
-func (d Deps) handleDeleteFeishuBinding(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleDeleteFeishuBinding(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.Feishu == nil {
 		writeErr(w, http.StatusServiceUnavailable, "feishu 未启用")
 		return
@@ -154,6 +159,10 @@ func (d Deps) handleDeleteFeishuBinding(w http.ResponseWriter, r *http.Request, 
 		writeErr(w, http.StatusNotFound, "绑定不存在")
 		return
 	}
+	d.auditUser(r, sess, "feishu.binding.delete", map[string]string{
+		"employee_id": empID, "alias": alias,
+		"summary": fmt.Sprintf("删除员工 %s 的别名绑定 @%s", empID, alias),
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 

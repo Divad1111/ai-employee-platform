@@ -330,6 +330,13 @@ html {
   gap: 0.75rem;
 }
 
+.topbar-clock {
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary, #475569);
+  white-space: nowrap;
+}
+
 /* 主体内容区：宽屏弹性自适应，告别生硬空白 */
 .content {
   flex: 1;
@@ -1543,6 +1550,134 @@ button.auto-chip {
   margin: 0.4rem 0 0;
   color: #64748b;
   font-size: 0.88rem;
+}
+
+/* 任务时间线 */
+.job-timeline {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+}
+
+.job-tl-item {
+  display: grid;
+  grid-template-columns: 1.25rem 1fr;
+  gap: 0.85rem;
+}
+
+.job-tl-rail {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+
+.job-tl-rail::before {
+  content: '';
+  position: absolute;
+  top: 0.55rem;
+  bottom: -0.2rem;
+  width: 2px;
+  background: var(--border-subtle);
+}
+
+.job-tl-item.is-last .job-tl-rail::before {
+  display: none;
+}
+
+.job-tl-dot {
+  position: relative;
+  z-index: 1;
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-top: 0.85rem;
+  border-radius: 50%;
+  background: #94a3b8;
+  box-shadow: 0 0 0 3px #fff;
+}
+
+.job-tl-item.is-success .job-tl-dot { background: #10b981; }
+.job-tl-item.is-danger .job-tl-dot { background: #ef4444; }
+.job-tl-item.is-warning .job-tl-dot { background: #f59e0b; }
+.job-tl-item.is-info .job-tl-dot { background: #0ea5e9; }
+
+.job-tl-card {
+  margin-bottom: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  background: #f8fafc;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+}
+
+.job-tl-item.is-danger .job-tl-card { background: #fef2f2; border-color: #fecaca; }
+.job-tl-item.is-success .job-tl-card { background: #f0fdf4; border-color: #bbf7d0; }
+
+.job-tl-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: baseline;
+}
+
+.job-tl-head strong {
+  color: var(--text-primary);
+  font-size: 0.92rem;
+}
+
+.job-tl-head time {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.job-tl-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.75rem;
+  margin-top: 0.4rem;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.job-tl-error {
+  margin-top: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  background: #fff;
+  color: #991b1b;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.job-tl-note,
+.job-tl-reply {
+  margin-top: 0.45rem;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  color: var(--text-secondary);
+}
+
+.job-tl-reply { color: var(--text-primary); }
+
+.job-tl-raw-btn {
+  margin-top: 0.45rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.job-tl-raw {
+  margin: 0.4rem 0 0;
+  padding: 0.5rem;
+  font-size: 0.75rem;
+  background: #fff;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  white-space: pre-wrap;
 }
 
 /* 移动与平板端响应式断点 */

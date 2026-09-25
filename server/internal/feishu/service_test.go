@@ -23,8 +23,8 @@ type fakeJobs struct {
 	prompts []string
 }
 
-func (f *fakeJobs) CreateFromFeishu(_ context.Context, employeeID, prompt, idem, chat, msg string) (string, error) {
-	f.created = append(f.created, employeeID+"|"+idem)
+func (f *fakeJobs) CreateFromFeishu(_ context.Context, employeeID, prompt, idem, chat, msg, sender string) (string, error) {
+	f.created = append(f.created, employeeID+"|"+idem+"|"+sender)
 	f.prompts = append(f.prompts, prompt)
 	return "JOB-1", nil
 }
@@ -50,6 +50,11 @@ func TestParseTargetAliasAndEmpID(t *testing.T) {
 	id, prompt, err = s.ParseTarget("/emp alice ship it")
 	if err != nil || id != "EMP-A" || prompt != "ship it" {
 		t.Fatal(id, prompt, err)
+	}
+	s.UpsertBinding(feishu.Binding{EmployeeID: "EMP-K", FeishuAlias: "可乐1"})
+	id, prompt, err = s.ParseTarget("@AI员工 /emp 可乐1 你是谁，用的什么模型")
+	if err != nil || id != "EMP-K" || prompt != "你是谁，用的什么模型" {
+		t.Fatalf("群里先 @机器人再 /emp 应能派单: id=%s prompt=%q err=%v", id, prompt, err)
 	}
 }
 
@@ -107,14 +112,14 @@ func TestBridgeCreatesJob(t *testing.T) {
 	aud := audit.NewMemory()
 	bus := eventbus.New(10)
 	empSvc := employee.NewService(employee.NewMemoryStore(), aud, bus)
-	e, _ := empSvc.Create(ctx, employee.CreateInput{Name: "A", WorkstationID: "WS-1", WorkspaceID: "W1"}, "u", "")
+	e, _ := empSvc.Create(ctx, employee.CreateInput{Name: "A", WorkstationID: "WS-1", WorkspaceID: "W1", OwnerUserID: "user-1"}, "u", "")
 	st := employee.StatusActive
 	_, _ = empSvc.Update(ctx, e.ID, employee.UpdateInput{Status: &st}, "u", "")
 	jobSvc := job.NewService(job.NewMemoryStore(), aud, bus)
 	msgSvc := message.NewService(message.NewMemoryStore(), aud)
 	v, _ := secret.NewMemoryVault()
 	fs := feishu.NewService(v)
-	fs.UpsertBinding(feishu.Binding{EmployeeID: e.ID, FeishuAlias: "dev"})
+	fs.UpsertBinding(feishu.Binding{EmployeeID: e.ID, FeishuAlias: "dev", FeishuOpenID: "u1"})
 	sender := &feishu.MemorySender{}
 	fs.Sender = sender
 	notify := notification.New(fs, bus, jobSvc)
@@ -129,7 +134,7 @@ func TestBridgeCreatesJob(t *testing.T) {
 		t.Fatal(jobID, dup, err)
 	}
 	j, _ := jobSvc.Get(ctx, jobID)
-	if j.Prompt == "" {
+	if j.Prompt == "" || j.CreatedBy != "user-1" {
 		t.Fatal(j)
 	}
 	j.Status = job.StatusSuccess
@@ -343,6 +348,21 @@ func TestHandleMessageRequiresExplicitMention(t *testing.T) {
 		t.Fatalf("群聊未 @ 不应建任务")
 	}
 
+	// 群里 @ 了但别名/格式不对：要回格式提示，不能当没看见
+	_, _, err = s.HandleMessage(context.Background(), feishu.IncomingEvent{
+		EventID: "g2", MessageID: "mg2", ChatID: "oc_group", ChatType: "group",
+		SenderOpenID: "ou_1", Text: "@不存在的员工 帮我看看",
+	})
+	if err != feishu.ErrNoEmployee {
+		t.Fatalf("错误别名应返回 ErrNoEmployee, got %v", err)
+	}
+	if len(sender.Sent) != 1 || !strings.Contains(sender.Sent[0].Content, "请") {
+		t.Fatalf("群聊格式错误应回复提示，实际 %#v", sender.Sent)
+	}
+	if len(fj.created) != 0 {
+		t.Fatalf("格式错误不应建任务")
+	}
+
 	// 私聊未 @：只回提示卡，不建任务
 	_, _, err = s.HandleMessage(context.Background(), feishu.IncomingEvent{
 		EventID: "p1", MessageID: "mp1", ChatID: "oc_p2p", ChatType: "p2p",
@@ -351,12 +371,12 @@ func TestHandleMessageRequiresExplicitMention(t *testing.T) {
 	if err != feishu.ErrNoEmployee {
 		t.Fatalf("私聊未 @ 应返回 ErrNoEmployee, got %v", err)
 	}
-	if len(sender.Sent) != 1 {
-		t.Fatalf("私聊未 @ 应回复 1 条提示，实际 Sent=%d", len(sender.Sent))
+	if len(sender.Sent) != 2 {
+		t.Fatalf("私聊未 @ 应再回复 1 条提示，实际 Sent=%d", len(sender.Sent))
 	}
-	if !strings.Contains(sender.Sent[0].Content, "请@对应员工执行") &&
-		!strings.Contains(sender.Sent[0].Content, "@对应员工") {
-		t.Fatalf("提示卡内容不符合预期: %s", sender.Sent[0].Content)
+	if !strings.Contains(sender.Sent[1].Content, "请@对应员工执行") &&
+		!strings.Contains(sender.Sent[1].Content, "@对应员工") {
+		t.Fatalf("提示卡内容不符合预期: %s", sender.Sent[1].Content)
 	}
 	if len(fj.created) != 0 {
 		t.Fatalf("私聊未 @ 不应建任务")
@@ -374,3 +394,65 @@ func TestHandleMessageRequiresExplicitMention(t *testing.T) {
 		t.Fatalf("私聊 @ 应建 1 个任务, got %d", len(fj.created))
 	}
 }
+
+func TestAutoBindFromMention(t *testing.T) {
+	v, _ := secret.NewMemoryVault()
+	s := feishu.NewService(v)
+	s.UpsertBinding(feishu.Binding{EmployeeID: "e1", FeishuAlias: "可乐"})
+
+	p2p := s.AutoBindFromMention("e1", "ou_user", "oc_p2p", false)
+	if !p2p.OpenBoundNow || p2p.ChatBoundNow {
+		t.Fatalf("单聊应只绑定 OpenID: %+v", p2p)
+	}
+	if b := s.BindingByEmployee("e1"); b == nil || b.FeishuOpenID != "ou_user" || b.ChatID != "" {
+		t.Fatalf("单聊写入不符: %+v", b)
+	}
+	again := s.AutoBindFromMention("e1", "ou_user", "oc_p2p", false)
+	if again.OpenBoundNow || !strings.Contains(feishu.FormatIdentityNotice(again), "ou_user") {
+		t.Fatalf("已绑定仍应告知 OpenID: %+v %s", again, feishu.FormatIdentityNotice(again))
+	}
+
+	grp := s.AutoBindFromMention("e1", "ou_user", "oc_group", true)
+	if !grp.ChatBoundNow {
+		t.Fatalf("群聊应补默认群: %+v", grp)
+	}
+	if b := s.BindingByEmployee("e1"); b == nil || b.ChatID != "oc_group" || b.FeishuOpenID != "ou_user" {
+		t.Fatalf("群聊写入不符: %+v", b)
+	}
+	note := feishu.FormatIdentityNotice(s.AutoBindFromMention("e1", "ou_user", "oc_group", true))
+	if !strings.Contains(note, "ou_user") || !strings.Contains(note, "oc_group") || strings.Contains(note, "本次已自动绑定") {
+		t.Fatalf("已绑定回执应带两个 ID 且不再标本次绑定: %s", note)
+	}
+}
+
+func TestResolveTargetChatAndUserName(t *testing.T) {
+	v, _ := secret.NewMemoryVault()
+	s := feishu.NewService(v)
+
+	// 1. 无绑定时，返回空
+	if target := s.ResolveTargetChat("e1"); target != "" {
+		t.Fatalf("无绑定期望空，得到 %s", target)
+	}
+
+	// 2. 仅有 ChatID，返回 ChatID
+	s.UpsertBinding(feishu.Binding{EmployeeID: "e1", FeishuAlias: "bot", ChatID: "oc_group_1"})
+	if target := s.ResolveTargetChat("e1"); target != "oc_group_1" {
+		t.Fatalf("期望 oc_group_1，得到 %s", target)
+	}
+
+	// 3. 有 OpenID 时，优先返回 OpenID
+	s.UpsertBinding(feishu.Binding{EmployeeID: "e1", FeishuAlias: "bot", FeishuOpenID: "ou_user_1", ChatID: "oc_group_1"})
+	if target := s.ResolveTargetChat("e1"); target != "ou_user_1" {
+		t.Fatalf("期望 ou_user_1，得到 %s", target)
+	}
+
+	// 4. 姓名缓存与解析
+	s.CacheUserName("ou_user_1", "张小三")
+	if name := s.ResolveUserName(context.Background(), "ou_user_1"); name != "张小三" {
+		t.Fatalf("期望获取缓存姓名 张小三，得到 %s", name)
+	}
+	if name := s.ResolveUserName(context.Background(), "ou_unknown"); name != "" {
+		t.Fatalf("未知用户未连接真实接口时期望空，得到 %s", name)
+	}
+}
+

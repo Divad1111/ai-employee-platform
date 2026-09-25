@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ai-employee-platform/server/internal/audit"
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/idgen"
 )
@@ -20,12 +21,12 @@ const (
 )
 
 // 错误。
-	var (
-		ErrNotFound      = errors.New("employee 不存在")
-		ErrInvalidInput  = errors.New("参数无效")
-		ErrAlreadyExists = errors.New("employee 已存在")
-		ErrWSAccessDenied = errors.New("WORKSTATION_ACCESS_DENIED")
-	)
+var (
+	ErrNotFound       = errors.New("employee 不存在")
+	ErrInvalidInput   = errors.New("参数无效")
+	ErrAlreadyExists  = errors.New("employee 已存在")
+	ErrWSAccessDenied = errors.New("WORKSTATION_ACCESS_DENIED")
+)
 
 // Employee 领域对象。
 type Employee struct {
@@ -34,6 +35,7 @@ type Employee struct {
 	Description       string    `json:"description"`
 	RoleSummary       string    `json:"role_summary"`
 	DefaultProvider   string    `json:"default_provider"`
+	DefaultModel      string    `json:"default_model"`
 	WorkstationID     string    `json:"workstation_id"`
 	WorkspaceID       string    `json:"workspace_id"`
 	PermissionProfile string    `json:"permission_profile"`
@@ -49,6 +51,7 @@ type CreateInput struct {
 	Description       string `json:"description"`
 	RoleSummary       string `json:"role_summary"`
 	DefaultProvider   string `json:"default_provider"`
+	DefaultModel      string `json:"default_model"`
 	WorkstationID     string `json:"workstation_id"`
 	WorkspaceID       string `json:"workspace_id"`
 	PermissionProfile string `json:"permission_profile"`
@@ -61,6 +64,7 @@ type UpdateInput struct {
 	Description       *string
 	RoleSummary       *string
 	DefaultProvider   *string
+	DefaultModel      *string
 	WorkstationID     *string
 	WorkspaceID       *string
 	PermissionProfile *string
@@ -110,6 +114,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string
 		Description:       in.Description,
 		RoleSummary:       in.RoleSummary,
 		DefaultProvider:   in.DefaultProvider,
+		DefaultModel:      in.DefaultModel,
 		WorkstationID:     in.WorkstationID,
 		WorkspaceID:       in.WorkspaceID,
 		PermissionProfile: in.PermissionProfile,
@@ -132,6 +137,17 @@ func (s *Service) Update(ctx context.Context, id string, in UpdateInput, actorID
 	if err != nil || e == nil {
 		return nil, ErrNotFound
 	}
+	changes := []string{
+		audit.FormatChange("名称", e.Name, derefOr(in.Name, e.Name)),
+		audit.FormatChange("描述", e.Description, derefOr(in.Description, e.Description)),
+		audit.FormatChange("角色摘要", e.RoleSummary, derefOr(in.RoleSummary, e.RoleSummary)),
+		audit.FormatChange("驱动引擎", e.DefaultProvider, derefOr(in.DefaultProvider, e.DefaultProvider)),
+		audit.FormatChange("模型", e.DefaultModel, derefOr(in.DefaultModel, e.DefaultModel)),
+		audit.FormatChange("工作站", e.WorkstationID, derefOr(in.WorkstationID, e.WorkstationID)),
+		audit.FormatChange("工作区", e.WorkspaceID, derefOr(in.WorkspaceID, e.WorkspaceID)),
+		audit.FormatChange("权限配置", e.PermissionProfile, derefOr(in.PermissionProfile, e.PermissionProfile)),
+		audit.FormatChange("状态", e.Status, derefOr(in.Status, e.Status)),
+	}
 	if in.Name != nil {
 		e.Name = *in.Name
 	}
@@ -143,6 +159,9 @@ func (s *Service) Update(ctx context.Context, id string, in UpdateInput, actorID
 	}
 	if in.DefaultProvider != nil {
 		e.DefaultProvider = *in.DefaultProvider
+	}
+	if in.DefaultModel != nil {
+		e.DefaultModel = *in.DefaultModel
 	}
 	if in.WorkstationID != nil {
 		e.WorkstationID = *in.WorkstationID
@@ -160,7 +179,9 @@ func (s *Service) Update(ctx context.Context, id string, in UpdateInput, actorID
 	if err := s.store.Save(ctx, e); err != nil {
 		return nil, err
 	}
-	s.audit.Log(ctx, "USER", actorID, "employee.update", "success", ip, map[string]string{"id": id})
+	s.audit.Log(ctx, "USER", actorID, "employee.update", "success", ip, map[string]string{
+		"id": id, "name": e.Name, "summary": audit.JoinSummary(changes...),
+	})
 	s.publish(ctx, id, "update")
 	return e, nil
 }
@@ -195,6 +216,13 @@ func (s *Service) Get(ctx context.Context, id string) (*Employee, error) {
 
 func (s *Service) List(ctx context.Context) ([]*Employee, error) {
 	return s.store.List(ctx)
+}
+
+func derefOr(p *string, fallback string) string {
+	if p == nil {
+		return fallback
+	}
+	return *p
 }
 
 func (s *Service) publish(ctx context.Context, id, action string) {

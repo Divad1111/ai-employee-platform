@@ -34,14 +34,16 @@ type CommandPusher interface {
 
 // Service 调度器。
 type Service struct {
-	mu                 sync.Mutex
-	Jobs               *job.Service
-	Employees          *employee.Service
-	Workstations       *workstation.Service
-	Workspaces         *workspace.Service
-	Presence           *reliability.Presence
-	Pusher             CommandPusher
-	FullPusher         FullCommandPusher
+	mu           sync.Mutex
+	Jobs         *job.Service
+	Employees    *employee.Service
+	Workstations *workstation.Service
+	Workspaces   *workspace.Service
+	Presence     *reliability.Presence
+	Pusher       CommandPusher
+	FullPusher   FullCommandPusher
+	// OnTerminal 调度器自行把任务打到终态时回调，用于向飞书回执失败。
+	OnTerminal         func(ctx context.Context, j *job.Job)
 	WorkflowMCP        *workflowmcp.Service
 	MCPAuth            *mcpauth.Service
 	MCPPublicURL       string // 例如 http://127.0.0.1:8080/mcp
@@ -131,6 +133,11 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (*job.Job, erro
 		payload := map[string]string{
 			"prompt":       j.Prompt,
 			"workspace_id": j.WorkspaceID,
+		}
+		if s.Employees != nil && j.EmployeeID != "" {
+			if e, err := s.Employees.Get(ctx, j.EmployeeID); err == nil && e != nil && e.DefaultModel != "" {
+				payload["model"] = e.DefaultModel
+			}
 		}
 		workspacePath := ""
 		if s.Workspaces != nil && j.WorkspaceID != "" {
@@ -245,12 +252,20 @@ func (s *Service) Tick(ctx context.Context) (scheduled int) {
 			if startedAt.IsZero() {
 				startedAt = j.CreatedAt
 			}
+			// 命令还没送到工作站时先不判失败，等重连续传。
+			if s.startStillPending(j.WorkstationID, j.ID) && now.Sub(startedAt) <= 10*time.Minute {
+				continue
+			}
 			if now.Sub(startedAt) > 60*time.Second {
-				_, _ = s.Jobs.Transition(ctx, j.ID, job.StatusFailed, "scheduler", "", map[string]string{
+				uj, terr := s.Jobs.Transition(ctx, j.ID, job.StatusFailed, "scheduler", "", map[string]string{
 					"reason": "工作站节点启动超时 (60s 无响应)",
+					"error":  "工作站节点启动超时 (60s 无响应)",
 				})
 				if j.WorkstationID != "" {
 					s.Release(j.WorkstationID)
+				}
+				if terr == nil && uj != nil && s.OnTerminal != nil {
+					s.OnTerminal(ctx, uj)
 				}
 			}
 		}
@@ -269,4 +284,17 @@ func (s *Service) Tick(ctx context.Context) (scheduled int) {
 		}
 	}
 	return scheduled
+}
+
+func (s *Service) startStillPending(wsID, jobID string) bool {
+	type pending interface {
+		StartCommandUnacked(wsID, jobID string) bool
+	}
+	if p, ok := s.Pusher.(pending); ok {
+		return p.StartCommandUnacked(wsID, jobID)
+	}
+	if p, ok := s.FullPusher.(pending); ok {
+		return p.StartCommandUnacked(wsID, jobID)
+	}
+	return false
 }

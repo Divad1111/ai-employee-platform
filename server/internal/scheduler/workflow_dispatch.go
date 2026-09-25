@@ -79,6 +79,11 @@ func (s *Service) buildStartJobPayload(ctx context.Context, employeeID, prompt, 
 		WorkspacePath: workspacePath,
 		Provider:      "cursor",
 	}
+	if s.Employees != nil {
+		if e, err := s.Employees.Get(ctx, employeeID); err == nil && e != nil && e.DefaultProvider != "" {
+			start.Provider = e.DefaultProvider
+		}
+	}
 	if s.WorkflowMCP == nil {
 		return start, nil
 	}

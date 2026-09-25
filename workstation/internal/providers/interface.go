@@ -27,6 +27,14 @@ type UpdateSpec struct {
 	Version string
 }
 
+// Model 工作站上报的可选模型。
+type Model struct {
+	// ID 传给引擎的模型标识
+	ID string
+	// Label 给人看的名称；空则用 ID
+	Label string
+}
+
 // StartSpec 描述启动 Agent Session 的参数。
 type StartSpec struct {
 	// EmployeeID 员工 ID
@@ -35,6 +43,8 @@ type StartSpec struct {
 	WorkspacePath string
 	// SessionID 会话 ID（可由上层生成）
 	SessionID string
+	// Model 本次会话使用的模型；空表示引擎默认
+	Model string
 	// MCPServers 注入 ACP session/new 的 MCP 配置（任意 JSON 可序列化结构）
 	MCPServers []any
 }

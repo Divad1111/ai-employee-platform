@@ -26,7 +26,7 @@ export type CalendarItem = {
   seq: number
   employee_id: string
   prompt: string
-  enabled: boolean
+  run_clock?: string
 }
 
 export type AutomationRun = {
@@ -64,8 +64,17 @@ export function listCalendarItems(id: string, date?: string) {
   return apiGet<{ items: CalendarItem[] }>(`/automations/${id}/calendar-items${q}`)
 }
 
-export function putCalendarItems(id: string, date: string, items: Array<{ employee_id: string; prompt: string; enabled?: boolean }>) {
-  return apiPut<{ items: CalendarItem[] }>(`/automations/${id}/calendar-items`, { date, items })
+export function putCalendarItems(
+  id: string,
+  date: string,
+  items: Array<{ employee_id: string; prompt: string; enabled?: boolean }>,
+  runClock: string,
+) {
+  return apiPut<{ items: CalendarItem[] }>(`/automations/${id}/calendar-items`, {
+    date,
+    run_clock: runClock,
+    items,
+  })
 }
 
 export function listRuns(id: string, limit = 30) {

@@ -9,6 +9,7 @@ import { IconRefresh } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
 import { roleDisplayName } from '../lib/rbacLabels'
+import { formatTime } from '../lib/time'
 import { usePerm } from '../stores/permissions'
 
 type ActiveJob = {
@@ -22,8 +23,9 @@ type WsRow = {
   id: string
   name: string
   status: string
-  cpu_percent: number
-  memory_percent: number
+  cpu_percent?: number
+  memory_percent?: number
+  disk_percent?: number
 }
 
 type MyQuota = {
@@ -34,11 +36,30 @@ type MyQuota = {
   requests_used: number
   token_limit: number
   request_limit: number
+  input_tokens?: number
+  output_tokens?: number
+  role_token_limit?: number
+  exception_token_limit?: number
+  extra_token_limit?: number
+  has_exception?: boolean
+  has_extra?: boolean
   unlimited: boolean
   source: string
   source_role?: string
   usage_percent: number
   remaining: number
+  by_workstation?: UsageBucket[]
+  by_employee?: UsageBucket[]
+  by_agent?: UsageBucket[]
+}
+
+type UsageBucket = {
+  id?: string
+  name: string
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  jobs: number
 }
 
 type Dash = {
@@ -77,7 +98,7 @@ export function DashboardPage() {
       ])
       setData(d)
       setEmpMap(Object.fromEntries((empData.items ?? []).map((e) => [e.id, e.name])))
-      setUpdatedAt(new Date().toLocaleTimeString())
+      setUpdatedAt(formatTime())
       setError('')
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载失败')
@@ -99,11 +120,16 @@ export function DashboardPage() {
       ? q.source === 'none'
         ? '未配置策略（不限）'
         : '不限'
-      : q.source === 'USER'
-        ? '个人例外策略'
-        : q.source === 'ROLE'
-          ? `角色预设 · ${roleDisplayName(q.source_role || '')}`
-          : '未配置策略'
+      : [
+          q.has_exception
+            ? '用户例外（已替换角色基数）'
+            : q.source === 'ROLE'
+              ? `角色预设 · ${roleDisplayName(q.source_role || '')}`
+              : '未配置角色基数',
+          q.has_extra ? '含用户额外' : '',
+        ]
+          .filter(Boolean)
+          .join(' + ')
     : '—'
 
   return (
@@ -132,7 +158,7 @@ export function DashboardPage() {
           {
             step: '2',
             title: '本人 Token 配额水位',
-            desc: '展示当前登录账号本月 Token 已用量与有效限额（个人例外优先，否则取角色预设），便于及时发现额度耗尽风险。',
+            desc: '展示当前账号本月 Token 已用量。有效限额 =（用户例外或角色预设）+ 用户额外，并分项列出便于核对。',
             tag: '配额监控',
           },
           {
@@ -216,7 +242,7 @@ export function DashboardPage() {
                       </div>
                     </div>
                     <div>
-                      <div className="stat-label">月度限额</div>
+                      <div className="stat-label">有效限额</div>
                       <div className="stat-value" style={{ fontSize: '1.55rem' }}>
                         {q.unlimited || q.token_limit <= 0 ? '不限' : formatTokens(q.token_limit)}
                       </div>
@@ -237,6 +263,16 @@ export function DashboardPage() {
                       </div>
                     </div>
                   </div>
+                  <p className="muted" style={{ margin: '0 0 0.75rem', fontSize: '0.85rem' }}>
+                    输入 {formatTokens(q.input_tokens || 0)} · 输出 {formatTokens(q.output_tokens || 0)} · 合计 {formatTokens(q.tokens_used)}
+                  </p>
+                  <p className="muted" style={{ margin: '0 0 0.75rem', fontSize: '0.85rem' }}>
+                    角色配额 {q.role_token_limit && q.role_token_limit > 0 ? formatTokens(q.role_token_limit) : '不限或不适用'}
+                    {' · '}
+                    用户例外 {q.has_exception ? formatTokens(q.exception_token_limit || 0) : '未设置（沿用角色）'}
+                    {' · '}
+                    用户额外 {q.has_extra ? formatTokens(q.extra_token_limit || 0) : '未设置'}
+                  </p>
                   {q.unlimited || q.token_limit <= 0 ? (
                     <p className="muted" style={{ margin: 0, fontSize: '0.85rem' }}>
                       当前账号未设置 Token 上限（或限额为 0 表示不限制）。
@@ -264,6 +300,11 @@ export function DashboardPage() {
                       </div>
                     </>
                   )}
+                  <UsageBreakdown
+                    byWorkstation={q.by_workstation}
+                    byEmployee={q.by_employee}
+                    byAgent={q.by_agent}
+                  />
                 </>
               ) : (
                 <p className="muted" style={{ margin: 0 }}>
@@ -326,7 +367,7 @@ export function DashboardPage() {
             <div className="panel-header">
               <div>
                 <h2>工作站节点与实时硬件负载</h2>
-                <p>实时心跳监控 · 调度资源决策依据</p>
+                <p>来自工作站心跳 · CPU、内存与磁盘均为本机占用</p>
               </div>
               <Link to="/workstations">节点列表 →</Link>
             </div>
@@ -338,8 +379,9 @@ export function DashboardPage() {
                     <tr>
                       <th>计算节点名称</th>
                       <th>节点状态</th>
-                      <th style={{ width: '220px' }}>CPU 负载率</th>
-                      <th style={{ width: '220px' }}>内存占用率</th>
+                      <th style={{ width: '180px' }}>CPU</th>
+                      <th style={{ width: '180px' }}>内存</th>
+                      <th style={{ width: '180px' }}>磁盘</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -355,34 +397,9 @@ export function DashboardPage() {
                         <td>
                           <StatusBadge status={w.status} />
                         </td>
-                        <td>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
-                            <span>{w.cpu_percent.toFixed(1)}%</span>
-                          </div>
-                          <div className="progress-bar-wrap">
-                            <div
-                              className="progress-bar-fill"
-                              style={{
-                                width: `${Math.min(w.cpu_percent, 100)}%`,
-                                background: w.cpu_percent > 85 ? 'var(--danger)' : 'var(--brand-500)',
-                              }}
-                            />
-                          </div>
-                        </td>
-                        <td>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
-                            <span>{w.memory_percent.toFixed(1)}%</span>
-                          </div>
-                          <div className="progress-bar-wrap">
-                            <div
-                              className="progress-bar-fill"
-                              style={{
-                                width: `${Math.min(w.memory_percent, 100)}%`,
-                                background: w.memory_percent > 85 ? 'var(--danger)' : 'var(--brand-500)',
-                              }}
-                            />
-                          </div>
-                        </td>
+                        <td>{loadBar(w.cpu_percent)}</td>
+                        <td>{loadBar(w.memory_percent)}</td>
+                        <td>{loadBar(w.disk_percent)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -397,5 +414,102 @@ export function DashboardPage() {
         <div className="empty-tip">正在获取系统监控数据...</div>
       )}
     </section>
+  )
+}
+
+function loadBar(value?: number) {
+  const n = Number.isFinite(value) ? Math.min(Math.max(value || 0, 0), 100) : 0
+  return (
+    <>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
+        <span>{n.toFixed(1)}%</span>
+      </div>
+      <div className="progress-bar-wrap">
+        <div
+          className="progress-bar-fill"
+          style={{
+            width: `${n}%`,
+            background: n > 85 ? 'var(--danger)' : 'var(--brand-500)',
+          }}
+        />
+      </div>
+    </>
+  )
+}
+
+function UsageBreakdown({
+  byWorkstation,
+  byEmployee,
+  byAgent,
+}: {
+  byWorkstation?: UsageBucket[]
+  byEmployee?: UsageBucket[]
+  byAgent?: UsageBucket[]
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div
+      style={{
+        marginTop: '1rem',
+        borderTop: '1px solid var(--border-subtle)',
+        paddingTop: '0.75rem',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
+        <div>
+          <div className="stat-label" style={{ margin: 0 }}>用量分布</div>
+          <p className="muted" style={{ margin: '0.2rem 0 0', fontSize: '0.82rem' }}>
+            按工作站、数字员工与 Agent 汇总本月消耗
+          </p>
+        </div>
+        <button type="button" className="btn-ghost btn-sm" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+          {open ? '收起' : '展开'}
+        </button>
+      </div>
+      {open ? (
+        <div>
+          <UsageSplit title="按工作站" rows={byWorkstation} />
+          <UsageSplit title="按数字员工" rows={byEmployee} />
+          <UsageSplit title="按 Agent" rows={byAgent} />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function UsageSplit({ title, rows }: { title: string; rows?: UsageBucket[] }) {
+  const items = rows ?? []
+  return (
+    <div style={{ marginTop: '1rem' }}>
+      <div className="stat-label" style={{ marginBottom: '0.4rem' }}>{title}</div>
+      {items.length === 0 ? (
+        <p className="muted" style={{ margin: 0, fontSize: '0.84rem' }}>本月还没有计入用量的任务</p>
+      ) : (
+        <div className="table-wrapper">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>任务数</th>
+                <th>输入</th>
+                <th>输出</th>
+                <th>合计</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((row) => (
+                <tr key={row.id || row.name}>
+                  <td>{row.name}</td>
+                  <td>{row.jobs}</td>
+                  <td>{formatTokens(row.input_tokens)}</td>
+                  <td>{formatTokens(row.output_tokens)}</td>
+                  <td>{formatTokens(row.total_tokens)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   )
 }

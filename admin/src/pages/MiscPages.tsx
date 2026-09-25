@@ -3,12 +3,13 @@
  */
 import { useEffect, useState } from 'react'
 import { apiGet, apiPost } from '../api/client'
-import { IconFileText, IconRefresh } from '../components/Icons'
+import { IconRefresh } from '../components/Icons'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
 import { EntityName } from '../components/EntityName'
 import { AlertDialog } from '../components/AlertDialog'
 import { roleDisplayName } from '../lib/rbacLabels'
 import { getUser } from '../stores/session'
+import { formatDateTime } from '../lib/time'
 
 type AuditItem = {
   id: number
@@ -24,8 +25,9 @@ type AuditItem = {
 /** 审计操作主体展示：优先后端 actor_name，禁止把所有 USER 标成管理员 */
 function formatAuditActor(a: AuditItem, currentUser: ReturnType<typeof getUser>): string {
   if (a.metadata?.actor_name) return a.metadata.actor_name
-  if (a.actor_type === 'SYSTEM') return '系统内核 (System)'
-  if (a.actor_type === 'EMPLOYEE') return 'AI 员工'
+  if (a.actor_type === 'SYSTEM') return '系统'
+  if (a.actor_type === 'EMPLOYEE') return '数字员工'
+  if (a.actor_type === 'WORKSTATION') return '工作站'
   if (a.actor_id && a.actor_id === currentUser?.id) {
     const role = roleDisplayName(currentUser.roles?.[0] || 'VIEWER')
     return `${currentUser.username}（${role} · 当前账号）`
@@ -33,6 +35,48 @@ function formatAuditActor(a: AuditItem, currentUser: ReturnType<typeof getUser>)
   if (a.metadata?.username) return a.metadata.username
   if (a.actor_id) return a.actor_id
   return '—'
+}
+
+function formatAuditDetail(a: AuditItem): string {
+  const m = a.metadata || {}
+  if (m.summary) return m.summary
+  if (m.before || m.after) {
+    const field = m.field || '内容'
+    return `${field}：${m.before || '（空）'} → ${m.after || '（空）'}`
+  }
+  const skip = new Set(['actor_name', 'username'])
+  const sourceNames: Record<string, string> = {
+    feishu: '飞书',
+    cron: '定时任务',
+    calendar: '日历任务',
+    webhook: 'Webhook',
+    web: '控制台',
+    api: 'API',
+    system: '系统',
+  }
+  const labels: Record<string, string> = {
+    role: '角色',
+    permission: '权限',
+    id: '对象',
+    name: '名称',
+    alias: '别名',
+    employee_id: '员工',
+    resource_type: '资源类型',
+    resource_id: '资源',
+    token_limit: 'Token 限额',
+    prompt: '提示词',
+    source: '来源',
+    status: '状态',
+    workstation_id: '工作站',
+    client_name: '客户端',
+  }
+  const parts = Object.entries(m)
+    .filter(([k, v]) => !skip.has(k) && v)
+    .map(([k, v]) => {
+      const val = k === 'source' ? (sourceNames[v.toLowerCase()] || v) : v
+      return `${labels[k] || k}：${val}`
+    })
+  return parts.length ? parts.join('；') : '—'
 }
 
 export function AuditPage() {
@@ -85,7 +129,7 @@ export function AuditPage() {
           {
             step: '3',
             title: '四元组责任追溯',
-            desc: '完整沉淀 操作人 (Actor)、动作 (Action)、决策结果 (Result) 及 来源 IP 地址。',
+            desc: '列表展示操作人、客户端、动作，以及变更前后说明（例如权限范围从「仅本人」改为「全部资源」）。',
             tag: '可信溯源',
           },
         ]}
@@ -95,16 +139,19 @@ export function AuditPage() {
         <div className="panel-header">
           <div>
             <h2>操作检索与过滤</h2>
-            <p>支持按动作 (例: secret、totp、approval)、操作人、客户端 IP 全文模糊检索最近 50 条审计流水</p>
+            <p>支持按中文动作（如修改角色权限、调整配额）、用户名、客户端（IP/飞书人员）模糊检索最近 50 条</p>
           </div>
         </div>
         <div className="inline-form">
           <input
-            placeholder="输入关键字检索 (如: totp, secret, approve, admin, 127.0.0.1)"
+            placeholder="按动作、用户名或客户端（IP/人员名）检索，如 修改角色、admin、张卫、127.0.0.1"
             value={action}
             onChange={(e) => setAction(e.target.value)}
-            style={{ width: '380px' }}
+            style={{ width: '420px' }}
           />
+          <button type="button" onClick={() => load()}>
+            检索
+          </button>
           {action ? (
             <button type="button" className="btn-ghost" onClick={() => setAction('')}>
               清除筛选
@@ -126,48 +173,48 @@ export function AuditPage() {
             <thead>
               <tr>
                 <th>发生时间</th>
-                <th>操作主体 (Actor)</th>
-                <th>操作行为 (Action)</th>
-                <th>执行结果 (Result)</th>
+                <th>操作人</th>
+                <th>客户端</th>
+                <th>操作</th>
+                <th>变更内容</th>
+                <th>结果</th>
               </tr>
             </thead>
             <tbody>
               {items.map((a) => (
                 <tr key={a.id}>
                   <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                    {new Date(a.created_at).toLocaleString()}
+                    {formatDateTime(a.created_at)}
                   </td>
                   <td>
                     <EntityName
                       name={formatAuditActor(a, currentUser)}
-                      id={a.actor_id}
-                      sub={a.actor_type ? `${a.actor_type}${a.ip ? ` · ${a.ip}` : ''}` : undefined}
+                      sub={a.metadata?.actor_type_label || undefined}
                     />
                   </td>
+                  <td className="mono">{a.metadata?.client_name || a.ip || '—'}</td>
                   <td>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                      <IconFileText size={15} style={{ color: 'var(--brand-600)' }} />
-                      <span className="mono" style={{ fontWeight: 600 }}>{a.action}</span>
-                    </div>
+                    <div style={{ fontWeight: 600 }}>{a.metadata?.action_label || a.action}</div>
                   </td>
+                  <td style={{ fontSize: '0.84rem', maxWidth: 420 }}>{formatAuditDetail(a)}</td>
                   <td>
                     <span
                       className={`badge ${
-                        a.result === 'SUCCESS' || a.result === 'ALLOW' || a.result === 'OK'
+                        a.result === 'SUCCESS' || a.result === 'ALLOW' || a.result === 'OK' || a.result === 'success'
                           ? 'badge-ok'
-                          : a.result === 'DENY' || a.result === 'FAIL'
+                          : a.result === 'DENY' || a.result === 'FAIL' || a.result === 'failed' || a.result === 'denied'
                           ? 'badge-err'
                           : 'badge-warn'
                       }`}
                     >
-                      {a.result}
+                      {a.metadata?.result_label || a.result}
                     </span>
                   </td>
                 </tr>
               ))}
               {items.length === 0 ? (
                 <tr>
-                  <td colSpan={4} className="empty-tip">暂无审计流水记录</td>
+                  <td colSpan={6} className="empty-tip">暂无匹配的审计流水</td>
                 </tr>
               ) : null}
             </tbody>

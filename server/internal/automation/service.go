@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ai-employee-platform/server/internal/idgen"
 	"github.com/ai-employee-platform/server/internal/job"
+	"github.com/ai-employee-platform/server/internal/quota"
 	"github.com/ai-employee-platform/server/internal/secret"
 )
 
@@ -28,6 +30,9 @@ type JobScheduler interface {
 	ScheduleJob(ctx context.Context, jobID string) (*job.Job, error)
 }
 
+// UserRoles 查询自动化创建人的角色。
+type UserRoles func(ctx context.Context, userID string) []string
+
 // Service 自动化编排。
 type Service struct {
 	Store     Store
@@ -37,6 +42,8 @@ type Service struct {
 	Audit     Auditor
 	Feishu    FeishuNotifier
 	Notify    ChatBinder
+	Quota     *quota.Service
+	Roles     UserRoles
 
 	limiter *webhookLimiter
 }
@@ -252,6 +259,46 @@ func (s *Service) Delete(ctx context.Context, id, actorID string) error {
 	return nil
 }
 
+// normalizeRunClock 校验 HH:MM。空串表示不限制时刻。
+func normalizeRunClock(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	h, m, ok := parseRunClock(raw)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%02d:%02d", h, m)
+}
+
+func parseRunClock(raw string) (hour, minute int, ok bool) {
+	parts := strings.Split(raw, ":")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	h, err1 := strconv.Atoi(parts[0])
+	m, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, false
+	}
+	return h, m, true
+}
+
+// calendarClockDue 空时刻立即到期；有时刻则当地时间到达后才启动当天链。
+func calendarClockDue(clock string, local time.Time) bool {
+	clock = strings.TrimSpace(clock)
+	if clock == "" {
+		return true
+	}
+	h, m, ok := parseRunClock(clock)
+	if !ok {
+		return true
+	}
+	slot := time.Date(local.Year(), local.Month(), local.Day(), h, m, 0, 0, local.Location())
+	return !local.Before(slot)
+}
+
 // ReplaceCalendarItems 覆盖某日条目（seq 从 1 重排）。
 func (s *Service) ReplaceCalendarItems(ctx context.Context, automationID, runDate string, drafts []CalendarItemInput, actorID string) ([]*CalendarItem, error) {
 	a, err := s.Store.Get(ctx, automationID)
@@ -274,6 +321,10 @@ func (s *Service) ReplaceCalendarItems(ctx context.Context, automationID, runDat
 		if d.Enabled != nil {
 			en = *d.Enabled
 		}
+		clock := normalizeRunClock(d.RunClock)
+		if strings.TrimSpace(d.RunClock) != "" && clock == "" {
+			return nil, fmt.Errorf("%w: 执行时间须为 HH:MM", ErrInvalidInput)
+		}
 		items = append(items, &CalendarItem{
 			ID:           idgen.New("ACI"),
 			AutomationID: automationID,
@@ -282,6 +333,7 @@ func (s *Service) ReplaceCalendarItems(ctx context.Context, automationID, runDat
 			EmployeeID:   d.EmployeeID,
 			Prompt:       d.Prompt,
 			Enabled:      en,
+			RunClock:     clock,
 			CreatedAt:    now,
 			UpdatedAt:    now,
 		})
@@ -363,6 +415,18 @@ func (s *Service) RotateWebhookSecrets(ctx context.Context, id, actorID string) 
 	return out, nil
 }
 
+// resolveNotifyChat 优先使用规则配置的 Chat ID，若未填则智能兜底使用该数字员工绑定的飞书 OpenID 或默认群聊。
+func (s *Service) resolveNotifyChat(employeeID, chatID string) string {
+	chatID = strings.TrimSpace(chatID)
+	if chatID != "" {
+		return chatID
+	}
+	if s.Feishu != nil {
+		return s.Feishu.ResolveTargetChat(employeeID)
+	}
+	return ""
+}
+
 // Fire 统一触发路径：通知 → 建 Job → 绑 chat → 调度。
 func (s *Service) Fire(ctx context.Context, req FireRequest, actorID, ip string) (*Run, *job.Job, error) {
 	a := req.Automation
@@ -410,11 +474,12 @@ func (s *Service) Fire(ctx context.Context, req FireRequest, actorID, ip string)
 		return nil, nil, err
 	}
 
+	notifyChat := s.resolveNotifyChat(empID, a.NotifyChatID)
 	meta := map[string]string{
 		"automation_id": a.ID, "run_id": run.ID, "source": req.TriggerSource,
 		"target_type": "automation", "target_id": a.ID,
 	}
-	s.notifyEvent(ctx, "automation.trigger", "success", actorID, ip, a.NotifyChatID, meta, buildTriggerText(a.Name, req.TriggerSource))
+	s.notifyEvent(ctx, "automation.trigger", "success", actorID, ip, notifyChat, meta, buildTriggerText(a.Name, req.TriggerSource))
 
 	if s.Jobs == nil {
 		run.Status = RunFailed
@@ -425,19 +490,52 @@ func (s *Service) Fire(ctx context.Context, req FireRequest, actorID, ip string)
 		return run, nil, errors.New(run.Error)
 	}
 
+	createdBy := strings.TrimSpace(a.CreatedBy)
+	if createdBy == "" {
+		createdBy = strings.TrimSpace(actorID)
+	}
+	if s.Quota != nil && createdBy != "" && createdBy != "SYSTEM" && !strings.HasPrefix(createdBy, "webhook") {
+		var roles []string
+		if s.Roles != nil {
+			roles = s.Roles(ctx, createdBy)
+		}
+		if err := s.Quota.CheckUser(ctx, createdBy, roles, 1, 1); err != nil {
+			run.Status = RunFailed
+			if errors.Is(err, quota.ErrExceeded) {
+				run.Error = "本月 Token 配额已用尽，无法创建新任务"
+			} else {
+				run.Error = err.Error()
+			}
+			fin := time.Now().UTC()
+			run.FinishedAt = &fin
+			_ = s.Store.SaveRun(ctx, run)
+			s.notifyEvent(ctx, "automation.job_created", "failed", createdBy, ip, notifyChat, meta, "【自动化建单失败】"+run.Error)
+			return run, nil, errors.New(run.Error)
+		}
+	}
+
+	jobSource := req.TriggerSource
+	if jobSource == "" && a != nil {
+		jobSource = a.TriggerType
+	}
+	if jobSource == "" {
+		jobSource = job.SourceWebhook
+	}
+
 	j, _, err := s.Jobs.Create(ctx, job.CreateInput{
 		EmployeeID:     empID,
 		Prompt:         prompt,
 		IdempotencyKey: idem,
-		CreatedBy:      "automation:" + a.ID,
-	}, actorID, ip)
+		CreatedBy:      createdBy,
+		Source:         jobSource,
+	}, createdBy, ip)
 	if err != nil {
 		run.Status = RunFailed
 		run.Error = err.Error()
 		fin := time.Now().UTC()
 		run.FinishedAt = &fin
 		_ = s.Store.SaveRun(ctx, run)
-		s.notifyEvent(ctx, "automation.job_created", "failed", actorID, ip, a.NotifyChatID, meta, "【自动化建单失败】"+err.Error())
+		s.notifyEvent(ctx, "automation.job_created", "failed", actorID, ip, notifyChat, meta, "【自动化建单失败】"+err.Error())
 		return run, nil, err
 	}
 
@@ -445,12 +543,12 @@ func (s *Service) Fire(ctx context.Context, req FireRequest, actorID, ip string)
 	run.Status = RunJobCreated
 	_ = s.Store.SaveRun(ctx, run)
 
-	if s.Notify != nil && a.NotifyChatID != "" {
-		s.Notify.RememberChat(j.ID, a.NotifyChatID)
+	if s.Notify != nil && notifyChat != "" {
+		s.Notify.RememberChat(j.ID, notifyChat)
 	}
 	meta["job_id"] = j.ID
 	meta["employee_id"] = empID
-	s.notifyEvent(ctx, "automation.job_created", "success", actorID, ip, a.NotifyChatID, meta, buildJobCreatedText(a.Name, j.ID, empID))
+	s.notifyEvent(ctx, "automation.job_created", "success", actorID, ip, notifyChat, meta, buildJobCreatedText(a.Name, j.ID, empID))
 
 	t := time.Now().UTC()
 	a.LastFiredAt = &t
@@ -519,6 +617,9 @@ func (s *Service) tickCalendar(ctx context.Context, now time.Time) {
 		if first == nil {
 			continue
 		}
+		if !calendarClockDue(first.RunClock, now.In(loc)) {
+			continue
+		}
 		has, _ := s.Store.HasActiveOrSuccessForItem(ctx, first.ID)
 		if has {
 			continue
@@ -544,7 +645,9 @@ func (s *Service) OnJobTerminal(ctx context.Context, j *job.Job) {
 	chat := ""
 	if a != nil {
 		name = a.Name
-		chat = a.NotifyChatID
+		chat = s.resolveNotifyChat(j.EmployeeID, a.NotifyChatID)
+	} else if j != nil {
+		chat = s.resolveNotifyChat(j.EmployeeID, "")
 	}
 
 	fin := time.Now().UTC()

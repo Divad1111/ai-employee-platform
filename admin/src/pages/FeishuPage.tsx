@@ -47,8 +47,9 @@ type FeishuStatus = {
 }
 
 export function FeishuPage() {
-  const { ready, can } = usePerm()
+  const { ready, can, roles } = usePerm()
   const canConfig = can('system.write')
+  const canCredentials = roles.includes('SUPER_ADMIN')
   const [cfg, setCfg] = useState<FeishuConfig | null>(null)
   const [bindings, setBindings] = useState<Binding[]>([])
   const [error, setError] = useState('')
@@ -84,16 +85,18 @@ export function FeishuPage() {
   const [removing, setRemoving] = useState(false)
 
   async function load() {
-    const [c, b, empData, st] = await Promise.all([
-      apiGet<FeishuConfig>('/integrations/feishu/config'),
+    const [b, empData, st] = await Promise.all([
       apiGet<{ items: Binding[] }>('/integrations/feishu/bindings'),
       apiGet<{ items: Array<{ id: string; name: string }> }>('/employees').catch(() => ({ items: [] })),
       apiGet<FeishuStatus>('/integrations/feishu/status').catch(() => null),
     ])
-    setCfg(c)
-    setAppId(c.app_id || '')
-    setVt(c.verification_token || '')
-    setEnabled(!!c.enabled)
+    if (canCredentials) {
+      const c = await apiGet<FeishuConfig>('/integrations/feishu/config')
+      setCfg(c)
+      setAppId(c.app_id || '')
+      setVt(c.verification_token || '')
+      setEnabled(!!c.enabled)
+    }
     setBindings(b.items ?? [])
     setEmployees(empData.items ?? [])
     setStatus(st)
@@ -377,10 +380,11 @@ export function FeishuPage() {
         <div className="panel-header">
           <div>
             <h2>飞书开放平台凭证设置</h2>
-            <p>包含应用 App ID、事件校验 Token 与安全机密引用（修改需管理员二次鉴权认证）</p>
+            <p>全系统只配置一次，仅超级管理员可修改（保存时仍需二次身份确认）</p>
           </div>
         </div>
 
+        {canCredentials ? (
         <form className="stack-form" onSubmit={saveConfig}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
             <label>
@@ -453,6 +457,9 @@ export function FeishuPage() {
             </div>
           </div>
         </form>
+        ) : (
+          <p className="muted">飞书开放平台凭证全系统只设置一次，仅超级管理员可以查看和修改。员工别名绑定仍可在下方维护。</p>
+        )}
 
         {/* 飞书通信测试与连通性自检 */}
         <div style={{ marginTop: '1.5rem', borderTop: '1px solid var(--border-subtle)', paddingTop: '1.25rem' }}>
@@ -572,7 +579,18 @@ export function FeishuPage() {
               </summary>
               <div style={{ marginTop: '0.6rem', lineHeight: 1.6 }}>
                 <div style={{ marginBottom: '0.5rem' }}>
-                  <strong style={{ color: 'var(--text-primary)' }}>1. 获取用户 OpenID (<code>ou_xxx</code>)：</strong>
+                  <strong style={{ color: 'var(--text-primary)' }}>1. 自动绑定（推荐）：</strong>
+                  <ul style={{ margin: '0.2rem 0 0 1.2rem', padding: 0 }}>
+                    <li>
+                      在群里 <code>@数字员工</code>，会自动写入该员工还没填的飞书 OpenID 和默认群聊 Chat ID，并在这条回执里告诉你这两个 ID。
+                    </li>
+                    <li>
+                      单聊里 <code>@数字员工</code> 只自动绑定你的 OpenID，不会把单聊会话写成默认群聊。已经绑过的 ID 也会在同一条回执里再告诉你一次。
+                    </li>
+                  </ul>
+                </div>
+                <div style={{ marginBottom: '0.5rem' }}>
+                  <strong style={{ color: 'var(--text-primary)' }}>2. 获取用户 OpenID (<code>ou_xxx</code>)：</strong>
                   <ul style={{ margin: '0.2rem 0 0 1.2rem', padding: 0 }}>
                     <li>
                       <strong>API 调试台（推荐）：</strong>访问 <a href="https://open.feishu.cn/api-explorer" target="_blank" rel="noreferrer" style={{ color: 'var(--brand-600)' }}>飞书开放平台 API 调试台</a>，切换到自建应用，右侧面板「当前调试用户」直接展示你的 <code>Open ID</code>，点击一键复制。
@@ -583,7 +601,7 @@ export function FeishuPage() {
                   </ul>
                 </div>
                 <div>
-                  <strong style={{ color: 'var(--text-primary)' }}>2. 获取群聊 Chat ID (<code>oc_xxx</code>)：</strong>
+                  <strong style={{ color: 'var(--text-primary)' }}>3. 获取群聊 Chat ID (<code>oc_xxx</code>)：</strong>
                   <p style={{ margin: '0.2rem 0', color: 'var(--danger-700)', fontWeight: 500 }}>
                     ⚠️ 注意：测试前必须先把机器人拉入该群聊，否则机器人无发信权限！
                   </p>

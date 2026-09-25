@@ -16,6 +16,7 @@ type Auditor interface {
 type FeishuNotifier interface {
 	NotifyJobResult(ctx context.Context, chatID, jobID, status, summary string) error
 	SendText(ctx context.Context, chatID, text string) error
+	ResolveTargetChat(employeeID string) string
 }
 
 // ChatBinder 绑定 Job → 飞书 chat（复用 notification.RememberChat）。
@@ -40,6 +41,13 @@ func (a FeishuBridge) SendText(ctx context.Context, chatID, text string) error {
 		return nil
 	}
 	return a.Svc.NotifyJobResult(ctx, chatID, "AUTOMATION", "RUNNING", text)
+}
+
+func (a FeishuBridge) ResolveTargetChat(employeeID string) string {
+	if a.Svc == nil {
+		return ""
+	}
+	return a.Svc.ResolveTargetChat(employeeID)
 }
 
 // notifyEvent 写 Audit，并在有 chat 时发飞书。

@@ -3,6 +3,7 @@ import { apiGet, apiPost, apiDelete } from '../api/client'
 import { IconKey, IconPlus, IconRefresh, IconAlertTriangle } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { formatDateTime } from '../lib/time'
 
 type SecretMeta = {
   id: string
@@ -243,7 +244,7 @@ export function SecretsPage() {
                     </span>
                   </td>
                   <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                    {s.created_at ? new Date(s.created_at).toLocaleString() : '—'}
+                    {s.created_at ? formatDateTime(s.created_at) : '—'}
                   </td>
                   <td>
                     <button

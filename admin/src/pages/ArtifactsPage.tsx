@@ -3,6 +3,7 @@ import { apiGet, getToken } from '../api/client'
 import { IconPackage, IconRefresh } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { formatDateTime } from '../lib/time'
 
 type Artifact = {
   id: string
@@ -155,7 +156,7 @@ export function ArtifactsPage() {
                   </td>
                   <td>{formatBytes(a.size_bytes)}</td>
                   <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                    {a.created_at ? new Date(a.created_at).toLocaleString() : '—'}
+                    {a.created_at ? formatDateTime(a.created_at) : '—'}
                   </td>
                   <td>
                     <button type="button" className="btn-ghost btn-sm" onClick={() => download(a.id, a.name)}>

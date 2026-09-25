@@ -25,14 +25,16 @@ type Presence struct {
 }
 
 type wsPresence struct {
-	Status          string
-	LastHeartbeat   time.Time
-	Version         string
-	Employees       uint32
-	Sessions        uint32
-	CPUPercent      float64
-	MemoryPercent   float64
-	DiskPercent     float64
+	Status        string
+	LastHeartbeat time.Time
+	Version       string
+	Employees     uint32
+	Sessions      uint32
+	CPUPercent    float64
+	MemoryPercent float64
+	DiskPercent   float64
+	Providers     []string
+	Models        map[string][]ModelOption
 }
 
 // NewPresence 创建心跳跟踪器。默认约 5s 心跳、约 15s Offline。
@@ -73,6 +75,72 @@ func (p *Presence) Touch(wsID, version string, employees, sessions uint32, cpu, 
 	w.CPUPercent = cpu
 	w.MemoryPercent = mem
 	w.DiskPercent = disk
+}
+
+// SetProviders 记录工作站上报的已安装驱动引擎。空列表不覆盖，避免旧客户端把列表清掉。
+func (p *Presence) SetProviders(wsID string, providers []string) {
+	if len(providers) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	w, ok := p.byWS[wsID]
+	if !ok {
+		w = &wsPresence{Status: StatusOnline, LastHeartbeat: p.nowFunc()}
+		p.byWS[wsID] = w
+	}
+	w.Providers = append([]string(nil), providers...)
+}
+
+// Providers 返回该工作站最近一次上报的驱动引擎。
+func (p *Presence) Providers(wsID string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	w, ok := p.byWS[wsID]
+	if !ok || len(w.Providers) == 0 {
+		return nil
+	}
+	return append([]string(nil), w.Providers...)
+}
+
+// ModelOption 工作站上报的一条模型。
+type ModelOption struct {
+	ID    string
+	Label string
+}
+
+// SetModels 记录工作站上报的模型，按引擎分组。空结果不覆盖。
+func (p *Presence) SetModels(wsID string, models map[string][]ModelOption) {
+	if len(models) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	w, ok := p.byWS[wsID]
+	if !ok {
+		w = &wsPresence{Status: StatusOnline, LastHeartbeat: p.nowFunc()}
+		p.byWS[wsID] = w
+	}
+	next := make(map[string][]ModelOption, len(models))
+	for name, list := range models {
+		next[name] = append([]ModelOption(nil), list...)
+	}
+	w.Models = next
+}
+
+// Models 返回该工作站最近一次上报的模型。
+func (p *Presence) Models(wsID string) map[string][]ModelOption {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	w, ok := p.byWS[wsID]
+	if !ok || len(w.Models) == 0 {
+		return nil
+	}
+	out := make(map[string][]ModelOption, len(w.Models))
+	for name, list := range w.Models {
+		out[name] = append([]ModelOption(nil), list...)
+	}
+	return out
 }
 
 // StatusOf 返回当前状态（不主动扫描超时）。
@@ -156,4 +224,3 @@ func (p *Presence) Remove(wsID string) {
 	defer p.mu.Unlock()
 	delete(p.byWS, wsID)
 }
-

@@ -68,14 +68,24 @@ func lookupCodex() string {
 	if p, err := exec.LookPath("codex"); err == nil {
 		return p
 	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".local", "bin", "codex"),
+		"/opt/homebrew/bin/codex",
+		"/usr/local/bin/codex",
+		"/Applications/ChatGPT.app/Contents/Resources/codex",
+		filepath.Join(home, ".codex", "plugins", ".plugin-appserver", "codex"),
+	}
 	switch runtime.GOOS {
 	case "windows":
-		c := filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "codex", "codex.exe")
-		if st, err := os.Stat(c); err == nil && !st.IsDir() {
-			return c
+		candidates = append(candidates,
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "codex", "codex.exe"),
+		)
+	}
+	for _, c := range candidates {
+		if c == "" {
+			continue
 		}
-	case "darwin":
-		c := "/usr/local/bin/codex"
 		if st, err := os.Stat(c); err == nil && !st.IsDir() {
 			return c
 		}
@@ -84,25 +94,45 @@ func lookupCodex() string {
 }
 
 func (p *Provider) Start(ctx context.Context, spec providers.StartSpec) (providers.AgentSession, error) {
-	info, _ := p.Detect(ctx)
-	if info.Path == "" {
-		info.Path = "codex-fake"
-		p.Proc.Allow("codex-fake")
+	info, err := p.Detect(ctx)
+	if err != nil {
+		return nil, err
 	}
+	useFake := info.Path == "" || info.Path == "codex-fake" || filepath.Base(info.Path) == "codex-fake"
+	if info.Path == "" {
+		return nil, errors.New("未检测到 Codex CLI：请安装 Codex 桌面应用或 `codex`，或在 providers.codex.path 配置路径")
+	}
+	if useFake {
+		p.Proc.Allow(info.Path)
+	} else {
+		p.Proc.Allow(info.Path)
+	}
+
 	sid := spec.SessionID
 	if sid == "" {
 		sid = "ses-codex"
 	}
-	s := p.ACP.Open(sid)
-	if err := s.Start(ctx); err != nil {
+	var acpSess acp.Session
+	if useFake {
+		acpSess = p.ACP.Open(sid)
+	} else {
+		stdioSess := newAppServerSession(sid, info.Path, spec.WorkspacePath, spec.Model)
+		if len(spec.MCPServers) > 0 {
+			stdioSess.SetMCPServers(spec.MCPServers)
+		}
+		acpSess = stdioSess
+	}
+	if err := acpSess.Start(ctx); err != nil {
+		p.mu.Lock()
 		p.state = StateError
+		p.mu.Unlock()
 		return nil, err
 	}
 	p.mu.Lock()
-	p.sessions[sid] = s
+	p.sessions[sid] = acpSess
 	p.state = StateReady
 	p.mu.Unlock()
-	return &agentSession{p: p, id: sid, acp: s}, nil
+	return &agentSession{p: p, id: sid, acp: acpSess}, nil
 }
 
 func (p *Provider) Stop(ctx context.Context, sessionID string) error {
@@ -137,6 +167,21 @@ func (a *agentSession) Send(ctx context.Context, input []byte) (string, error) {
 	a.p.state = StateBusy
 	a.p.mu.Unlock()
 	return a.acp.Send(ctx, input)
+}
+
+// LastUsage 读取本次 ACP prompt 的 token 用量。
+func (a *agentSession) LastUsage() (int64, int64, string, string) {
+	type reporter interface {
+		LastUsage() acp.Usage
+	}
+	if r, ok := a.acp.(reporter); ok {
+		u := r.LastUsage()
+		if u.Agent == "" || u.Agent == "cursor" {
+			u.Agent = "codex"
+		}
+		return u.InputTokens, u.OutputTokens, u.Agent, u.Source
+	}
+	return 0, 0, "codex", ""
 }
 func (a *agentSession) Stop(ctx context.Context) error { return a.p.Stop(ctx, a.id) }
 

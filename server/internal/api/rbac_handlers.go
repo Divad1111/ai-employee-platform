@@ -3,15 +3,36 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
+	"github.com/ai-employee-platform/server/internal/audit"
 	"github.com/ai-employee-platform/server/internal/auth"
 	"github.com/ai-employee-platform/server/internal/authz"
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/quota"
 	"github.com/ai-employee-platform/server/internal/wsmember"
 )
+
+func scopeLabelCN(scope string) string {
+	switch strings.ToUpper(strings.TrimSpace(scope)) {
+	case "ALL":
+		return "全部资源"
+	case "OWN":
+		return "仅本人"
+	case "ASSIGNED":
+		return "已分配"
+	case "NONE":
+		return "无权限"
+	default:
+		if scope == "" {
+			return "（空）"
+		}
+		return scope
+	}
+}
 
 func toAuthzGrants(gs []auth.PermissionGrant) []authz.Grant {
 	out := make([]authz.Grant, 0, len(gs))
@@ -22,12 +43,28 @@ func toAuthzGrants(gs []auth.PermissionGrant) []authz.Grant {
 }
 
 func (d Deps) resolveScope(ctx context.Context, sess *auth.Session, perm string) authz.Scope {
-	scope := authz.ScopeFrom(ctx)
-	if scope != "" && scope != authz.ScopeNONE {
-		return scope
+	// 仅当查询的就是本次路由声明的权限码时，才复用中间件注入的 Scope。
+	// 仪表盘路由是 employee.read，不能把它的 OWN 误当成 workstation.read。
+	if authz.PermFrom(ctx) == perm {
+		if scope := authz.ScopeFrom(ctx); scope != "" && scope != authz.ScopeNONE {
+			return scope
+		}
 	}
-	grants, _ := d.Auth.PermissionGrants(ctx, sess)
-	return authz.Resolve(toAuthzGrants(grants), perm)
+	grants := authz.GrantsFrom(ctx)
+	if grants == nil && d.Auth != nil && sess != nil {
+		gs, _ := d.Auth.PermissionGrants(ctx, sess)
+		grants = toAuthzGrants(gs)
+	}
+	scope := authz.Resolve(grants, perm)
+	if scope == authz.ScopeNONE && authz.Allowed(grants, perm) {
+		for _, g := range grants {
+			if g.Name == "*" {
+				return authz.ScopeALL
+			}
+		}
+		return authz.ScopeOWN
+	}
+	return scope
 }
 
 func (d Deps) filterEmployees(r *http.Request, sess *auth.Session, list []*employee.Employee) []*employee.Employee {
@@ -241,6 +278,8 @@ func (d Deps) handlePatchUser(w http.ResponseWriter, r *http.Request, sess *auth
 		writeErr(w, http.StatusNotFound, "用户不存在")
 		return
 	}
+	oldName, oldEmail := u.DisplayName, u.Email
+	oldRoles := append([]string(nil), u.Roles...)
 	var req struct {
 		DisplayName *string  `json:"display_name"`
 		Email       *string  `json:"email"`
@@ -278,7 +317,19 @@ func (d Deps) handlePatchUser(w http.ResponseWriter, r *http.Request, sess *auth
 		u.Roles = req.Roles
 	}
 	if d.Audit != nil {
-		d.Audit.Log(r.Context(), "USER", sess.UserID, "user.update", "success", clientIP(r), map[string]string{"id": u.ID})
+		parts := []string{
+			audit.FormatChange("显示名", oldName, u.DisplayName),
+			audit.FormatChange("邮箱", oldEmail, u.Email),
+		}
+		if req.Roles != nil {
+			parts = append(parts, audit.FormatChange("角色", strings.Join(oldRoles, ","), strings.Join(u.Roles, ",")))
+		}
+		if req.Password != nil && *req.Password != "" {
+			parts = append(parts, "密码：已重置（不记录明文）")
+		}
+		d.Audit.Log(r.Context(), "USER", sess.UserID, "user.update", "success", clientIP(r), map[string]string{
+			"id": u.ID, "username": u.Username, "summary": audit.JoinSummary(parts...),
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": u.ID, "username": u.Username, "roles": u.Roles, "status": u.Status})
 }
@@ -308,7 +359,10 @@ func (d Deps) handleDeleteUser(w http.ResponseWriter, r *http.Request, sess *aut
 	}
 	if d.Audit != nil {
 		d.Audit.Log(r.Context(), "USER", sess.UserID, "user.delete", "success", clientIP(r),
-			map[string]string{"id": id, "username": u.Username})
+			map[string]string{
+				"id": id, "username": u.Username,
+				"summary": fmt.Sprintf("删除用户 %s", u.Username),
+			})
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true", "id": id})
 }
@@ -319,6 +373,7 @@ func (d Deps) setUserStatus(w http.ResponseWriter, r *http.Request, sess *auth.S
 		writeErr(w, http.StatusNotFound, "用户不存在")
 		return
 	}
+	oldStatus := u.Status
 	if u.ID == sess.UserID && status == auth.StatusDisabled {
 		writeErr(w, http.StatusBadRequest, "不能禁用当前登录用户")
 		return
@@ -333,7 +388,10 @@ func (d Deps) setUserStatus(w http.ResponseWriter, r *http.Request, sess *auth.S
 		action = "user.disable"
 	}
 	if d.Audit != nil {
-		d.Audit.Log(r.Context(), "USER", sess.UserID, action, "success", clientIP(r), map[string]string{"id": u.ID})
+		d.Audit.Log(r.Context(), "USER", sess.UserID, action, "success", clientIP(r), map[string]string{
+			"id": u.ID, "username": u.Username,
+			"summary": audit.FormatChange("状态", oldStatus, status),
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": u.ID, "status": u.Status})
 }
@@ -393,7 +451,10 @@ func (d Deps) handleCreateRole(w http.ResponseWriter, r *http.Request, sess *aut
 	}
 	if d.Audit != nil {
 		d.Audit.Log(r.Context(), "USER", sess.UserID, "role.create", "success", clientIP(r),
-			map[string]string{"role": name})
+			map[string]string{
+				"role":    name,
+				"summary": fmt.Sprintf("新建角色 %s（%s），权限 %d 项", name, strings.TrimSpace(req.Description), len(grants)),
+			})
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"name": name, "description": req.Description, "grants": grants})
 }
@@ -438,13 +499,32 @@ func (d Deps) handlePatchRolePerms(w http.ResponseWriter, r *http.Request, sess 
 		return
 	}
 	role := r.PathValue("name")
-	if err := d.Auth.Users().SetRolePermissionScope(r.Context(), role, req.Permission, req.Scope); err != nil {
+	oldScope := "（未授权）"
+	if roles, err := d.Auth.Users().ListRoles(r.Context()); err == nil {
+		for _, ri := range roles {
+			if !strings.EqualFold(ri.Name, role) {
+				continue
+			}
+			for _, g := range ri.Grants {
+				if g.Code == req.Permission {
+					if g.Scope != "" {
+						oldScope = scopeLabelCN(g.Scope)
+					}
+				}
+			}
+		}
+	}
+	newScope := strings.ToUpper(strings.TrimSpace(req.Scope))
+	if err := d.Auth.Users().SetRolePermissionScope(r.Context(), role, req.Permission, newScope); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if d.Audit != nil {
-		d.Audit.Log(r.Context(), "USER", sess.UserID, "role.update", "success", clientIP(r),
-			map[string]string{"role": role, "permission": req.Permission, "scope": req.Scope})
+		d.Audit.Log(r.Context(), "USER", sess.UserID, "role.update", "success", clientIP(r), map[string]string{
+			"role": role, "permission": req.Permission,
+			"before": oldScope, "after": scopeLabelCN(newScope),
+			"summary": fmt.Sprintf("角色 %s 的权限 %s：范围 %s → %s", role, req.Permission, oldScope, scopeLabelCN(newScope)),
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
@@ -493,18 +573,26 @@ func (d Deps) handleAddWSMember(w http.ResponseWriter, r *http.Request, sess *au
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	d.auditUser(r, sess, "workstation.member.add", map[string]string{
+		"workstation_id": wsID, "user_id": req.UserID, "role": req.Role,
+	})
 	writeJSON(w, http.StatusCreated, m)
 }
 
-func (d Deps) handleRemoveWSMember(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleRemoveWSMember(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.WSMembers == nil {
 		writeErr(w, http.StatusServiceUnavailable, "成员存储未就绪")
 		return
 	}
-	if err := d.WSMembers.Remove(r.Context(), r.PathValue("id"), r.PathValue("userId")); err != nil {
+	wsID := r.PathValue("id")
+	userID := r.PathValue("userId")
+	if err := d.WSMembers.Remove(r.Context(), wsID, userID); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	d.auditUser(r, sess, "workstation.member.remove", map[string]string{
+		"workstation_id": wsID, "user_id": userID,
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
@@ -529,17 +617,22 @@ func (d Deps) handleMyQuota(w http.ResponseWriter, r *http.Request, sess *auth.S
 // buildMyQuota 组装当前用户配额快照（仪表盘 /me 共用）。
 func (d Deps) buildMyQuota(r *http.Request, sess *auth.Session) map[string]any {
 	out := map[string]any{
-		"user_id":         sess.UserID,
-		"period_type":     quota.PeriodMonthly,
-		"tokens_used":     int64(0),
-		"requests_used":   int64(0),
-		"token_limit":     int64(0),
-		"request_limit":   int64(0),
-		"unlimited":       true,
-		"source":          "none",
-		"source_role":     "",
-		"usage_percent":   float64(0),
-		"remaining":       int64(0),
+		"user_id":               sess.UserID,
+		"period_type":           quota.PeriodMonthly,
+		"tokens_used":           int64(0),
+		"requests_used":         int64(0),
+		"token_limit":           int64(0),
+		"request_limit":         int64(0),
+		"role_token_limit":      int64(0),
+		"exception_token_limit": int64(0),
+		"extra_token_limit":     int64(0),
+		"has_exception":         false,
+		"has_extra":             false,
+		"unlimited":             true,
+		"source":                "none",
+		"source_role":           "",
+		"usage_percent":         float64(0),
+		"remaining":             int64(0),
 	}
 	if d.Quota == nil || sess == nil || sess.UserID == "" {
 		return out
@@ -555,27 +648,28 @@ func (d Deps) buildMyQuota(r *http.Request, sess *auth.Session) map[string]any {
 		out["requests_used"] = usage.RequestsUsed
 		out["period_key"] = usage.PeriodKey
 	}
-	policy, err := d.Quota.ResolveUserPolicy(ctx, sess.UserID, roles)
-	if err != nil || policy == nil || !policy.Enabled {
+	eff, err := d.Quota.ResolveEffective(ctx, sess.UserID, roles)
+	if err != nil || eff == nil {
 		return out
 	}
-	out["unlimited"] = policy.TokenLimit <= 0 && policy.RequestLimit <= 0
-	out["token_limit"] = policy.TokenLimit
-	out["request_limit"] = policy.RequestLimit
-	out["source"] = policy.ResourceType
-	if policy.ResourceType == quota.TypeRole {
-		out["source_role"] = policy.ResourceID
-	} else if policy.ResourceType == quota.TypeUser {
-		out["source"] = "USER"
-	}
+	out["unlimited"] = eff.Unlimited
+	out["token_limit"] = eff.TokenLimit
+	out["request_limit"] = eff.RequestLimit
+	out["role_token_limit"] = eff.RoleTokenLimit
+	out["exception_token_limit"] = eff.ExceptionTokenLimit
+	out["extra_token_limit"] = eff.ExtraTokenLimit
+	out["has_exception"] = eff.HasException
+	out["has_extra"] = eff.HasExtra
+	out["source"] = eff.Source
+	out["source_role"] = eff.SourceRole
 	used, _ := out["tokens_used"].(int64)
-	if policy.TokenLimit > 0 {
-		pct := float64(used) / float64(policy.TokenLimit) * 100
+	if eff.TokenLimit > 0 {
+		pct := float64(used) / float64(eff.TokenLimit) * 100
 		if pct > 100 {
 			pct = 100
 		}
 		out["usage_percent"] = pct
-		rem := policy.TokenLimit - used
+		rem := eff.TokenLimit - used
 		if rem < 0 {
 			rem = 0
 		}
@@ -585,7 +679,7 @@ func (d Deps) buildMyQuota(r *http.Request, sess *auth.Session) map[string]any {
 	return out
 }
 
-func (d Deps) handleUpsertQuota(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleUpsertQuota(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.Quota == nil {
 		writeErr(w, http.StatusServiceUnavailable, "配额服务未就绪")
 		return
@@ -600,18 +694,77 @@ func (d Deps) handleUpsertQuota(w http.ResponseWriter, r *http.Request, _ *auth.
 		return
 	}
 	switch p.ResourceType {
-	case quota.TypeUser, quota.TypeWorkstation, quota.TypeEmployee, quota.TypeRole:
+	case quota.TypeUser, quota.TypeUserBonus, quota.TypeWorkstation, quota.TypeEmployee, quota.TypeRole:
 	default:
-		writeErr(w, http.StatusBadRequest, "resource_type 须为 USER / WORKSTATION / DIGITAL_EMPLOYEE / ROLE")
+		writeErr(w, http.StatusBadRequest, "resource_type 须为 USER / USER_BONUS / WORKSTATION / DIGITAL_EMPLOYEE / ROLE")
 		return
 	}
 	if p.ResourceType == quota.TypeRole {
 		p.ResourceID = strings.ToUpper(strings.TrimSpace(p.ResourceID))
 	}
 	p.Enabled = true
+	beforeLimit := "（未设置）"
+	if old, err := d.Quota.Store().GetPolicy(r.Context(), p.ResourceType, p.ResourceID, quota.PeriodMonthly); err == nil && old != nil {
+		beforeLimit = strconv.FormatInt(old.TokenLimit, 10)
+	}
 	if err := d.Quota.Store().UpsertPolicy(r.Context(), &p); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	afterLimit := strconv.FormatInt(p.TokenLimit, 10)
+	d.auditUser(r, sess, "quota.upsert", map[string]string{
+		"resource_type": p.ResourceType,
+		"resource_id":   p.ResourceID,
+		"token_limit":   afterLimit,
+		"before":        beforeLimit,
+		"after":         afterLimit,
+		"summary":       fmt.Sprintf("%s %s 月度 Token 限额：%s → %s", p.ResourceType, p.ResourceID, beforeLimit, afterLimit),
+	})
 	writeJSON(w, http.StatusOK, p)
+}
+
+func (d Deps) handleDeleteQuota(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	if d.Quota == nil {
+		writeErr(w, http.StatusServiceUnavailable, "配额服务未就绪")
+		return
+	}
+	resourceType := strings.TrimSpace(r.URL.Query().Get("resource_type"))
+	resourceID := strings.TrimSpace(r.URL.Query().Get("resource_id"))
+	period := strings.TrimSpace(r.URL.Query().Get("period_type"))
+	if period == "" {
+		period = quota.PeriodMonthly
+	}
+	if resourceType == "" || resourceID == "" {
+		writeErr(w, http.StatusBadRequest, "需要 resource_type 与 resource_id")
+		return
+	}
+	if resourceType == quota.TypeRole {
+		writeErr(w, http.StatusBadRequest, "角色预设不可删除，请直接改限额")
+		return
+	}
+	switch resourceType {
+	case quota.TypeUser, quota.TypeUserBonus, quota.TypeWorkstation, quota.TypeEmployee:
+	default:
+		writeErr(w, http.StatusBadRequest, "resource_type 无效")
+		return
+	}
+	detail := fmt.Sprintf("删除 %s %s 的 %s 配额策略", resourceType, resourceID, period)
+	if old, err := d.Quota.Store().GetPolicy(r.Context(), resourceType, resourceID, period); err == nil && old != nil {
+		detail = fmt.Sprintf("删除 %s %s 的 %s 配额（原 Token 限额 %d）", resourceType, resourceID, period, old.TokenLimit)
+	}
+	if err := d.Quota.Store().DeletePolicy(r.Context(), resourceType, resourceID, period); err != nil {
+		if err == quota.ErrNotFound {
+			writeErr(w, http.StatusNotFound, "策略不存在")
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	d.auditUser(r, sess, "quota.delete", map[string]string{
+		"resource_type": resourceType,
+		"resource_id":   resourceID,
+		"period_type":   period,
+		"summary":       detail,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

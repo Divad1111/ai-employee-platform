@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"net/http"
@@ -33,6 +34,10 @@ func setupM6(t *testing.T) (http.Handler, string, *feishu.MemorySender, *reliabi
 	bus := eventbus.New(50)
 	users := auth.NewMemoryUserStore()
 	_ = users.SeedAdmin("admin", "admin123", "Admin")
+	adminUser, _ := users.FindByUsername(context.Background(), "admin")
+	if adminUser != nil {
+		_ = users.SetRoles(context.Background(), adminUser.ID, []string{"SUPER_ADMIN", "ADMIN"})
+	}
 	authSvc := auth.NewService(users, auth.NewMemorySessionStore(), auditor)
 	ca, _ := certca.NewDevAuthority()
 	presence := reliability.NewPresence(5, 15)
@@ -71,8 +76,11 @@ func TestFeishuWebhookChallengeAndJob(t *testing.T) {
 		t.Fatal(emp)
 	}
 	empID := emp["id"].(string)
+	if emp["owner_user_id"] == nil || emp["owner_user_id"] == "" {
+		t.Fatalf("员工缺少归属用户: %#v", emp)
+	}
 	doJSON(t, h, http.MethodPost, "/api/integrations/feishu/bindings", tok, map[string]string{
-		"employee_id": empID, "feishu_bot_alias": "dev",
+		"employee_id": empID, "feishu_bot_alias": "dev", "feishu_open_id": "ou_1",
 	})
 	presence.Touch("WS-1", "v", 0, 0, 0, 0, 0)
 	wssMeta := h // ensure registered via ensure on schedule path - register

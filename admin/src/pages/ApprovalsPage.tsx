@@ -5,6 +5,7 @@ import { StatusBadge } from '../components/StatusBadge'
 import { IconCheckCircle, IconRefresh, IconKey, IconShield, IconAlertTriangle } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
+import { formatDateTime } from '../lib/time'
 
 type Approval = {
   id: string
@@ -860,7 +861,7 @@ export function ApprovalsPage() {
                   </td>
                   <td style={{ maxWidth: '300px', color: 'var(--text-secondary)' }}>{a.reason || '无说明'}</td>
                   <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                    {new Date(a.created_at).toLocaleString()}
+                    {formatDateTime(a.created_at)}
                   </td>
                   <td>
                     {a.status === 'PENDING' ? (

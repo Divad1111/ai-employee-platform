@@ -44,6 +44,8 @@ func (s *Sampler) Sample() Sample {
 	}
 	if s.DiskFn != nil {
 		out.DiskPercent = s.DiskFn()
+	} else {
+		out.DiskPercent = diskSample()
 	}
 	if !ok {
 		// CPU：V1 用 goroutine 密度作占位，避免每秒写库

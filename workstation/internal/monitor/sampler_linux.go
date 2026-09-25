@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -74,4 +76,13 @@ func systemSample() (cpu, mem float64, ok bool) {
 	}
 
 	return cpu, mem, true
+}
+
+func diskSample() float64 {
+	var st unix.Statfs_t
+	if err := unix.Statfs("/", &st); err != nil || st.Blocks == 0 {
+		return 0
+	}
+	used := st.Blocks - st.Bavail
+	return float64(used) / float64(st.Blocks) * 100
 }

@@ -17,11 +17,30 @@ var (
 
 const (
 	TypeUser        = "USER"
+	TypeUserBonus   = "USER_BONUS" // 用户额外：加在「例外或角色」基数之上
 	TypeWorkstation = "WORKSTATION"
 	TypeEmployee    = "DIGITAL_EMPLOYEE"
-	TypeRole        = "ROLE" // 角色预设：resource_id=角色名；个人 USER 优先
+	TypeRole        = "ROLE" // 角色预设：resource_id=角色名；个人 USER 例外会替换它
 	PeriodMonthly   = "MONTHLY"
 )
+
+// EffectiveQuota 当前用户的有效月度限额拆解。
+// 用户例外替换角色基数；用户额外再叠加在基数上。基数为不限（限额 ≤ 0）时，有效限额仍为不限。
+type EffectiveQuota struct {
+	Source                string
+	SourceRole            string
+	RoleTokenLimit        int64
+	RoleRequestLimit      int64
+	ExceptionTokenLimit   int64
+	ExceptionRequestLimit int64
+	ExtraTokenLimit       int64
+	ExtraRequestLimit     int64
+	TokenLimit            int64
+	RequestLimit          int64
+	HasException          bool
+	HasExtra              bool
+	Unlimited             bool
+}
 
 // Policy 配额策略。
 type Policy struct {
@@ -64,6 +83,7 @@ type Usage struct {
 // Store 配额存储。
 type Store interface {
 	UpsertPolicy(ctx context.Context, p *Policy) error
+	DeletePolicy(ctx context.Context, resourceType, resourceID, period string) error
 	GetPolicy(ctx context.Context, resourceType, resourceID, period string) (*Policy, error)
 	ListPolicies(ctx context.Context) ([]*Policy, error)
 	UpsertWSUserQuota(ctx context.Context, q *WSUserQuota) error
@@ -136,6 +156,20 @@ func (m *MemoryStore) UpsertPolicy(_ context.Context, p *Policy) error {
 	p.UpdatedAt = now
 	cp := *p
 	m.policies[polKey(p.ResourceType, p.ResourceID, p.PeriodType)] = &cp
+	return nil
+}
+
+func (m *MemoryStore) DeletePolicy(_ context.Context, resourceType, resourceID, period string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if period == "" {
+		period = PeriodMonthly
+	}
+	k := polKey(resourceType, resourceID, period)
+	if _, ok := m.policies[k]; !ok {
+		return ErrNotFound
+	}
+	delete(m.policies, k)
 	return nil
 }
 
@@ -261,8 +295,8 @@ func (s *Service) Check(ctx context.Context, resourceType, resourceID string, ad
 	return nil
 }
 
-// ResolveUserPolicy 解析用户有效配额策略。
-// 优先级：个人 USER 策略 > 用户角色中限额最高的 ROLE 预设 > 无限制。
+// ResolveUserPolicy 解析用户基数策略（不含额外）。
+// 优先级：个人 USER 例外 > 用户角色中限额最高的 ROLE 预设 > 无限制。
 // 用量始终按 USER:{userID} 累计（角色预设只决定上限，不共享池）。
 func (s *Service) ResolveUserPolicy(ctx context.Context, userID string, roles []string) (*Policy, error) {
 	p, err := s.store.GetPolicy(ctx, TypeUser, userID, PeriodMonthly)
@@ -272,6 +306,14 @@ func (s *Service) ResolveUserPolicy(ctx context.Context, userID string, roles []
 	if err != nil && err != ErrNotFound {
 		return nil, err
 	}
+	best, err := s.bestRolePolicy(ctx, roles)
+	if err != nil {
+		return nil, err
+	}
+	return best, nil
+}
+
+func (s *Service) bestRolePolicy(ctx context.Context, roles []string) (*Policy, error) {
 	var best *Policy
 	for _, role := range roles {
 		rp, err := s.store.GetPolicy(ctx, TypeRole, role, PeriodMonthly)
@@ -290,23 +332,102 @@ func (s *Service) ResolveUserPolicy(ctx context.Context, userID string, roles []
 	return best, nil
 }
 
-// CheckUser 按用户有效策略检查；用量记在 USER 维度。
+// ResolveEffective 计算有效限额：例外替换角色，额外再相加。
+func (s *Service) ResolveEffective(ctx context.Context, userID string, roles []string) (*EffectiveQuota, error) {
+	out := &EffectiveQuota{Source: "none", Unlimited: true}
+	ex, err := s.optionalPolicy(ctx, TypeUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	bonus, err := s.optionalPolicy(ctx, TypeUserBonus, userID)
+	if err != nil {
+		return nil, err
+	}
+	best, err := s.bestRolePolicy(ctx, roles)
+	if err != nil {
+		return nil, err
+	}
+	if best != nil {
+		out.RoleTokenLimit = best.TokenLimit
+		out.RoleRequestLimit = best.RequestLimit
+		out.SourceRole = best.ResourceID
+		out.Source = TypeRole
+	}
+	if ex != nil && ex.Enabled {
+		out.HasException = true
+		out.ExceptionTokenLimit = ex.TokenLimit
+		out.ExceptionRequestLimit = ex.RequestLimit
+		out.Source = TypeUser
+	}
+	if bonus != nil && bonus.Enabled {
+		out.HasExtra = bonus.TokenLimit > 0 || bonus.RequestLimit > 0
+		out.ExtraTokenLimit = bonus.TokenLimit
+		out.ExtraRequestLimit = bonus.RequestLimit
+	}
+
+	tok, tokUnlimited := combineLimit(out.HasException, out.ExceptionTokenLimit, out.Source == TypeRole, out.RoleTokenLimit, out.ExtraTokenLimit)
+	req, reqUnlimited := combineLimit(out.HasException, out.ExceptionRequestLimit, out.Source == TypeRole, out.RoleRequestLimit, out.ExtraRequestLimit)
+	out.TokenLimit = tok
+	out.RequestLimit = req
+	out.Unlimited = tokUnlimited && reqUnlimited
+	return out, nil
+}
+
+func (s *Service) optionalPolicy(ctx context.Context, resourceType, resourceID string) (*Policy, error) {
+	p, err := s.store.GetPolicy(ctx, resourceType, resourceID, PeriodMonthly)
+	if err == ErrNotFound || p == nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !p.Enabled {
+		return nil, nil
+	}
+	return p, nil
+}
+
+// combineLimit 基数（例外优先于角色）加上额外。基数限额 ≤ 0 表示不限，额外不再收紧。
+// 没有任何基数时，额外单独作为上限。
+func combineLimit(hasException bool, exceptionLimit int64, hasRole bool, roleLimit, extra int64) (limit int64, unlimited bool) {
+	if extra < 0 {
+		extra = 0
+	}
+	if hasException {
+		if exceptionLimit <= 0 {
+			return 0, true
+		}
+		return exceptionLimit + extra, false
+	}
+	if hasRole {
+		if roleLimit <= 0 {
+			return 0, true
+		}
+		return roleLimit + extra, false
+	}
+	if extra > 0 {
+		return extra, false
+	}
+	return 0, true
+}
+
+// CheckUser 按有效限额检查；用量记在 USER 维度。
 func (s *Service) CheckUser(ctx context.Context, userID string, roles []string, addTokens, addRequests int64) error {
-	p, err := s.ResolveUserPolicy(ctx, userID, roles)
+	eff, err := s.ResolveEffective(ctx, userID, roles)
 	if err != nil {
 		return err
 	}
-	if p == nil || !p.Enabled {
+	if eff == nil || eff.Unlimited {
 		return nil
 	}
 	u, err := s.store.GetUsage(ctx, TypeUser, userID, PeriodMonthly)
 	if err != nil {
 		return err
 	}
-	if p.TokenLimit > 0 && u.TokensUsed+addTokens > p.TokenLimit {
+	if eff.TokenLimit > 0 && u.TokensUsed+addTokens > eff.TokenLimit {
 		return ErrExceeded
 	}
-	if p.RequestLimit > 0 && u.RequestsUsed+addRequests > p.RequestLimit {
+	if eff.RequestLimit > 0 && u.RequestsUsed+addRequests > eff.RequestLimit {
 		return ErrExceeded
 	}
 	return nil

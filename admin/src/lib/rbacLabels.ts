@@ -19,13 +19,15 @@ export const SCOPE_LABEL: Record<string, string> = {
 export const RESOURCE_TYPE_OPTIONS = [
   { value: 'ROLE', label: '角色预设' },
   { value: 'USER', label: '用户（例外）' },
+  { value: 'USER_BONUS', label: '用户（额外）' },
   { value: 'WORKSTATION', label: '工作站' },
   { value: 'DIGITAL_EMPLOYEE', label: '数字员工' },
 ] as const
 
 export const RESOURCE_TYPE_LABEL: Record<string, string> = {
   ROLE: '角色预设',
-  USER: '用户',
+  USER: '用户（例外）',
+  USER_BONUS: '用户（额外）',
   WORKSTATION: '工作站',
   DIGITAL_EMPLOYEE: '数字员工',
 }

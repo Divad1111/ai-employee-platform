@@ -118,7 +118,7 @@ approval:
 
 	j1, _, err := jobSvc.Create(ctx, job.CreateInput{
 		EmployeeID: emp.ID, WorkspaceID: w1.ID, Prompt: "修复登录闪退",
-		IdempotencyKey: "demo-job-1", WorkflowID: "unity-dev",
+		IdempotencyKey: "demo-job-1", WorkflowID: "unity-dev", Source: job.SourceSystem,
 	}, "system", "")
 	if err == nil && j1 != nil {
 		_, _ = jobSvc.Transition(ctx, j1.ID, job.StatusQueued, "system", "", nil)

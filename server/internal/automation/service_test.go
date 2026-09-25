@@ -246,3 +246,101 @@ func TestWebhookHMACBearerIPIdempotency(t *testing.T) {
 		t.Fatal("期望 webhook_denied 审计")
 	}
 }
+
+func TestCalendarWaitsForRunClock(t *testing.T) {
+	svc, _, _ := newTestSvc(t)
+	ctx := context.Background()
+	a, _, err := svc.Create(ctx, CreateInput{
+		Name: "日历时刻", TriggerType: TriggerCalendar, Timezone: "UTC",
+	}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	en := true
+	_, err = svc.ReplaceCalendarItems(ctx, a.ID, "2026-09-25", []CalendarItemInput{
+		{EmployeeID: "E1", Prompt: "晚间", Enabled: &en, RunClock: "18:30"},
+	}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.Tick(ctx, time.Date(2026, 9, 25, 18, 0, 0, 0, time.UTC))
+	early, _ := svc.ListRuns(ctx, a.ID, 10)
+	if len(early) != 0 {
+		t.Fatalf("未到 18:30 不应触发, got %d", len(early))
+	}
+	svc.Tick(ctx, time.Date(2026, 9, 25, 18, 30, 0, 0, time.UTC))
+	due, _ := svc.ListRuns(ctx, a.ID, 10)
+	if len(due) != 1 {
+		t.Fatalf("到点应触发首条, got %d", len(due))
+	}
+}
+
+type fakeNotifier struct {
+	sentChats []string
+}
+
+func (fn *fakeNotifier) NotifyJobResult(ctx context.Context, chatID, jobID, status, summary string) error {
+	fn.sentChats = append(fn.sentChats, chatID)
+	return nil
+}
+func (fn *fakeNotifier) SendText(ctx context.Context, chatID, text string) error {
+	fn.sentChats = append(fn.sentChats, chatID)
+	return nil
+}
+func (fn *fakeNotifier) ResolveTargetChat(employeeID string) string {
+	if employeeID == "E1" {
+		return "ou_feishu_fallback"
+	}
+	return ""
+}
+
+type fakeChatBinder struct {
+	boundChats map[string]string
+}
+
+func (cb *fakeChatBinder) RememberChat(jobID, chatID string) {
+	if cb.boundChats == nil {
+		cb.boundChats = map[string]string{}
+	}
+	cb.boundChats[jobID] = chatID
+}
+
+func TestFireFallbackToEmployeeChat(t *testing.T) {
+	svc, _, _ := newTestSvc(t)
+	ctx := context.Background()
+	fn := &fakeNotifier{}
+	cb := &fakeChatBinder{}
+	svc.SetNotify(fn, cb)
+
+	// NotifyChatID 为空
+	a, _, err := svc.Create(ctx, CreateInput{
+		Name: "兜底通知测试", TriggerType: TriggerWebhook,
+		EmployeeID: "E1", Prompt: "ping", NotifyChatID: "",
+	}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, j, err := svc.Fire(ctx, FireRequest{
+		Automation: a, TriggerSource: "webhook",
+	}, "admin", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 验证 RememberChat 与飞书通知均自动使用了员工绑定的 open_id
+	if cb.boundChats[j.ID] != "ou_feishu_fallback" {
+		t.Fatalf("RememberChat 应兜底为 ou_feishu_fallback, got %s", cb.boundChats[j.ID])
+	}
+	found := false
+	for _, c := range fn.sentChats {
+		if c == "ou_feishu_fallback" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("飞书通知应送达 ou_feishu_fallback, sent: %+v", fn.sentChats)
+	}
+}
+

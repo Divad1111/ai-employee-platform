@@ -1,9 +1,11 @@
 /**
  * 配额管理（§12–13）
- * 角色预设：同一角色统一月度限额；个人 USER 策略优先覆盖。
+ * 角色预设：同一角色统一月度限额。
+ * 用户例外：替换该用户的角色基数。用户额外：在基数上再加。
  */
 import { FormEvent, useEffect, useMemo, useState } from 'react'
-import { apiGet, apiPost } from '../api/client'
+import { apiDelete, apiGet, apiPost } from '../api/client'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SearchableSelect, type SearchOption } from '../components/SearchableSelect'
 import { RESOURCE_TYPE_LABEL, RESOURCE_TYPE_OPTIONS, roleDisplayName } from '../lib/rbacLabels'
 import { usePerm } from '../stores/permissions'
@@ -43,6 +45,8 @@ export function QuotasPage() {
   const [workstations, setWorkstations] = useState<WSRow[]>([])
   const [employees, setEmployees] = useState<EmpRow[]>([])
   const [roles, setRoles] = useState<RoleItem[]>([])
+  const [deleteTarget, setDeleteTarget] = useState<Policy | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   const typeOptions = useMemo(
     () => RESOURCE_TYPE_OPTIONS.map((o) => ({ value: o.value, label: o.label })),
@@ -59,7 +63,7 @@ export function QuotasPage() {
   )
 
   const resourceOptions: SearchOption[] = useMemo(() => {
-    if (resourceType === 'USER') {
+    if (resourceType === 'USER' || resourceType === 'USER_BONUS') {
       return users.map((u) => ({
         value: u.id,
         label: `${u.display_name || u.username}（${u.username}）`,
@@ -101,7 +105,7 @@ export function QuotasPage() {
       const r = roles.find((x) => x.name === p.resource_id)
       return roleDisplayName(p.resource_id, r?.description)
     }
-    if (p.resource_type === 'USER') {
+    if (p.resource_type === 'USER' || p.resource_type === 'USER_BONUS') {
       const u = users.find((x) => x.id === p.resource_id)
       return u ? `${u.display_name || u.username}` : p.resource_id
     }
@@ -150,10 +154,40 @@ export function QuotasPage() {
         concurrency_limit: 0,
         enabled: true,
       })
-      setMsg(resourceType === 'ROLE' ? '角色预设已保存' : '策略已保存')
+      setMsg(
+        resourceType === 'ROLE'
+          ? '角色预设已保存'
+          : resourceType === 'USER_BONUS'
+            ? '用户额外配额已保存（将加在角色或例外之上）'
+            : resourceType === 'USER'
+              ? '用户例外已保存（替换该用户的角色基数）'
+              : '策略已保存',
+      )
       await load()
     } catch (ex: unknown) {
       setErr(ex instanceof Error ? ex.message : String(ex))
+    }
+  }
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return
+    setDeleting(true)
+    setErr('')
+    setMsg('')
+    try {
+      const q = new URLSearchParams({
+        resource_type: deleteTarget.resource_type,
+        resource_id: deleteTarget.resource_id,
+        period_type: deleteTarget.period_type || 'MONTHLY',
+      })
+      await apiDelete(`/quotas?${q.toString()}`)
+      setMsg(`已删除 ${RESOURCE_TYPE_LABEL[deleteTarget.resource_type] || deleteTarget.resource_type}：${resolveLabel(deleteTarget)}`)
+      setDeleteTarget(null)
+      await load()
+    } catch (ex: unknown) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -182,8 +216,8 @@ export function QuotasPage() {
       <div className="page-header">
         <h1>Token / 配额</h1>
         <p>
-          优先按「角色预设」统一限额；仅当个别用户需要例外时再配置个人策略。
-          解析顺序：个人 USER &gt; 角色 ROLE（多角色取最高限额）&gt; 不限。
+          角色预设是默认月度上限（多角色取最高）。「用户例外」会单独指定该用户的基数并替换角色额度；「用户额外」再加在基数之上。
+          有效限额 =（例外或角色）+ 额外。用量仍按人累计。
         </p>
       </div>
 
@@ -235,7 +269,7 @@ export function QuotasPage() {
         <div className="panel-header">
           <div>
             <h2>新增 / 更新策略</h2>
-            <p>角色预设改上面表格即可；此处用于例外个人 / 工作站 / 数字员工，或新增自定义角色预设</p>
+            <p>角色预设改上面表格。「用户例外」替换角色基数；「用户额外」在基数上相加</p>
           </div>
         </div>
         <form className="stack-form" onSubmit={onSave}>
@@ -282,7 +316,7 @@ export function QuotasPage() {
       <div className="panel">
         <div className="panel-header">
           <div>
-            <h2>例外与其它策略</h2>
+            <h2>例外、额外与其它策略</h2>
             <p>共 {otherPolicies.length} 条（不含角色预设）</p>
           </div>
         </div>
@@ -295,6 +329,7 @@ export function QuotasPage() {
                 <th>周期</th>
                 <th>Token 限额</th>
                 <th>启用</th>
+                {canUpdate ? <th className="col-actions">操作</th> : null}
               </tr>
             </thead>
             <tbody>
@@ -308,15 +343,36 @@ export function QuotasPage() {
                   <td>{p.period_type === 'MONTHLY' ? '每月' : p.period_type}</td>
                   <td>{p.token_limit}</td>
                   <td>{p.enabled ? '是' : '否'}</td>
+                  {canUpdate ? (
+                    <td className="col-actions">
+                      <button type="button" className="btn-ghost btn-sm" style={{ color: '#dc2626' }} onClick={() => setDeleteTarget(p)}>
+                        删除
+                      </button>
+                    </td>
+                  ) : null}
                 </tr>
               ))}
               {!otherPolicies.length ? (
-                <tr><td colSpan={5} className="empty-tip">暂无个人/工作站例外策略（多数场景只需改角色预设）</td></tr>
+                <tr><td colSpan={canUpdate ? 6 : 5} className="empty-tip">暂无个人例外、额外或工作站策略（多数场景只需改角色预设）</td></tr>
               ) : null}
             </tbody>
           </table>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="删除配额策略"
+        description="删除后该条不再参与限额计算。角色预设不会出现在这里，也不能从这里删除。"
+        targetLabel={deleteTarget ? `${RESOURCE_TYPE_LABEL[deleteTarget.resource_type] || deleteTarget.resource_type} · ${resolveLabel(deleteTarget)}` : ''}
+        targetMeta={deleteTarget ? `限额 ${deleteTarget.token_limit} Token / 月` : ''}
+        confirmText={deleting ? '删除中…' : '删除'}
+        busy={deleting}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => {
+          if (!deleting) setDeleteTarget(null)
+        }}
+      />
     </div>
   )
 }

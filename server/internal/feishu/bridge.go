@@ -2,10 +2,12 @@ package feishu
 
 import (
 	"context"
+	"errors"
 
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/job"
 	"github.com/ai-employee-platform/server/internal/message"
+	"github.com/ai-employee-platform/server/internal/quota"
 	"github.com/ai-employee-platform/server/internal/scheduler"
 )
 
@@ -13,6 +15,9 @@ import (
 type ChatBinder interface {
 	RememberChat(jobID, chatID string)
 }
+
+// UserRoles 查询平台用户角色，供配额检查。
+type UserRoles func(ctx context.Context, userID string) []string
 
 // Bridge 将飞书接入接到 Employee/Job/Message/Scheduler/Notification。
 type Bridge struct {
@@ -22,6 +27,8 @@ type Bridge struct {
 	Scheduler *scheduler.Service
 	Notify    ChatBinder
 	Feishu    *Service
+	Quota     *quota.Service
+	Roles     UserRoles
 }
 
 // ResolveAlias 实现 EmployeeChecker。
@@ -59,7 +66,7 @@ func (b *Bridge) GetEmployeeName(ctx context.Context, employeeID string) string 
 }
 
 // CreateFromFeishu 实现 JobCreator：写 Message → 建 Job → 尝试调度。
-func (b *Bridge) CreateFromFeishu(ctx context.Context, employeeID, prompt, idempotencyKey, chatID, messageID string) (string, error) {
+func (b *Bridge) CreateFromFeishu(ctx context.Context, employeeID, prompt, idempotencyKey, chatID, messageID, senderOpenID string) (string, error) {
 	_, _ = b.Messages.Send(ctx, message.SendInput{
 		SenderType: message.TypeUser, SenderID: "feishu:" + messageID,
 		ReceiverType: message.TypeEmployee, ReceiverID: employeeID,
@@ -70,6 +77,28 @@ func (b *Bridge) CreateFromFeishu(ctx context.Context, employeeID, prompt, idemp
 	if err != nil {
 		return "", err
 	}
+	userID := b.feishuUserID(ctx, senderOpenID, e)
+	if userID == "" {
+		return "", errors.New("该飞书账号未绑定平台用户，无法计入配额")
+	}
+	if b.Quota != nil {
+		var roles []string
+		if b.Roles != nil {
+			roles = b.Roles(ctx, userID)
+		}
+		if err := b.Quota.CheckUser(ctx, userID, roles, 1, 1); err != nil {
+			if errors.Is(err, quota.ErrExceeded) {
+				return "", errors.New("本月 Token 配额已用尽，无法创建新任务")
+			}
+			return "", err
+		}
+	}
+	clientIP := senderOpenID
+	if clientIP == "" && b.Feishu != nil {
+		if bnd := b.Feishu.BindingByEmployee(employeeID); bnd != nil {
+			clientIP = bnd.FeishuOpenID
+		}
+	}
 	j, _, err := b.Jobs.Create(ctx, job.CreateInput{
 		EmployeeID:     employeeID,
 		WorkspaceID:    e.WorkspaceID,
@@ -77,18 +106,42 @@ func (b *Bridge) CreateFromFeishu(ctx context.Context, employeeID, prompt, idemp
 		Prompt:         prompt,
 		IdempotencyKey: idempotencyKey,
 		TimeoutSec:     600,
-		CreatedBy:      "feishu",
-	}, "feishu", "")
+		CreatedBy:      userID,
+		Source:         job.SourceFeishu,
+	}, userID, clientIP)
 	if err != nil {
 		return "", err
 	}
-	if b.Notify != nil && chatID != "" {
-		b.Notify.RememberChat(j.ID, chatID)
+	notifyTarget := chatID
+	if notifyTarget == "" && b.Feishu != nil {
+		notifyTarget = b.Feishu.ResolveTargetChat(employeeID)
+	}
+	if b.Notify != nil && notifyTarget != "" {
+		b.Notify.RememberChat(j.ID, notifyTarget)
 	}
 	if b.Scheduler != nil {
 		_, _ = b.Scheduler.ScheduleJob(ctx, j.ID)
 	}
 	return j.ID, nil
+}
+
+// feishuUserID 用飞书发送者 OpenID 匹配绑定，再取该数字员工的归属用户。
+func (b *Bridge) feishuUserID(ctx context.Context, senderOpenID string, target *employee.Employee) string {
+	if b.Feishu == nil || b.Employees == nil || senderOpenID == "" {
+		return ""
+	}
+	boundEmp := b.Feishu.EmployeeByOpenID(senderOpenID)
+	if boundEmp == "" {
+		return ""
+	}
+	if target != nil && target.ID == boundEmp && target.OwnerUserID != "" {
+		return target.OwnerUserID
+	}
+	e, err := b.Employees.Get(ctx, boundEmp)
+	if err != nil || e == nil {
+		return ""
+	}
+	return e.OwnerUserID
 }
 
 // Wire 把 Bridge 挂到 Feishu Service。

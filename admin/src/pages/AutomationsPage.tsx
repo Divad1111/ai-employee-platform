@@ -23,6 +23,7 @@ import { IconAlertTriangle, IconClock, IconMaximize, IconMinimize, IconPlus, Ico
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
 import { SearchableSelect } from '../components/SearchableSelect'
 import { getUser, setSession } from '../stores/session'
+import { formatDateTime, localTimeZone, timeZoneLabel, zonedYMD } from '../lib/time'
 
 type Tab = 'cron' | 'calendar' | 'webhook'
 
@@ -358,7 +359,7 @@ function CronTab(props: {
         employee_id: employeeId,
         prompt,
         notify_chat_id: chatId,
-        timezone: 'Asia/Shanghai',
+        timezone: localTimeZone(),
         trigger_config: {
           preset,
           expr: built,
@@ -452,7 +453,7 @@ function CronTab(props: {
                 </div>
                 <div className="auto-time-row">
                   <label>
-                    时（0–23）
+                    时（0–23，{timeZoneLabel()}）
                     <select value={hour} onChange={(e) => setHour(Number(e.target.value))}>
                       {Array.from({ length: 24 }, (_, i) => (
                         <option key={i} value={i}>
@@ -531,7 +532,7 @@ function CronTab(props: {
             )}
 
             <div className="auto-cron-preview">
-              将按：<strong>{describeCron({ preset, hour, minute, weekday, day, month, expr: previewExpr })}</strong>
+              将按 {timeZoneLabel()}：<strong>{describeCron({ preset, hour, minute, weekday, day, month, expr: previewExpr })}</strong>
               <span className="mono" style={{ marginLeft: 8 }}>
                 {previewExpr}
               </span>
@@ -539,7 +540,7 @@ function CronTab(props: {
 
             <label>
               飞书通知 Chat ID
-              <input value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="oc_xxx" />
+              <input value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="例如 oc_xxx，留空则默认使用数字员工绑定的飞书 OpenID 或群聊" />
             </label>
             <button type="submit">创建</button>
           </form>
@@ -572,7 +573,7 @@ function CronTab(props: {
                     <td>{a.name}</td>
                     <td>{props.empMap[a.employee_id] || a.employee_id}</td>
                     <td>
-                      <div>{describeCron(cfg)}</div>
+                      <div>{describeCron(cfg)} · {timeZoneLabel(a.timezone || localTimeZone())}</div>
                       <span className="mono" style={{ fontSize: 11 }}>
                         {String(cfg.expr || '')}
                       </span>
@@ -639,7 +640,7 @@ function CronTab(props: {
             <ul className="mono" style={{ fontSize: 12, margin: 0, paddingLeft: '1.2rem' }}>
               {runs.map((r) => (
                 <li key={r.id}>
-                  {r.created_at} · {r.status} · job={r.job_id || '-'} · {r.trigger_source}
+                  {formatDateTime(r.created_at)} · {r.status} · job={r.job_id || '-'} · {r.trigger_source}
                 </li>
               ))}
             </ul>
@@ -676,14 +677,15 @@ function CalendarTab(props: {
   onMsg: (s: string) => void
   onError: (s: string) => void
 }) {
-  const now = new Date()
-  const [year, setYear] = useState(now.getFullYear())
-  const [month, setMonth] = useState(now.getMonth())
-  const [selected, setSelected] = useState(formatDate(now.getFullYear(), now.getMonth(), now.getDate()))
+  const today = zonedYMD()
+  const [year, setYear] = useState(today.year)
+  const [month, setMonth] = useState(today.month)
+  const [selected, setSelected] = useState(formatDate(today.year, today.month, today.day))
   const [autoId, setAutoId] = useState('')
   const [dayItems, setDayItems] = useState<CalendarItem[]>([])
   const [monthCounts, setMonthCounts] = useState<Record<string, number>>({})
   const [drafts, setDrafts] = useState<Array<{ employee_id: string; prompt: string }>>([{ employee_id: '', prompt: '' }])
+  const [runClock, setRunClock] = useState('09:00')
   const [newName, setNewName] = useState('默认日历')
   const [chatId, setChatId] = useState('')
 
@@ -694,7 +696,8 @@ function CalendarTab(props: {
   )
   const dim = daysInMonth(year, month)
   const firstDow = new Date(year, month, 1).getDay()
-  const todayStr = formatDate(now.getFullYear(), now.getMonth(), now.getDate())
+  const todayParts = zonedYMD()
+  const todayStr = formatDate(todayParts.year, todayParts.month, todayParts.day)
 
   useEffect(() => {
     if (autoId && !calendarAutos.some((a) => a.id === autoId)) {
@@ -734,6 +737,7 @@ function CalendarTab(props: {
       .then((r) => {
         const list = r.items ?? []
         setDayItems(list)
+        setRunClock(list[0]?.run_clock || '09:00')
         setDrafts(list.length ? list.map((i) => ({ employee_id: i.employee_id, prompt: i.prompt })) : [{ employee_id: '', prompt: '' }])
       })
       .catch((e) => props.onError(e instanceof Error ? e.message : '加载日历失败'))
@@ -752,7 +756,7 @@ function CalendarTab(props: {
       name: newName || '默认日历',
       trigger_type: 'calendar',
       notify_chat_id: chatId,
-      timezone: 'Asia/Shanghai',
+      timezone: localTimeZone(),
       trigger_config: {},
     })
     props.onReload()
@@ -768,9 +772,13 @@ function CalendarTab(props: {
         props.onError('请至少填写一步：数字员工与 Prompt')
         return
       }
+      if (!/^\d{2}:\d{2}$/.test(runClock)) {
+        props.onError('请填写当天执行时间，格式 HH:MM')
+        return
+      }
       const id = await ensureCalendar()
-      await putCalendarItems(id, selected, clean)
-      props.onMsg(`${selected} 已保存 ${clean.length} 条`)
+      await putCalendarItems(id, selected, clean, runClock)
+      props.onMsg(`${selected} ${runClock} 已保存 ${clean.length} 条`)
       const r = await listCalendarItems(id, selected)
       setDayItems(r.items ?? [])
       await refreshMonthDots(id, year, month)
@@ -792,7 +800,7 @@ function CalendarTab(props: {
               onChange={(e) => setYear(Number(e.target.value))}
               aria-label="年份"
             >
-              {Array.from({ length: 11 }, (_, i) => now.getFullYear() - 5 + i).map((y) => (
+              {Array.from({ length: 11 }, (_, i) => zonedYMD().year - 5 + i).map((y) => (
                 <option key={y} value={y}>
                   {y} 年
                 </option>
@@ -813,13 +821,15 @@ function CalendarTab(props: {
             type="button"
             className="btn-ghost btn-sm"
             onClick={() => {
-              setYear(now.getFullYear())
-              setMonth(now.getMonth())
-              setSelected(todayStr)
+              const t = zonedYMD()
+              setYear(t.year)
+              setMonth(t.month)
+              setSelected(formatDate(t.year, t.month, t.day))
             }}
           >
             今天
           </button>
+          <span className="muted" style={{ fontSize: 12 }}>{timeZoneLabel()}</span>
         </div>
 
         <div className="stack-form" style={{ marginBottom: '0.75rem' }}>
@@ -847,7 +857,7 @@ function CalendarTab(props: {
               </label>
               <label>
                 飞书 Chat ID
-                <input value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="oc_xxx" />
+                <input value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="例如 oc_xxx，留空则默认使用数字员工绑定的飞书 OpenID 或群聊" />
               </label>
             </>
           )}
@@ -910,8 +920,14 @@ function CalendarTab(props: {
         <div className="panel-header">
           <div>
             <h2>{selected} 任务链</h2>
-            <p>已存 {dayItems.length} 条 · 上一条 SUCCESS 后自动触发下一条</p>
+            <p>已存 {dayItems.length} 条 · 到达当天时刻后启动第 1 步，上一条成功后再触发下一步 · {timeZoneLabel()}</p>
           </div>
+        </div>
+        <div className="auto-time-row" style={{ marginBottom: '0.75rem' }}>
+          <label>
+            当天执行时间（{timeZoneLabel()}）
+            <input type="time" value={runClock} onChange={(e) => setRunClock(e.target.value)} required />
+          </label>
         </div>
 
         {drafts.map((d, idx) => (
@@ -1013,7 +1029,7 @@ function WebhookTab(props: {
         employee_id: employeeId,
         prompt,
         notify_chat_id: chatId,
-        timezone: 'Asia/Shanghai',
+        timezone: localTimeZone(),
         trigger_config: {
           auth_modes: ['hmac', 'bearer'],
           ip_allowlist: ipList
@@ -1146,7 +1162,7 @@ function WebhookTab(props: {
             </label>
             <label>
               飞书 Chat ID
-              <input value={chatId} onChange={(e) => setChatId(e.target.value)} />
+              <input value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="例如 oc_xxx，留空则默认使用数字员工绑定的飞书 OpenID 或群聊" />
             </label>
             <label>
               IP 白名单（逗号分隔，可留空）
@@ -1316,7 +1332,7 @@ function WebhookTab(props: {
                               <pre className="mono">{a.prompt || '—'}</pre>
                             </div>
                             <div>
-                              <strong>飞书 Chat</strong> <span className="mono">{a.notify_chat_id || '未配置'}</span>
+                              <strong>飞书 Chat</strong> <span className="mono">{a.notify_chat_id || '默认使用关联员工 (OpenID / 群聊)'}</span>
                             </div>
                             <div>
                               <strong>调用示例</strong>
@@ -1327,10 +1343,15 @@ curl -X POST '${url}' \\
   -d '{}'
 
 # HMAC：Signature = hex(hmac_sha256(secret, timestamp + "." + body))
+BODY='{}'
+TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+SIG=$(printf '%s' "$TS.$BODY" | openssl dgst -sha256 -hmac '<hmac_secret>' | awk '{print $2}')
 curl -X POST '${url}' \\
-  -H 'X-AIE-Timestamp: <RFC3339>' \\
-  -H 'X-AIE-Signature: <hex>' \\
-  -d '{}'`}</pre>
+  -H "X-AIE-Timestamp: $TS" \\
+  -H "X-AIE-Signature: $SIG" \\
+  -H 'X-Idempotency-Key: unique-1' \\
+  -H 'Content-Type: application/json' \\
+  -d "$BODY"`}</pre>
                             </div>
                           </div>
                         </td>
@@ -1355,7 +1376,7 @@ curl -X POST '${url}' \\
             <ul className="mono" style={{ fontSize: 12, margin: 0, paddingLeft: '1.2rem' }}>
               {runs.map((r) => (
                 <li key={r.id}>
-                  {r.created_at} · {r.status} · {r.error || 'ok'}
+                  {formatDateTime(r.created_at)} · {r.status} · {r.error || 'ok'}
                 </li>
               ))}
             </ul>

@@ -121,3 +121,80 @@ func TestJobTimeoutFromRunning(t *testing.T) {
 		t.Fatal("TIMEOUT 终态不可恢复为 RUNNING")
 	}
 }
+
+func TestJobSourceAndAuditExecute(t *testing.T) {
+	ctx := context.Background()
+	aud := audit.NewMemory()
+	svc := job.NewService(job.NewMemoryStore(), aud, eventbus.New(10))
+
+	// 1. 显式来源
+	j1, _, err := svc.Create(ctx, job.CreateInput{
+		EmployeeID:     "E-1",
+		Prompt:         "跑一下测试",
+		IdempotencyKey: "k-wh-1",
+		Source:         job.SourceWebhook,
+	}, "user-1", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("创建失败: %v", err)
+	}
+	if j1.Source != job.SourceWebhook {
+		t.Fatalf("期望来源 %s, 得到 %s", job.SourceWebhook, j1.Source)
+	}
+
+	// 2. 默认来源
+	j2, _, err := svc.Create(ctx, job.CreateInput{
+		EmployeeID:     "E-1",
+		Prompt:         "默认来源任务",
+		IdempotencyKey: "k-def-1",
+	}, "user-1", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("创建失败: %v", err)
+	}
+	if j2.Source != job.SourceWeb {
+		t.Fatalf("期望默认来源 %s, 得到 %s", job.SourceWeb, j2.Source)
+	}
+
+	// 3. 执行流转并进入终态
+	for _, st := range []string{job.StatusQueued, job.StatusAssigned, job.StatusStarting, job.StatusRunning} {
+		if _, err := svc.Transition(ctx, j1.ID, st, "workstation", "127.0.0.1", nil); err != nil {
+			t.Fatalf("transition %s 失败: %v", st, err)
+		}
+	}
+	if _, err := svc.Transition(ctx, j1.ID, job.StatusSuccess, "workstation", "127.0.0.1", map[string]string{"reply": "完成"}); err != nil {
+		t.Fatalf("transition SUCCESS 失败: %v", err)
+	}
+
+	// 4. 验证审计日志记录
+	entries := aud.Query(audit.Filter{Limit: 20})
+	var foundCreate, foundExecute bool
+	for _, e := range entries {
+		if e.Action == "job.create" && e.Metadata["id"] == j1.ID {
+			foundCreate = true
+			if e.Metadata["prompt"] != "跑一下测试" {
+				t.Errorf("job.create 缺少正确 prompt: %v", e.Metadata)
+			}
+			if e.Metadata["source"] != job.SourceWebhook {
+				t.Errorf("job.create 缺少正确 source: %v", e.Metadata)
+			}
+		}
+		if e.Action == "job.execute" && e.Metadata["id"] == j1.ID {
+			foundExecute = true
+			if e.Metadata["prompt"] != "跑一下测试" {
+				t.Errorf("job.execute 缺少正确 prompt: %v", e.Metadata)
+			}
+			if e.Metadata["source"] != job.SourceWebhook {
+				t.Errorf("job.execute 缺少正确 source: %v", e.Metadata)
+			}
+			if e.Result != "success" {
+				t.Errorf("job.execute 期望 result=success, 得到 %s", e.Result)
+			}
+		}
+	}
+	if !foundCreate {
+		t.Errorf("未找到 job.create 审计日志")
+	}
+	if !foundExecute {
+		t.Errorf("未找到 job.execute 审计日志")
+	}
+}
+

@@ -10,6 +10,7 @@ import { PageFeatureGuide } from '../components/PageFeatureGuide'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SearchableSelect } from '../components/SearchableSelect'
 import { usePerm } from '../stores/permissions'
+import { formatDateTime } from '../lib/time'
 
 type Workspace = {
   id: string
@@ -343,7 +344,7 @@ export function WorkspacesPage() {
                     )}
                   </td>
                   <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                    {w.created_at ? new Date(w.created_at).toLocaleString() : '—'}
+                    {w.created_at ? formatDateTime(w.created_at) : '—'}
                   </td>
                   <td>
                     {canWrite ? (

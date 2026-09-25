@@ -101,12 +101,12 @@ func (p *PostgresStore) Delete(ctx context.Context, id string) error {
 
 func (p *PostgresStore) SaveCalendarItem(ctx context.Context, item *CalendarItem) error {
 	_, err := p.db.ExecContext(ctx, `
-INSERT INTO automation_calendar_items (id, automation_id, run_date, seq, employee_id, prompt, enabled, created_at, updated_at)
-VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9)
+INSERT INTO automation_calendar_items (id, automation_id, run_date, seq, employee_id, prompt, enabled, run_clock, created_at, updated_at)
+VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10)
 ON CONFLICT (id) DO UPDATE SET
   seq=EXCLUDED.seq, employee_id=EXCLUDED.employee_id, prompt=EXCLUDED.prompt,
-  enabled=EXCLUDED.enabled, updated_at=EXCLUDED.updated_at`,
-		item.ID, item.AutomationID, item.RunDate, item.Seq, item.EmployeeID, item.Prompt, item.Enabled, item.CreatedAt, item.UpdatedAt,
+  enabled=EXCLUDED.enabled, run_clock=EXCLUDED.run_clock, updated_at=EXCLUDED.updated_at`,
+		item.ID, item.AutomationID, item.RunDate, item.Seq, item.EmployeeID, item.Prompt, item.Enabled, item.RunClock, item.CreatedAt, item.UpdatedAt,
 	)
 	return err
 }
@@ -116,11 +116,11 @@ func (p *PostgresStore) ListCalendarItems(ctx context.Context, automationID, run
 	var err error
 	if runDate == "" {
 		rows, err = p.db.QueryContext(ctx, `
-SELECT id, automation_id, run_date::text, seq, employee_id, prompt, enabled, created_at, updated_at
+SELECT id, automation_id, run_date::text, seq, employee_id, prompt, enabled, COALESCE(run_clock, ''), created_at, updated_at
 FROM automation_calendar_items WHERE automation_id=$1 ORDER BY run_date, seq`, automationID)
 	} else {
 		rows, err = p.db.QueryContext(ctx, `
-SELECT id, automation_id, run_date::text, seq, employee_id, prompt, enabled, created_at, updated_at
+SELECT id, automation_id, run_date::text, seq, employee_id, prompt, enabled, COALESCE(run_clock, ''), created_at, updated_at
 FROM automation_calendar_items WHERE automation_id=$1 AND run_date=$2::date ORDER BY seq`, automationID, runDate)
 	}
 	if err != nil {
@@ -130,7 +130,7 @@ FROM automation_calendar_items WHERE automation_id=$1 AND run_date=$2::date ORDE
 	var out []*CalendarItem
 	for rows.Next() {
 		var it CalendarItem
-		if err := rows.Scan(&it.ID, &it.AutomationID, &it.RunDate, &it.Seq, &it.EmployeeID, &it.Prompt, &it.Enabled, &it.CreatedAt, &it.UpdatedAt); err != nil {
+		if err := rows.Scan(&it.ID, &it.AutomationID, &it.RunDate, &it.Seq, &it.EmployeeID, &it.Prompt, &it.Enabled, &it.RunClock, &it.CreatedAt, &it.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &it)
@@ -140,10 +140,10 @@ FROM automation_calendar_items WHERE automation_id=$1 AND run_date=$2::date ORDE
 
 func (p *PostgresStore) GetCalendarItem(ctx context.Context, id string) (*CalendarItem, error) {
 	row := p.db.QueryRowContext(ctx, `
-SELECT id, automation_id, run_date::text, seq, employee_id, prompt, enabled, created_at, updated_at
+SELECT id, automation_id, run_date::text, seq, employee_id, prompt, enabled, COALESCE(run_clock, ''), created_at, updated_at
 FROM automation_calendar_items WHERE id=$1`, id)
 	var it CalendarItem
-	err := row.Scan(&it.ID, &it.AutomationID, &it.RunDate, &it.Seq, &it.EmployeeID, &it.Prompt, &it.Enabled, &it.CreatedAt, &it.UpdatedAt)
+	err := row.Scan(&it.ID, &it.AutomationID, &it.RunDate, &it.Seq, &it.EmployeeID, &it.Prompt, &it.Enabled, &it.RunClock, &it.CreatedAt, &it.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -166,9 +166,9 @@ func (p *PostgresStore) ReplaceCalendarItems(ctx context.Context, automationID, 
 	}
 	for _, item := range items {
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO automation_calendar_items (id, automation_id, run_date, seq, employee_id, prompt, enabled, created_at, updated_at)
-VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9)`,
-			item.ID, item.AutomationID, item.RunDate, item.Seq, item.EmployeeID, item.Prompt, item.Enabled, item.CreatedAt, item.UpdatedAt,
+INSERT INTO automation_calendar_items (id, automation_id, run_date, seq, employee_id, prompt, enabled, run_clock, created_at, updated_at)
+VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10)`,
+			item.ID, item.AutomationID, item.RunDate, item.Seq, item.EmployeeID, item.Prompt, item.Enabled, item.RunClock, item.CreatedAt, item.UpdatedAt,
 		); err != nil {
 			return err
 		}
@@ -278,12 +278,12 @@ WHERE calendar_item_id=$1 AND status IN ('triggered','job_created','success')`, 
 
 func (p *PostgresStore) NextCalendarItem(ctx context.Context, automationID, runDate string, afterSeq int) (*CalendarItem, error) {
 	row := p.db.QueryRowContext(ctx, `
-SELECT id, automation_id, run_date::text, seq, employee_id, prompt, enabled, created_at, updated_at
+SELECT id, automation_id, run_date::text, seq, employee_id, prompt, enabled, COALESCE(run_clock, ''), created_at, updated_at
 FROM automation_calendar_items
 WHERE automation_id=$1 AND run_date=$2::date AND enabled=TRUE AND seq>$3
 ORDER BY seq ASC LIMIT 1`, automationID, runDate, afterSeq)
 	var it CalendarItem
-	err := row.Scan(&it.ID, &it.AutomationID, &it.RunDate, &it.Seq, &it.EmployeeID, &it.Prompt, &it.Enabled, &it.CreatedAt, &it.UpdatedAt)
+	err := row.Scan(&it.ID, &it.AutomationID, &it.RunDate, &it.Seq, &it.EmployeeID, &it.Prompt, &it.Enabled, &it.RunClock, &it.CreatedAt, &it.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

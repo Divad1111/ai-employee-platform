@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ai-employee-platform/server/internal/audit"
 	"github.com/ai-employee-platform/server/internal/idgen"
 )
 
@@ -144,6 +145,12 @@ func (s *Service) Update(ctx context.Context, id, workstationID, path, repo, bra
 	if err != nil {
 		return nil, err
 	}
+	changes := []string{
+		audit.FormatChange("工作站", w.WorkstationID, pick(workstationID, w.WorkstationID)),
+		audit.FormatChange("路径", w.Path, pick(path, w.Path)),
+		audit.FormatChange("仓库", w.Repository, pick(repo, w.Repository)),
+		audit.FormatChange("分支", w.Branch, pick(branch, w.Branch)),
+	}
 	if workstationID != "" {
 		w.WorkstationID = workstationID
 	}
@@ -160,8 +167,17 @@ func (s *Service) Update(ctx context.Context, id, workstationID, path, repo, bra
 	if err := s.store.Save(ctx, w); err != nil {
 		return nil, err
 	}
-	s.audit.Log(ctx, "USER", actorID, "workspace.update", "success", ip, map[string]string{"id": id})
+	s.audit.Log(ctx, "USER", actorID, "workspace.update", "success", ip, map[string]string{
+		"id": id, "summary": audit.JoinSummary(changes...),
+	})
 	return w, nil
+}
+
+func pick(next, cur string) string {
+	if next == "" {
+		return cur
+	}
+	return next
 }
 
 func (s *Service) Delete(ctx context.Context, id, actorID, ip string) error {

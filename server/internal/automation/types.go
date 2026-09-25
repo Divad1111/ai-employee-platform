@@ -41,15 +41,17 @@ type Automation struct {
 
 // CalendarItem 日历日条目（同日按 seq 串行：成功后才触发下一条）。
 type CalendarItem struct {
-	ID           string    `json:"id"`
-	AutomationID string    `json:"automation_id"`
-	RunDate      string    `json:"run_date"` // YYYY-MM-DD
-	Seq          int       `json:"seq"`
-	EmployeeID   string    `json:"employee_id"`
-	Prompt       string    `json:"prompt"`
-	Enabled      bool      `json:"enabled"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID           string `json:"id"`
+	AutomationID string `json:"automation_id"`
+	RunDate      string `json:"run_date"` // YYYY-MM-DD
+	Seq          int    `json:"seq"`
+	EmployeeID   string `json:"employee_id"`
+	Prompt       string `json:"prompt"`
+	Enabled      bool   `json:"enabled"`
+	// RunClock 当天任务链的开始时刻，HH:MM，按规则时区。空表示不限时刻（兼容旧数据）。
+	RunClock  string    `json:"run_clock,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // Run 一次触发记录。
@@ -71,7 +73,7 @@ type Run struct {
 // 优先使用 Expr；若为空则按 Preset + Hour/Minute 等字段生成。
 type CronConfig struct {
 	Expr    string `json:"expr"`
-	Preset  string `json:"preset,omitempty"` // daily|weekly|monthly|yearly|custom
+	Preset  string `json:"preset,omitempty"`  // daily|weekly|monthly|yearly|custom
 	Hour    *int   `json:"hour,omitempty"`    // 0-23，默认 9
 	Minute  *int   `json:"minute,omitempty"`  // 0-59，默认 0
 	Weekday *int   `json:"weekday,omitempty"` // 0=周日…6=周六，weekly 用，默认 1（周一）
@@ -117,6 +119,7 @@ type CalendarItemInput struct {
 	EmployeeID string `json:"employee_id"`
 	Prompt     string `json:"prompt"`
 	Enabled    *bool  `json:"enabled,omitempty"`
+	RunClock   string `json:"run_clock,omitempty"`
 }
 
 // FireRequest 一次待触发请求（由 Tick / Webhook / 日历链产生）。

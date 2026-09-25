@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -129,8 +130,13 @@ func (s *Server) Connect(stream aiev1.WorkerService_ConnectServer) error {
 
 	s.Presence.MarkOnline(wsID)
 
-	// Resume：从 last_acked+1 续传未确认命令
-	for _, cmd := range s.Commands.UnackedAfter(wsID, hello.GetLastAckedCommandSequence()) {
+	// 控制平面重启后命令序号从 1 重新计，工作站仍记着旧的确认号。
+	// 此时 last_acked 比本进程已分配的序号更大，必须从 0 续传，否则新的 START_JOB 永远送不出去。
+	lastAck := hello.GetLastAckedCommandSequence()
+	if lastAck > s.Commands.CurrentSequence(wsID) {
+		lastAck = 0
+	}
+	for _, cmd := range s.Commands.UnackedAfter(wsID, lastAck) {
 		if err := stream.Send(&aiev1.ServerToWorker{Body: &aiev1.ServerToWorker_Command{Command: cmd}}); err != nil {
 			return err
 		}
@@ -165,6 +171,32 @@ func (s *Server) handleUpstream(wsID string, stream aiev1.WorkerService_ConnectS
 			cpu, mem, disk = r.CpuPercent, r.MemoryPercent, r.DiskPercent
 		}
 		s.Presence.Touch(wsID, hb.GetVersion(), hb.GetEmployees(), hb.GetSessions(), cpu, mem, disk)
+		var providers []string
+		for _, cap := range hb.GetCapabilities() {
+			if cap.GetKey() == "provider" && cap.GetValue() != "" {
+				providers = append(providers, cap.GetValue())
+			}
+		}
+		s.Presence.SetProviders(wsID, providers)
+		models := map[string][]reliability.ModelOption{}
+		for _, cap := range hb.GetCapabilities() {
+			if cap.GetKey() != "model" || cap.GetValue() == "" {
+				continue
+			}
+			var item struct {
+				Provider string `json:"provider"`
+				ID       string `json:"id"`
+				Label    string `json:"label"`
+			}
+			if json.Unmarshal([]byte(cap.GetValue()), &item) != nil || item.Provider == "" || item.ID == "" {
+				continue
+			}
+			if item.Label == "" {
+				item.Label = item.ID
+			}
+			models[item.Provider] = append(models[item.Provider], reliability.ModelOption{ID: item.ID, Label: item.Label})
+		}
+		s.Presence.SetModels(wsID, models)
 		return stream.Send(&aiev1.ServerToWorker{
 			Body: &aiev1.ServerToWorker_HeartbeatAck{HeartbeatAck: &aiev1.HeartbeatAck{
 				MessageId:       hb.GetMeta().GetMessageId(),
@@ -194,6 +226,10 @@ func (s *Server) handleUpstream(wsID string, stream aiev1.WorkerService_ConnectS
 		})
 	case *aiev1.WorkerToServer_CommandAck:
 		ack := body.CommandAck
+		// 拒绝的确认不能销掉命令，否则启动命令丢失，任务会一直停在 STARTING。
+		if !ack.GetAccepted() {
+			return nil
+		}
 		err := s.Commands.Ack(wsID, ack.GetCommandId(), ack.GetSequence())
 		if err != nil {
 			return err
@@ -227,6 +263,14 @@ func (s *Server) PushCommandFull(wsID string, typ aiev1.CommandType, employeeID,
 		return cmd, fmt.Errorf("下发失败（已入队）: %w", err)
 	}
 	return cmd, nil
+}
+
+// StartCommandUnacked 启动命令是否还在等工作站确认。
+func (s *Server) StartCommandUnacked(wsID, jobID string) bool {
+	if s == nil || s.Commands == nil {
+		return false
+	}
+	return s.Commands.HasUnackedJob(wsID, jobID)
 }
 
 // StartPresenceSweeper 后台扫描 Offline。

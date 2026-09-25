@@ -217,6 +217,9 @@ func (p *Provider) Start(ctx context.Context, spec providers.StartSpec) (provide
 		if len(spec.MCPServers) > 0 {
 			stdioSess.SetMCPServers(spec.MCPServers)
 		}
+		if spec.Model != "" {
+			stdioSess.SetModel(spec.Model)
+		}
 		acpSess = stdioSess
 	}
 	if err := acpSess.Start(ctx); err != nil {
@@ -285,6 +288,21 @@ func (a *agentSession) Send(ctx context.Context, input []byte) (string, error) {
 	a.p.state = StateBusy
 	a.p.mu.Unlock()
 	return a.acp.Send(ctx, input)
+}
+
+// LastUsage 读取本次 ACP prompt 的 token 用量。
+func (a *agentSession) LastUsage() (int64, int64, string, string) {
+	type reporter interface {
+		LastUsage() acp.Usage
+	}
+	if r, ok := a.acp.(reporter); ok {
+		u := r.LastUsage()
+		if u.Agent == "" {
+			u.Agent = "cursor"
+		}
+		return u.InputTokens, u.OutputTokens, u.Agent, u.Source
+	}
+	return 0, 0, "cursor", ""
 }
 func (a *agentSession) Stop(ctx context.Context) error { return a.p.Stop(ctx, a.id) }
 

@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/ai-employee-platform/workstation/internal/providers"
 	"github.com/ai-employee-platform/workstation/internal/platform"
+	"github.com/ai-employee-platform/workstation/internal/providers"
 )
 
 // 状态常量。
@@ -56,17 +56,22 @@ type Session struct {
 	EmployeeID  string
 	WorkspaceID string
 	Provider    string
+	Model       string
 	Status      string
 	PID         int
 }
 
 // Job 本地任务。
 type Job struct {
-	ID         string
-	EmployeeID string
-	SessionID  string
-	Prompt     string
-	Status     string
+	ID           string
+	EmployeeID   string
+	SessionID    string
+	Prompt       string
+	Status       string
+	InputTokens  int64
+	OutputTokens int64
+	Agent        string
+	TokenSource  string
 }
 
 // EventSink 上报事件（Outbox / 测试）。
@@ -137,11 +142,11 @@ func (m *Managers) EnsureWorkspace(id, employeeID, path string) (*Workspace, err
 
 // StartSession 按需启动；无 Job 时可不跑（调用方决定）。
 func (m *Managers) StartSession(ctx context.Context, sessID, employeeID, workspaceID, provider string) (*Session, error) {
-	return m.StartSessionWithMCP(ctx, sessID, employeeID, workspaceID, provider, nil)
+	return m.StartSessionWithMCP(ctx, sessID, employeeID, workspaceID, provider, nil, "")
 }
 
-// StartSessionWithMCP 启动 Session 并可注入 MCP Servers。
-func (m *Managers) StartSessionWithMCP(ctx context.Context, sessID, employeeID, workspaceID, provider string, mcpServers []any) (*Session, error) {
+// StartSessionWithMCP 启动 Session 并可注入 MCP Servers 与模型。
+func (m *Managers) StartSessionWithMCP(ctx context.Context, sessID, employeeID, workspaceID, provider string, mcpServers []any, model string) (*Session, error) {
 	m.mu.Lock()
 	for _, s := range m.sessions {
 		if s.EmployeeID == employeeID && s.Status != SessStopped && s.Status != SessUnknown {
@@ -170,7 +175,7 @@ func (m *Managers) StartSessionWithMCP(ctx context.Context, sessID, employeeID, 
 	}
 	s := &Session{
 		ID: sessID, EmployeeID: employeeID, WorkspaceID: workspaceID,
-		Provider: provider, Status: SessStarting,
+		Provider: provider, Model: model, Status: SessStarting,
 	}
 	m.sessions[sessID] = s
 	m.mu.Unlock()
@@ -182,6 +187,7 @@ func (m *Managers) StartSessionWithMCP(ctx context.Context, sessID, employeeID, 
 	}
 	agent, err := prov.Start(ctx, providers.StartSpec{
 		EmployeeID: employeeID, WorkspacePath: wsPath, SessionID: sessID,
+		Model:      model,
 		MCPServers: mcpServers,
 	})
 	if err != nil {
@@ -234,6 +240,35 @@ func (m *Managers) RunJob(ctx context.Context, jobID, employeeID, sessionID, pro
 		return j, "", fmt.Errorf("session 未就绪")
 	}
 	reply, err := agent.Send(ctx, []byte(prompt))
+	inTok, outTok, agentName, source := int64(0), int64(0), "", ""
+	if u, ok := agent.(interface {
+		LastUsage() (int64, int64, string, string)
+	}); ok {
+		inTok, outTok, agentName, source = u.LastUsage()
+	}
+	if agentName == "" {
+		m.mu.Lock()
+		if s, ok := m.sessions[sessionID]; ok {
+			agentName = s.Provider
+		}
+		m.mu.Unlock()
+	}
+	if inTok == 0 && outTok == 0 {
+		inTok = int64(len([]rune(prompt)))
+		outTok = int64(len([]rune(reply)))
+		source = "estimate"
+	}
+	if source == "" {
+		source = "estimate"
+	}
+	m.mu.Lock()
+	if cur, ok := m.jobs[jobID]; ok {
+		cur.InputTokens = inTok
+		cur.OutputTokens = outTok
+		cur.Agent = agentName
+		cur.TokenSource = source
+	}
+	m.mu.Unlock()
 	if err != nil {
 		m.setJob(jobID, JobFailed)
 		m.markSession(sessionID, SessReady)

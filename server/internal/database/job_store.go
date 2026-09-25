@@ -39,8 +39,9 @@ func (s *PostgresJobStore) Save(ctx context.Context, j *job.Job) error {
 		INSERT INTO jobs (
 			id, employee_id, workspace_id, session_id, workstation_id,
 			prompt, created_by, status, result, idempotency_key, timeout_sec,
-			created_at, started_at, completed_at
-		) VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			created_at, started_at, completed_at,
+			input_tokens, output_tokens, agent, token_source, source
+		) VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 		ON CONFLICT (id) DO UPDATE SET
 			workspace_id = EXCLUDED.workspace_id,
 			session_id = EXCLUDED.session_id,
@@ -48,30 +49,40 @@ func (s *PostgresJobStore) Save(ctx context.Context, j *job.Job) error {
 			status = EXCLUDED.status,
 			result = EXCLUDED.result,
 			started_at = EXCLUDED.started_at,
-			completed_at = EXCLUDED.completed_at
+			completed_at = EXCLUDED.completed_at,
+			input_tokens = EXCLUDED.input_tokens,
+			output_tokens = EXCLUDED.output_tokens,
+			agent = EXCLUDED.agent,
+			token_source = EXCLUDED.token_source,
+			source = EXCLUDED.source
 	`
+	source := j.Source
+	if source == "" {
+		source = "web"
+	}
 	_, err := s.db.SQL.ExecContext(ctx, query,
 		j.ID, j.EmployeeID, j.WorkspaceID, j.SessionID, j.WorkstationID,
 		j.Prompt, j.CreatedBy, j.Status, j.Result, j.IdempotencyKey, j.TimeoutSec,
 		j.CreatedAt, startedAt, completedAt,
+		j.InputTokens, j.OutputTokens, j.Agent, j.TokenSource, source,
 	)
 	return err
 }
 
-func (s *PostgresJobStore) Get(ctx context.Context, id string) (*job.Job, error) {
-	row := s.db.SQL.QueryRowContext(ctx, `
-		SELECT id, employee_id, COALESCE(workspace_id, ''), COALESCE(session_id, ''), COALESCE(workstation_id, ''),
+const jobSelectCols = `id, employee_id, COALESCE(workspace_id, ''), COALESCE(session_id, ''), COALESCE(workstation_id, ''),
 		       prompt, created_by, status, result, idempotency_key, timeout_sec,
-		       created_at, started_at, completed_at
-		FROM jobs WHERE id = $1`, id)
+		       created_at, started_at, completed_at,
+		       COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(agent, ''), COALESCE(token_source, ''), COALESCE(source, 'web')`
+
+func scanJob(sc interface {
+	Scan(dest ...any) error
+}) (*job.Job, error) {
 	var j job.Job
 	var startedAt, completedAt sql.NullTime
-	if err := row.Scan(&j.ID, &j.EmployeeID, &j.WorkspaceID, &j.SessionID, &j.WorkstationID,
+	if err := sc.Scan(&j.ID, &j.EmployeeID, &j.WorkspaceID, &j.SessionID, &j.WorkstationID,
 		&j.Prompt, &j.CreatedBy, &j.Status, &j.Result, &j.IdempotencyKey, &j.TimeoutSec,
-		&j.CreatedAt, &startedAt, &completedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, job.ErrNotFound
-		}
+		&j.CreatedAt, &startedAt, &completedAt,
+		&j.InputTokens, &j.OutputTokens, &j.Agent, &j.TokenSource, &j.Source); err != nil {
 		return nil, err
 	}
 	if startedAt.Valid {
@@ -81,61 +92,41 @@ func (s *PostgresJobStore) Get(ctx context.Context, id string) (*job.Job, error)
 		j.CompletedAt = completedAt.Time
 	}
 	return &j, nil
+}
+
+func (s *PostgresJobStore) Get(ctx context.Context, id string) (*job.Job, error) {
+	row := s.db.SQL.QueryRowContext(ctx, `SELECT `+jobSelectCols+` FROM jobs WHERE id = $1`, id)
+	j, err := scanJob(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, job.ErrNotFound
+	}
+	return j, err
 }
 
 func (s *PostgresJobStore) GetByIdempotency(ctx context.Context, key string) (*job.Job, error) {
-	row := s.db.SQL.QueryRowContext(ctx, `
-		SELECT id, employee_id, COALESCE(workspace_id, ''), COALESCE(session_id, ''), COALESCE(workstation_id, ''),
-		       prompt, created_by, status, result, idempotency_key, timeout_sec,
-		       created_at, started_at, completed_at
-		FROM jobs WHERE idempotency_key = $1`, key)
-	var j job.Job
-	var startedAt, completedAt sql.NullTime
-	if err := row.Scan(&j.ID, &j.EmployeeID, &j.WorkspaceID, &j.SessionID, &j.WorkstationID,
-		&j.Prompt, &j.CreatedBy, &j.Status, &j.Result, &j.IdempotencyKey, &j.TimeoutSec,
-		&j.CreatedAt, &startedAt, &completedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, err
+	row := s.db.SQL.QueryRowContext(ctx, `SELECT `+jobSelectCols+` FROM jobs WHERE idempotency_key = $1`, key)
+	j, err := scanJob(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
 	}
-	if startedAt.Valid {
-		j.StartedAt = startedAt.Time
-	}
-	if completedAt.Valid {
-		j.CompletedAt = completedAt.Time
-	}
-	return &j, nil
+	return j, err
 }
 
 func (s *PostgresJobStore) List(ctx context.Context) ([]*job.Job, error) {
-	rows, err := s.db.SQL.QueryContext(ctx, `
-		SELECT id, employee_id, COALESCE(workspace_id, ''), COALESCE(session_id, ''), COALESCE(workstation_id, ''),
-		       prompt, created_by, status, result, idempotency_key, timeout_sec,
-		       created_at, started_at, completed_at
-		FROM jobs ORDER BY created_at DESC`)
+	rows, err := s.db.SQL.QueryContext(ctx, `SELECT `+jobSelectCols+` FROM jobs ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var list []*job.Job
 	for rows.Next() {
-		var j job.Job
-		var startedAt, completedAt sql.NullTime
-		if err := rows.Scan(&j.ID, &j.EmployeeID, &j.WorkspaceID, &j.SessionID, &j.WorkstationID,
-			&j.Prompt, &j.CreatedBy, &j.Status, &j.Result, &j.IdempotencyKey, &j.TimeoutSec,
-			&j.CreatedAt, &startedAt, &completedAt); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, err
 		}
-		if startedAt.Valid {
-			j.StartedAt = startedAt.Time
-		}
-		if completedAt.Valid {
-			j.CompletedAt = completedAt.Time
-		}
-		list = append(list, &j)
+		list = append(list, j)
 	}
-	return list, nil
+	return list, rows.Err()
 }
 
 func (s *PostgresJobStore) AppendEvent(ctx context.Context, e *job.Event) error {

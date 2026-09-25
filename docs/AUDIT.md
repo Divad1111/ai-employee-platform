@@ -17,6 +17,14 @@ V1/V2 开发态：`server/internal/audit.Memory`。生产应写入 PostgreSQL `a
 - `approval.create` / `approval.approve` / `approval.reject` / `approval.totp`
 - `secret.put` / `secret.access` / `secret.bind` / `secret.rotate` / `secret.delete`
 - 既有 Login / Employee / Job / Workstation 等
+- `quota.upsert` / `quota.delete`（角色预设只改不删；可删用户例外、用户额外、工作站与数字员工配额）
+- `feishu.binding.upsert` / `feishu.binding.delete`
+- `workstation.update` / `workstation.member.add` / `workstation.member.remove` / `workstation.cert.revoke`
+- `workflow.upsert` / `workflow.delete` / `workflow.grant` / `workflow.revoke` / `workflow.import`
+- `skill.upsert` / `skill.delete` / `skill.sync`
+- `knowledge.upsert` / `knowledge.delete` / `knowledge.reindex`
+- `mcp.token.issue` / `mcp.token.revoke`（不记录 Token 明文）
+- `provider.upsert` / `provider.version.add`
 
 ## 查询与导出
 

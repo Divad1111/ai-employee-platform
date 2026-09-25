@@ -112,17 +112,8 @@ func (m *Memory) Query(f Filter) []Entry {
 		if f.TargetID != "" && !strings.EqualFold(e.TargetID, f.TargetID) {
 			continue
 		}
-		if kw != "" {
-			hit := strings.Contains(strings.ToLower(e.Action), kw) ||
-				strings.Contains(strings.ToLower(e.ActorID), kw) ||
-				strings.Contains(strings.ToLower(e.ActorType), kw) ||
-				strings.Contains(strings.ToLower(e.IP), kw) ||
-				strings.Contains(strings.ToLower(e.Result), kw) ||
-				strings.Contains(strings.ToLower(e.TargetID), kw) ||
-				strings.Contains(strings.ToLower(e.TargetType), kw)
-			if !hit {
-				continue
-			}
+		if kw != "" && !entryMatches(e, kw) {
+			continue
 		}
 		matched = append(matched, e)
 		if f.Limit > 0 && len(matched) >= f.Limit {
@@ -130,6 +121,57 @@ func (m *Memory) Query(f Filter) []Entry {
 		}
 	}
 	return matched
+}
+
+// EntryMatches 动作、操作人、IP、结果、对象与 metadata（含变更说明）的全文模糊匹配。
+func EntryMatches(e Entry, keyword string) bool {
+	return entryMatches(e, strings.ToLower(strings.TrimSpace(keyword)))
+}
+
+func entryMatches(e Entry, kw string) bool {
+	if kw == "" {
+		return true
+	}
+	fields := []string{e.Action, e.ActorID, e.ActorType, e.IP, e.Result, e.TargetID, e.TargetType}
+	for _, f := range fields {
+		if strings.Contains(strings.ToLower(f), kw) {
+			return true
+		}
+	}
+	for k, v := range e.Metadata {
+		if strings.Contains(strings.ToLower(k), kw) || strings.Contains(strings.ToLower(v), kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// FormatChange 描述单个字段的前后变化；无变化时返回空串。
+func FormatChange(label, before, after string) string {
+	if before == after {
+		return ""
+	}
+	if strings.TrimSpace(before) == "" {
+		before = "（空）"
+	}
+	if strings.TrimSpace(after) == "" {
+		after = "（空）"
+	}
+	return label + "：" + before + " → " + after
+}
+
+// JoinSummary 把多条字段变化拼成一条可读说明。
+func JoinSummary(parts ...string) string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if strings.TrimSpace(p) != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return "无字段变化"
+	}
+	return strings.Join(out, "；")
 }
 
 // ExportJSON 导出（与 Application Log 分离；不可由普通 API 删除）。

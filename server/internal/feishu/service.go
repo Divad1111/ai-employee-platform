@@ -25,6 +25,7 @@ import (
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+	larkcontact "github.com/larksuite/oapi-sdk-go/v3/service/contact/v3"
 )
 
 // 错误定义
@@ -100,7 +101,7 @@ type Sender interface {
 
 // JobCreator 创建 Job
 type JobCreator interface {
-	CreateFromFeishu(ctx context.Context, employeeID, prompt, idempotencyKey, chatID, messageID string) (jobID string, err error)
+	CreateFromFeishu(ctx context.Context, employeeID, prompt, idempotencyKey, chatID, messageID, senderOpenID string) (jobID string, err error)
 }
 
 // EmployeeChecker 校验与查询 Employee
@@ -130,6 +131,8 @@ type Service struct {
 
 	cachedStatus    *StatusResult
 	lastStatusCheck time.Time
+
+	userNameCache sync.Map // open_id (string) -> user_name (string)
 }
 
 // NewService 创建飞书集成服务
@@ -353,6 +356,7 @@ func (s *Service) rebuildLarkLocked() {
 				openID = event.Event.User.OpenId
 				if event.Event.User.Name != "" {
 					userName = event.Event.User.Name
+					s.CacheUserName(openID, userName)
 				}
 			}
 			chatID := event.Event.ChatID
@@ -690,6 +694,71 @@ func (s *Service) BindingByEmployee(employeeID string) *Binding {
 	return nil
 }
 
+// ResolveTargetChat 获取该数字员工关联的默认飞书通知目标。
+// 优先使用绑定的飞书 open_id，未设置则使用默认群聊 chat_id。
+func (s *Service) ResolveTargetChat(employeeID string) string {
+	b := s.BindingByEmployee(employeeID)
+	if b == nil {
+		return ""
+	}
+	if strings.TrimSpace(b.FeishuOpenID) != "" {
+		return strings.TrimSpace(b.FeishuOpenID)
+	}
+	return strings.TrimSpace(b.ChatID)
+}
+
+// CacheUserName 主动缓存 OpenID 对应的用户姓名
+func (s *Service) CacheUserName(openID, name string) {
+	openID = strings.TrimSpace(openID)
+	name = strings.TrimSpace(name)
+	if openID != "" && name != "" {
+		s.userNameCache.Store(openID, name)
+	}
+}
+
+// ResolveUserName 根据 OpenID 获取飞书人员真实姓名。
+// 优先读内存缓存，未命中则请求飞书通讯录接口获取；未获取到时返回空字符串（以便调用方回退显示原始 ID）。
+func (s *Service) ResolveUserName(ctx context.Context, openID string) string {
+	openID = strings.TrimSpace(openID)
+	if openID == "" {
+		return ""
+	}
+	if val, ok := s.userNameCache.Load(openID); ok {
+		if name, ok := val.(string); ok && name != "" {
+			return name
+		}
+	}
+
+	s.mu.RLock()
+	client := s.larkClient
+	cfg := s.cfg
+	s.mu.RUnlock()
+
+	if client == nil && cfg.AppID != "" && cfg.AppSecretRef != "" {
+		if secretVal, err := s.GetAppSecret(); err == nil && secretVal != "" {
+			client = lark.NewClient(cfg.AppID, secretVal, lark.WithLogLevel(larkcore.LogLevelInfo))
+		}
+	}
+	if client == nil {
+		return ""
+	}
+
+	req := larkcontact.NewGetUserReqBuilder().
+		UserId(openID).
+		UserIdType("open_id").
+		Build()
+
+	resp, err := client.Contact.User.Get(ctx, req)
+	if err == nil && resp.Success() && resp.Data != nil && resp.Data.User != nil && resp.Data.User.Name != nil {
+		name := strings.TrimSpace(*resp.Data.User.Name)
+		if name != "" {
+			s.userNameCache.Store(openID, name)
+			return name
+		}
+	}
+	return ""
+}
+
 // saveBindingsLocked 持久化绑定到 Vault
 func (s *Service) saveBindingsLocked() {
 	if s.vault == nil {
@@ -735,6 +804,86 @@ func (s *Service) UpsertBinding(b Binding) {
 		s.byOpenID[b.FeishuOpenID] = b.EmployeeID
 	}
 	s.saveBindingsLocked()
+}
+
+// IdentityNotice 本次 @ 消息里要告知对方的飞书身份。
+type IdentityNotice struct {
+	OpenID       string
+	ChatID       string
+	Group        bool
+	OpenBoundNow bool
+	ChatBoundNow bool
+	SavedChatID  string
+}
+
+// AutoBindFromMention 缺什么补什么：群聊补 OpenID 和默认群聊，单聊只补 OpenID。
+func (s *Service) AutoBindFromMention(employeeID, senderOpenID, chatID string, group bool) IdentityNotice {
+	note := IdentityNotice{OpenID: strings.TrimSpace(senderOpenID), Group: group}
+	if group {
+		note.ChatID = strings.TrimSpace(chatID)
+	}
+	existing := s.BindingByEmployee(employeeID)
+	if existing == nil {
+		note.SavedChatID = note.ChatID
+		return note
+	}
+	next := *existing
+	if next.FeishuOpenID == "" && note.OpenID != "" {
+		next.FeishuOpenID = note.OpenID
+		note.OpenBoundNow = true
+	} else if next.FeishuOpenID != "" {
+		note.OpenID = next.FeishuOpenID
+	}
+	if group && next.ChatID == "" && note.ChatID != "" {
+		next.ChatID = note.ChatID
+		note.ChatBoundNow = true
+	}
+	note.SavedChatID = next.ChatID
+	if !group {
+		note.ChatID = next.ChatID
+	}
+	if note.OpenBoundNow || note.ChatBoundNow {
+		s.UpsertBinding(next)
+	}
+	return note
+}
+
+// FormatIdentityNotice 写成回执里的身份说明。
+func FormatIdentityNotice(n IdentityNotice) string {
+	if n.OpenID == "" && n.ChatID == "" && n.SavedChatID == "" {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("**你的飞书身份**\n")
+	if n.OpenID != "" {
+		sb.WriteString(fmt.Sprintf("• OpenID：`%s`", n.OpenID))
+		if n.OpenBoundNow {
+			sb.WriteString("（本次已自动绑定）")
+		} else {
+			sb.WriteString("（已绑定）")
+		}
+		sb.WriteString("\n")
+	}
+	chat := n.ChatID
+	if !n.Group {
+		chat = n.SavedChatID
+	}
+	if n.Group {
+		if chat != "" {
+			sb.WriteString(fmt.Sprintf("• 群聊 Chat ID：`%s`", chat))
+			if n.ChatBoundNow {
+				sb.WriteString("（本次已自动绑定为默认群聊）")
+			} else {
+				sb.WriteString("（已绑定）")
+			}
+			sb.WriteString("\n")
+		}
+	} else if chat != "" {
+		sb.WriteString(fmt.Sprintf("• 默认群聊 Chat ID：`%s`（已绑定，单聊不会改写）\n", chat))
+	} else {
+		sb.WriteString("• 默认群聊 Chat ID：单聊不绑定，请在群里 @该员工后自动写入\n")
+	}
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 // DeleteBinding 删除绑定
@@ -828,6 +977,9 @@ func (s *Service) ResolveMentions(rawText string, mentions []*larkim.MentionEven
 		name := ""
 		if m.Name != nil && *m.Name != "" {
 			name = *m.Name
+			if m.Id != nil && m.Id.OpenId != nil && *m.Id.OpenId != "" {
+				s.CacheUserName(*m.Id.OpenId, name)
+			}
 		}
 		if name != "" {
 			replacement := "@" + name
@@ -837,10 +989,15 @@ func (s *Service) ResolveMentions(rawText string, mentions []*larkim.MentionEven
 	return result
 }
 
-// ParseTarget 从文本解析目标 Employee 与 Prompt
+// ParseTarget 从文本解析目标 Employee 与 Prompt。
+// 群聊里通常会先 @机器人，再写 /emp 或别名，开头的 @提及不参与 /emp 匹配。
 func (s *Service) ParseTarget(text string) (employeeID, prompt string, err error) {
 	text = strings.TrimSpace(text)
-	if m := reSlash.FindStringSubmatch(text); len(m) == 3 {
+	body := strings.TrimSpace(reLeadingMentions.ReplaceAllString(text, ""))
+	if body == "" {
+		body = text
+	}
+	if m := reSlash.FindStringSubmatch(body); len(m) == 3 {
 		key := m[1]
 		prompt = s.CleanPrompt(m[2])
 		if strings.HasPrefix(strings.ToUpper(key), "EMP-") {
@@ -854,7 +1011,7 @@ func (s *Service) ParseTarget(text string) (employeeID, prompt string, err error
 		}
 		return b.EmployeeID, prompt, nil
 	}
-	if m := reEmpID.FindStringSubmatch(text); len(m) == 2 {
+	if m := reEmpID.FindStringSubmatch(body); len(m) == 2 {
 		id := strings.ToUpper(m[1])
 		p := strings.TrimSpace(reEmpID.ReplaceAllString(text, ""))
 		prompt = s.CleanPrompt(p)
@@ -922,6 +1079,18 @@ func isP2PChat(chatType string) bool {
 	return ct == "p2p" || ct == "private"
 }
 
+// looksLikeEmployeeAddress 文本像是在呼叫数字员工，但可能格式或别名不对。
+func looksLikeEmployeeAddress(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	if strings.HasPrefix(text, "/") {
+		return true
+	}
+	return reAllMentions.MatchString(text) || reEmpID.MatchString(text)
+}
+
 // boundAliases 返回当前已绑定的员工别名列表（去重、保序）。
 func (s *Service) boundAliases() []string {
 	s.mu.RLock()
@@ -943,19 +1112,29 @@ func (s *Service) boundAliases() []string {
 	return out
 }
 
+// EmployeeByOpenID 按飞书用户 OpenID 查已绑定的数字员工。
+func (s *Service) EmployeeByOpenID(openID string) string {
+	if strings.TrimSpace(openID) == "" {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.byOpenID[openID]
+}
+
 // HandleMessage 异步创建 Message/Job 后返回。
 // 派单规则：
 //  1. 必须显式 @别名 / EMP-xxx / /emp 才能派单（不做 open_id / chat_id / 唯一绑定兜底）；
-//  2. 群聊未 @ → 静默忽略；
-//  3. 私聊未 @ → 仅回复提示「请@对应员工执行」，不创建任务。
+//  2. 群聊里出现了 @、/emp 或 EMP- 但没对上员工：回复格式提示；完全不像呼叫则静默；
+//  3. 私聊未点名员工：回复「请@对应员工执行」，不创建任务。
 func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID string, duplicate bool, err error) {
 	if s.Dedupe(ev.EventID) {
 		return "", true, nil
 	}
 	empID, prompt, err := s.ParseTarget(ev.Text)
 	if err != nil || empID == "" {
-		// 私聊未点名员工：发送提示；群聊未点名：静默
-		if isP2PChat(ev.ChatType) && s.Sender != nil && ev.ChatID != "" {
+		shouldHint := isP2PChat(ev.ChatType) || looksLikeEmployeeAddress(ev.Text)
+		if shouldHint && s.Sender != nil && ev.ChatID != "" {
 			card := BuildMentionRequiredCard(s.boundAliases())
 			_ = s.Sender.Send(ctx, Reply{ChatID: ev.ChatID, Content: card.MustJSON()})
 		}
@@ -990,13 +1169,15 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 	if ev.MessageID == "" {
 		idem = fmt.Sprintf("feishu:%s:%s", ev.SenderOpenID, ev.EventID)
 	}
+	group := !isP2PChat(ev.ChatType)
+	notice := FormatIdentityNotice(s.AutoBindFromMention(empID, ev.SenderOpenID, ev.ChatID, group))
 	if s.Jobs == nil {
 		return "", false, errors.New("未配置 JobCreator")
 	}
-	jobID, err = s.Jobs.CreateFromFeishu(ctx, empID, fullPrompt, idem, ev.ChatID, ev.MessageID)
+	jobID, err = s.Jobs.CreateFromFeishu(ctx, empID, fullPrompt, idem, ev.ChatID, ev.MessageID, ev.SenderOpenID)
 	if err != nil {
 		if s.Sender != nil && ev.ChatID != "" {
-			card := BuildTaskFailedCard(err)
+			card := BuildTaskFailedCard(err, notice)
 			_ = s.Sender.Send(ctx, Reply{ChatID: ev.ChatID, Content: card.MustJSON()})
 		}
 		return "", false, err
@@ -1009,7 +1190,7 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 			instructionPreview = fmt.Sprintf("%s (已带入引用的上下文内容)", prompt)
 		}
 		empName := s.getEmployeeDisplayName(ctx, empID)
-		card := BuildTaskCreatedCard(jobID, empName, instructionPreview)
+		card := BuildTaskCreatedCard(jobID, empName, instructionPreview, notice)
 		_ = s.Sender.Send(ctx, Reply{ChatID: ev.ChatID, Content: card.MustJSON()})
 	}
 
@@ -1328,4 +1509,3 @@ func ParseWebhookBody(body []byte) (challenge string, token string, ev *Incoming
 
 	return "", tok, nil, nil
 }
-

@@ -20,12 +20,15 @@ import { EntityName } from '../components/EntityName'
 import { IconAlertTriangle } from '../components/Icons'
 import { SearchableSelect } from '../components/SearchableSelect'
 
-/** Provider 中文选项 */
-const PROVIDER_OPTIONS = [
-  { value: '', label: '未指定', keywords: 'inherit default' },
-  { value: 'cursor', label: 'Cursor ACP', keywords: 'cursor acp' },
-  { value: 'codex', label: 'Codex', keywords: 'codex runtime' },
-]
+/** Provider 中文名在选项里按工作站上报动态生成。 */
+
+type WsNode = {
+  id: string
+  name: string
+  status: string
+  providers?: string[]
+  models?: Record<string, Array<{ id: string; label: string }>>
+}
 
 type Emp = {
   id: string
@@ -34,6 +37,7 @@ type Emp = {
   description: string
   role_summary: string
   default_provider: string
+  default_model: string
   workstation_id: string
   workspace_id: string
   permission_profile: string
@@ -73,12 +77,13 @@ export function EmployeeDetailPage() {
   const { id } = useParams()
   const navigate = useNavigate()
   const [ov, setOv] = useState<Overview | null>(null)
-  const [workstations, setWorkstations] = useState<Array<{ id: string; name: string; status: string }>>([])
+  const [workstations, setWorkstations] = useState<WsNode[]>([])
   const [workspaces, setWorkspaces] = useState<Array<{ id: string; name?: string; path?: string }>>([])
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
   // 可编辑绑定字段
   const [provider, setProvider] = useState('')
+  const [model, setModel] = useState('')
   const [wsId, setWsId] = useState('')
   const [workspaceId, setWorkspaceId] = useState('')
 
@@ -121,6 +126,29 @@ export function EmployeeDetailPage() {
       })),
     [workstations],
   )
+  const providerOptions = useMemo(() => {
+    const labels: Record<string, string> = {
+      cursor: 'Cursor ACP',
+      codex: 'Codex',
+      antigravity: 'Antigravity',
+    }
+    const ws = workstations.find((w) => w.id === wsId)
+    const installed = ws?.providers ?? []
+    return installed.map((p) => ({
+      value: p,
+      label: labels[p] || p,
+      keywords: p,
+    }))
+  }, [workstations, wsId])
+  const modelOptions = useMemo(() => {
+    const ws = workstations.find((w) => w.id === wsId)
+    const list = ws?.models?.[provider] ?? []
+    return list.map((m) => ({
+      value: m.id,
+      label: m.label && m.label !== m.id ? `${m.label} (${m.id})` : m.id,
+      keywords: `${m.id} ${m.label || ''}`,
+    }))
+  }, [workstations, wsId, provider])
   const workspaceOptions = useMemo(
     () =>
       workspaces.map((ws) => ({
@@ -176,7 +204,7 @@ export function EmployeeDetailPage() {
     if (!id) return
     const [data, wsData, wspData, wfAll, tokens] = await Promise.all([
       apiGet<Overview>(`/employees/${id}/overview`),
-      apiGet<{ items: Array<{ id: string; name: string; status: string }> }>('/workstations').catch(() => ({ items: [] })),
+      apiGet<{ items: WsNode[] }>('/workstations').catch(() => ({ items: [] })),
       apiGet<{ items: Array<{ id: string; name?: string; path?: string }> }>('/workspaces').catch(() => ({ items: [] })),
       listWorkflows().catch(() => ({ items: [] as Workflow[] })),
       listMCPTokens(id).catch(() => ({ items: [] as MCPToken[] })),
@@ -187,6 +215,7 @@ export function EmployeeDetailPage() {
     setAllWorkflows(wfAll.items ?? [])
     setMcpTokens(tokens.items ?? [])
     setProvider(data.employee.default_provider || '')
+    setModel(data.employee.default_model || '')
     setWsId(data.employee.workstation_id || '')
     setWorkspaceId(data.employee.workspace_id || '')
   }
@@ -203,6 +232,7 @@ export function EmployeeDetailPage() {
     try {
       await apiPatch(`/employees/${id}`, {
         default_provider: provider,
+        default_model: model,
         workstation_id: wsId,
         workspace_id: workspaceId,
       })
@@ -312,29 +342,66 @@ export function EmployeeDetailPage() {
         <div className="panel-header">
           <div>
             <h2>核心配置与资源绑定</h2>
-            <p>指定驱动 Provider、运行工作站节点与本地代码工作区</p>
+            <p>先选工作站，再选该节点已安装的驱动引擎，然后选该引擎上报的模型</p>
           </div>
         </div>
         <form className="inline-form" onSubmit={onSaveBindings}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>
-            驱动引擎 (Provider)
-            <SearchableSelect
-              value={provider}
-              onChange={setProvider}
-              options={PROVIDER_OPTIONS}
-              placeholder="选择驱动引擎…"
-              style={{ minWidth: 180 }}
-            />
-          </label>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>
             绑定工作站 (Workstation ID)
             <SearchableSelect
               value={wsId}
-              onChange={setWsId}
+              onChange={(id) => {
+                setWsId(id)
+                const ws = workstations.find((w) => w.id === id)
+                const installed = ws?.providers ?? []
+                const nextProvider = provider && installed.includes(provider) ? provider : ''
+                if (nextProvider !== provider) setProvider(nextProvider)
+                const models = ws?.models?.[nextProvider] ?? []
+                if (model && !models.some((m) => m.id === model)) setModel('')
+              }}
               options={wsNodeOptions}
               placeholder="选择或搜索工作站…"
               allowCustom
               style={{ minWidth: 260 }}
+            />
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>
+            驱动引擎 (Provider)
+            <SearchableSelect
+              value={provider}
+              onChange={(id) => {
+                setProvider(id)
+                const ws = workstations.find((w) => w.id === wsId)
+                const models = ws?.models?.[id] ?? []
+                if (model && !models.some((m) => m.id === model)) setModel('')
+              }}
+              options={providerOptions}
+              placeholder={
+                !wsId
+                  ? '请先选择工作站'
+                  : providerOptions.length
+                    ? '选择该工作站已安装的引擎…'
+                    : '该工作站尚未上报已安装引擎'
+              }
+              disabled={!wsId}
+              style={{ minWidth: 220 }}
+            />
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>
+            模型 (Model)
+            <SearchableSelect
+              value={model}
+              onChange={setModel}
+              options={modelOptions}
+              placeholder={
+                !provider
+                  ? '请先选择驱动引擎'
+                  : modelOptions.length
+                    ? '选择该引擎上报的模型…'
+                    : '该工作站尚未上报此引擎的模型'
+              }
+              disabled={!provider}
+              style={{ minWidth: 280 }}
             />
           </label>
           <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>

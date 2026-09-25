@@ -47,6 +47,27 @@ func (s *PostgresStore) UpsertPolicy(ctx context.Context, p *Policy) error {
 	return nil
 }
 
+func (s *PostgresStore) DeletePolicy(ctx context.Context, resourceType, resourceID, period string) error {
+	if period == "" {
+		period = PeriodMonthly
+	}
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM quota_policies
+		WHERE resource_type = $1 AND resource_id = $2 AND period_type = $3`,
+		resourceType, resourceID, period)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *PostgresStore) GetPolicy(ctx context.Context, resourceType, resourceID, period string) (*Policy, error) {
 	if period == "" {
 		period = PeriodMonthly

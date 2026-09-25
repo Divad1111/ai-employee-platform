@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,18 +17,18 @@ import (
 
 // 状态常量。
 const (
-	StatusCreated          = "CREATED"
-	StatusQueued           = "QUEUED"
-	StatusAssigned         = "ASSIGNED"
-	StatusStarting         = "STARTING"
-	StatusRunning          = "RUNNING"
-	StatusSuccess          = "SUCCESS"
-	StatusFailed           = "FAILED"
-	StatusCancelled        = "CANCELLED"
-	StatusTimeout          = "TIMEOUT"
-	StatusBlocked          = "BLOCKED"
-	StatusWaitingApproval  = "WAITING_APPROVAL"
-	StatusUnknown          = "UNKNOWN"
+	StatusCreated         = "CREATED"
+	StatusQueued          = "QUEUED"
+	StatusAssigned        = "ASSIGNED"
+	StatusStarting        = "STARTING"
+	StatusRunning         = "RUNNING"
+	StatusSuccess         = "SUCCESS"
+	StatusFailed          = "FAILED"
+	StatusCancelled       = "CANCELLED"
+	StatusTimeout         = "TIMEOUT"
+	StatusBlocked         = "BLOCKED"
+	StatusWaitingApproval = "WAITING_APPROVAL"
+	StatusUnknown         = "UNKNOWN"
 )
 
 var terminal = map[string]bool{
@@ -63,32 +64,57 @@ var transitions = map[string]map[string]bool{
 	},
 }
 
+// 任务来源常量（开放字符串，便于未来持续扩展其它接入端）。
+const (
+	SourceWeb      = "web"      // 控制台手动创建
+	SourceFeishu   = "feishu"   // 飞书机器人消息
+	SourceCron     = "cron"     // 定时触发
+	SourceCalendar = "calendar" // 日历任务链
+	SourceWebhook  = "webhook"  // 入站 Webhook
+	SourceAPI      = "api"      // 开放 API
+	SourceSystem   = "system"   // 系统内置/初始化
+)
+
+// NormalizeSource 规范化任务来源。未指定或空白默认归一化为 "web"。
+func NormalizeSource(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return SourceWeb
+	}
+	return s
+}
+
 // 错误。
 var (
-	ErrNotFound          = errors.New("job 不存在")
-	ErrInvalidTransition = errors.New("非法状态转换")
-	ErrInvalidInput      = errors.New("参数无效")
+	ErrNotFound            = errors.New("job 不存在")
+	ErrInvalidTransition   = errors.New("非法状态转换")
+	ErrInvalidInput        = errors.New("参数无效")
 	ErrIdempotencyConflict = errors.New("idempotency_key 冲突且内容不同")
 )
 
 // Job 领域对象。
 type Job struct {
-	ID                string          `json:"id"`
-	EmployeeID        string          `json:"employee_id"`
-	WorkspaceID       string          `json:"workspace_id"`
-	SessionID         string          `json:"session_id"`
-	WorkstationID     string          `json:"workstation_id"`
-	Prompt            string          `json:"prompt"`
-	CreatedBy         string          `json:"created_by"`
-	Status            string          `json:"status"`
-	Result            string          `json:"result"`
-	IdempotencyKey    string          `json:"idempotency_key"`
-	TimeoutSec        int             `json:"timeout_sec"`
-	WorkflowID        string          `json:"workflow_id,omitempty"`
-	WorkflowSnapshot  map[string]any  `json:"workflow_snapshot,omitempty"`
-	CreatedAt         time.Time       `json:"created_at"`
-	StartedAt         time.Time       `json:"started_at,omitempty"`
-	CompletedAt       time.Time       `json:"completed_at,omitempty"`
+	ID               string         `json:"id"`
+	EmployeeID       string         `json:"employee_id"`
+	WorkspaceID      string         `json:"workspace_id"`
+	SessionID        string         `json:"session_id"`
+	WorkstationID    string         `json:"workstation_id"`
+	Prompt           string         `json:"prompt"`
+	CreatedBy        string         `json:"created_by"`
+	Status           string         `json:"status"`
+	Result           string         `json:"result"`
+	InputTokens      int64          `json:"input_tokens"`
+	OutputTokens     int64          `json:"output_tokens"`
+	Agent            string         `json:"agent"`
+	TokenSource      string         `json:"token_source"`
+	Source           string         `json:"source"`
+	IdempotencyKey   string         `json:"idempotency_key"`
+	TimeoutSec       int            `json:"timeout_sec"`
+	WorkflowID       string         `json:"workflow_id,omitempty"`
+	WorkflowSnapshot map[string]any `json:"workflow_snapshot,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
+	StartedAt        time.Time      `json:"started_at,omitempty"`
+	CompletedAt      time.Time      `json:"completed_at,omitempty"`
 }
 
 // Event Timeline 条目。
@@ -110,6 +136,7 @@ type CreateInput struct {
 	IdempotencyKey string `json:"idempotency_key"`
 	TimeoutSec     int    `json:"timeout_sec"`
 	CreatedBy      string `json:"created_by"`
+	Source         string `json:"source"`
 	WorkflowID     string `json:"workflow_id"`
 }
 
@@ -156,6 +183,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string
 		return existing, true, nil
 	}
 	now := time.Now().UTC()
+	src := NormalizeSource(in.Source)
 	j := &Job{
 		ID:             idgen.New("JOB"),
 		EmployeeID:     in.EmployeeID,
@@ -165,6 +193,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string
 		Prompt:         in.Prompt,
 		CreatedBy:      in.CreatedBy,
 		Status:         StatusCreated,
+		Source:         src,
 		IdempotencyKey: in.IdempotencyKey,
 		TimeoutSec:     in.TimeoutSec,
 		WorkflowID:     in.WorkflowID,
@@ -179,7 +208,12 @@ func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string
 	_ = s.store.AppendEvent(ctx, &Event{
 		JobID: j.ID, EventType: "CREATED", Payload: map[string]string{"status": StatusCreated}, CreatedAt: now,
 	})
-	s.audit.Log(ctx, "USER", actorID, "job.create", "success", ip, map[string]string{"id": j.ID})
+	s.audit.Log(ctx, "USER", actorID, "job.create", "success", ip, map[string]string{
+		"id":          j.ID,
+		"prompt":      j.Prompt,
+		"employee_id": j.EmployeeID,
+		"source":      j.Source,
+	})
 	s.publishStatus(ctx, j)
 	return j, false, nil
 }
@@ -220,7 +254,39 @@ func (s *Service) Transition(ctx context.Context, id, to, actorID, ip string, pa
 	_ = s.store.AppendEvent(ctx, &Event{
 		JobID: id, EventType: "STATUS", Payload: payload, CreatedAt: now,
 	})
-	s.audit.Log(ctx, "USER", actorID, "job.transition", "success", ip, map[string]string{"id": id, "to": to})
+	actorType := "USER"
+	if actorID == "workstation" || strings.HasPrefix(actorID, "WS-") {
+		actorType = "WORKSTATION"
+	} else if actorID == "scheduler" || actorID == "system" || actorID == "permission" {
+		actorType = "SYSTEM"
+	}
+	s.audit.Log(ctx, actorType, actorID, "job.transition", "success", ip, map[string]string{
+		"id":          id,
+		"to":          to,
+		"prompt":      j.Prompt,
+		"employee_id": j.EmployeeID,
+		"source":      j.Source,
+	})
+	if terminal[to] {
+		auditResult := "success"
+		if to == StatusFailed || to == StatusTimeout || to == StatusUnknown {
+			auditResult = "failed"
+		}
+		execActorType := "USER"
+		execActorID := j.CreatedBy
+		if execActorID == "" {
+			execActorID = actorID
+			execActorType = actorType
+		}
+		s.audit.Log(ctx, execActorType, execActorID, "job.execute", auditResult, ip, map[string]string{
+			"id":             id,
+			"status":         to,
+			"prompt":         j.Prompt,
+			"employee_id":    j.EmployeeID,
+			"source":         j.Source,
+			"workstation_id": j.WorkstationID,
+		})
+	}
 	s.publishStatus(ctx, j)
 	return j, nil
 }
@@ -245,6 +311,11 @@ func (s *Service) Get(ctx context.Context, id string) (*Job, error) {
 
 func (s *Service) List(ctx context.Context) ([]*Job, error) {
 	return s.store.List(ctx)
+}
+
+// ListEvents 返回任务时间线，按写入顺序。
+func (s *Service) ListEvents(ctx context.Context, jobID string) ([]*Event, error) {
+	return s.store.ListEvents(ctx, jobID)
 }
 
 // BindWorkstation 绑定执行节点。
@@ -281,6 +352,30 @@ func (s *Service) SetResult(ctx context.Context, jobID, result string) error {
 	}
 	j.Result = result
 	return s.store.Save(ctx, j)
+}
+
+// RecordTokens 写入任务 token 消耗。已记过则不再重复，避免事件重放把用量加两次。
+func (s *Service) RecordTokens(ctx context.Context, jobID string, input, output int64, agentName, source string) (createdBy string, first bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, err := s.store.Get(ctx, jobID)
+	if err != nil || j == nil {
+		return "", false, ErrNotFound
+	}
+	if j.TokenSource != "" {
+		return j.CreatedBy, false, nil
+	}
+	j.InputTokens = input
+	j.OutputTokens = output
+	j.Agent = agentName
+	j.TokenSource = source
+	if j.TokenSource == "" {
+		j.TokenSource = "estimate"
+	}
+	if err := s.store.Save(ctx, j); err != nil {
+		return j.CreatedBy, false, err
+	}
+	return j.CreatedBy, true, nil
 }
 
 // SetWorkflowSnapshot 设置工作流关联及快照。

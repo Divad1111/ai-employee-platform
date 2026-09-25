@@ -2,6 +2,7 @@ package heartbeat
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
@@ -17,6 +18,17 @@ type Stats struct {
 	CPU       float64
 	Memory    float64
 	Disk      float64
+	// Providers 本机已安装的驱动引擎（cursor / codex 等）。
+	Providers []string
+	// Models 各引擎当前账号可用的模型。
+	Models []ModelInfo
+}
+
+// ModelInfo 心跳上报的一条模型。
+type ModelInfo struct {
+	Provider string `json:"provider"`
+	ID       string `json:"id"`
+	Label    string `json:"label"`
 }
 
 // StatsFunc 动态采样。
@@ -84,6 +96,22 @@ func (l *Loop) tick(ctx context.Context) error {
 		},
 		Employees: st.Employees,
 		Sessions:  st.Sessions,
+	}
+	for _, name := range st.Providers {
+		if name == "" {
+			continue
+		}
+		hb.Capabilities = append(hb.Capabilities, &aiev1.Capability{Key: "provider", Value: name})
+	}
+	for _, m := range st.Models {
+		if m.Provider == "" || m.ID == "" {
+			continue
+		}
+		raw, err := json.Marshal(m)
+		if err != nil {
+			continue
+		}
+		hb.Capabilities = append(hb.Capabilities, &aiev1.Capability{Key: "model", Value: string(raw)})
 	}
 	return l.Send(ctx, hb)
 }

@@ -11,14 +11,21 @@ import { PageFeatureGuide } from '../components/PageFeatureGuide'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SearchableSelect } from '../components/SearchableSelect'
 import { usePerm } from '../stores/permissions'
+import { JobTimeline } from '../components/JobTimeline'
 
 type Job = {
   id: string
   employee_id: string
+  workspace_id?: string
   session_id?: string
   status: string
   prompt: string
   result?: string
+  input_tokens?: number
+  output_tokens?: number
+  agent?: string
+  token_source?: string
+  source?: string
   idempotency_key: string
   timeout_sec: number
 }
@@ -28,6 +35,147 @@ type JobEvent = {
   event_type: string
   payload: Record<string, string>
   created_at: string
+}
+
+export function JobSourceBadge({ source }: { source?: string }) {
+  const s = (source || 'web').toLowerCase()
+  switch (s) {
+    case 'feishu':
+      return (
+        <span
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            fontSize: '0.75rem',
+            fontWeight: 600,
+            padding: '2px 8px',
+            borderRadius: '6px',
+            background: '#e0f2fe',
+            color: '#0369a1',
+            border: '1px solid #bae6fd',
+          }}
+        >
+          飞书
+        </span>
+      )
+    case 'cron':
+      return (
+        <span
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            fontSize: '0.75rem',
+            fontWeight: 600,
+            padding: '2px 8px',
+            borderRadius: '6px',
+            background: '#f3e8ff',
+            color: '#7e22ce',
+            border: '1px solid #e9d5ff',
+          }}
+        >
+          定时任务
+        </span>
+      )
+    case 'calendar':
+      return (
+        <span
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            fontSize: '0.75rem',
+            fontWeight: 600,
+            padding: '2px 8px',
+            borderRadius: '6px',
+            background: '#fef3c7',
+            color: '#b45309',
+            border: '1px solid #fde68a',
+          }}
+        >
+          日历任务
+        </span>
+      )
+    case 'webhook':
+      return (
+        <span
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            fontSize: '0.75rem',
+            fontWeight: 600,
+            padding: '2px 8px',
+            borderRadius: '6px',
+            background: '#dcfce7',
+            color: '#15803d',
+            border: '1px solid #bbf7d0',
+          }}
+        >
+          Webhook
+        </span>
+      )
+    case 'api':
+      return (
+        <span
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            fontSize: '0.75rem',
+            fontWeight: 600,
+            padding: '2px 8px',
+            borderRadius: '6px',
+            background: '#f1f5f9',
+            color: '#475569',
+            border: '1px solid #e2e8f0',
+          }}
+        >
+          API
+        </span>
+      )
+    case 'system':
+      return (
+        <span
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            fontSize: '0.75rem',
+            fontWeight: 600,
+            padding: '2px 8px',
+            borderRadius: '6px',
+            background: '#f1f5f9',
+            color: '#64748b',
+            border: '1px solid #cbd5e1',
+          }}
+        >
+          系统
+        </span>
+      )
+    case 'web':
+    default:
+      return (
+        <span
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            fontSize: '0.75rem',
+            fontWeight: 600,
+            padding: '2px 8px',
+            borderRadius: '6px',
+            background: '#f8fafc',
+            color: '#64748b',
+            border: '1px solid #e2e8f0',
+          }}
+        >
+          {s === 'web' ? '控制台' : s}
+        </span>
+      )
+  }
+}
+
+function formatJobTokens(job: Job) {
+  const total = (job.input_tokens || 0) + (job.output_tokens || 0)
+  if (!total && !job.token_source) return '—'
+  const source = job.token_source === 'agent' ? 'Agent 上报' : job.token_source === 'estimate' ? '按文本估算' : ''
+  const agent = job.agent ? ` · ${job.agent}` : ''
+  return `输入 ${job.input_tokens || 0} / 输出 ${job.output_tokens || 0}${agent}${source ? `（${source}）` : ''}`
 }
 
 function isTerminal(status: string) {
@@ -58,6 +206,8 @@ export function JobsPage() {
   const [loading, setLoading] = useState(false)
   const [cancelId, setCancelId] = useState<string | null>(null)
   const [cancelling, setCancelling] = useState(false)
+  const [rerunningId, setRerunningId] = useState('')
+  const [notice, setNotice] = useState('')
 
   async function load() {
     setLoading(true)
@@ -113,11 +263,38 @@ export function JobsPage() {
         prompt,
         idempotency_key: `admin-${Date.now()}`,
         timeout_sec: 600,
+        source: 'web',
       })
       setPrompt('')
       await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : '创建任务失败')
+    }
+  }
+
+  async function rerun(job: Job) {
+    if (!job.employee_id || !job.prompt) {
+      setError('原任务缺少员工或指令，无法重新执行')
+      return
+    }
+    setError('')
+    setNotice('')
+    setRerunningId(job.id)
+    try {
+      const res = await apiPost<{ job?: { id: string } }>('/jobs', {
+        employee_id: job.employee_id,
+        workspace_id: job.workspace_id || undefined,
+        prompt: job.prompt,
+        timeout_sec: job.timeout_sec || 600,
+        idempotency_key: `rerun-${job.id}-${Date.now()}`,
+        source: job.source || 'web',
+      })
+      setNotice(res.job?.id ? `已按原参数新建任务 ${res.job.id}` : '已按原参数新建任务')
+      await load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '重新执行失败')
+    } finally {
+      setRerunningId('')
     }
   }
 
@@ -212,6 +389,7 @@ export function JobsPage() {
           </button>
         </form>
         {error ? <div className="error">{error}</div> : null}
+      {notice ? <p className="muted">{notice}</p> : null}
       </div>
       ) : (
         error ? <div className="error">{error}</div> : null
@@ -255,7 +433,9 @@ export function JobsPage() {
               <tr>
                 <th>任务需求描述 (Prompt)</th>
                 <th>责任数字员工</th>
+                <th>任务来源</th>
                 <th>当前流转状态</th>
+                <th>Token（输入 / 输出）</th>
                 <th>超时设置</th>
                 <th>操作</th>
               </tr>
@@ -279,13 +459,29 @@ export function JobsPage() {
                     />
                   </td>
                   <td>
+                    <JobSourceBadge source={j.source} />
+                  </td>
+                  <td>
                     <StatusBadge status={j.status} />
+                  </td>
+                  <td style={{ fontSize: '0.82rem' }}>
+                    {formatJobTokens(j)}
                   </td>
                   <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
                     {j.timeout_sec} 秒
                   </td>
                   <td>
                     <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                      {canWrite ? (
+                        <button
+                          type="button"
+                          className="btn-ghost btn-sm"
+                          disabled={rerunningId === j.id}
+                          onClick={() => void rerun(j)}
+                        >
+                          {rerunningId === j.id ? '创建中…' : '重新执行'}
+                        </button>
+                      ) : null}
                       <Link to={`/jobs/${j.id}`} className="btn-ghost btn-sm" style={{ display: 'inline-flex' }}>
                         时间线详情 →
                       </Link>
@@ -305,7 +501,7 @@ export function JobsPage() {
               ))}
               {filteredItems.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="empty-tip">
+                  <td colSpan={7} className="empty-tip">
                     {filter === 'active'
                       ? '暂无活跃任务'
                       : filter === 'errors'
@@ -420,6 +616,13 @@ export function JobDetailPage() {
             />
             <span style={{ color: 'var(--text-muted)', margin: '0 0.3rem' }}>·</span>
             <span style={{ color: 'var(--text-muted)' }}>超时限制: {job.timeout_sec} 秒</span>
+            <span style={{ color: 'var(--text-muted)', margin: '0 0.3rem' }}>·</span>
+            <span style={{ color: 'var(--text-muted)' }}>{formatJobTokens(job)}</span>
+            <span style={{ color: 'var(--text-muted)', margin: '0 0.3rem' }}>·</span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+              <span style={{ color: 'var(--text-muted)' }}>任务来源:</span>
+              <JobSourceBadge source={job.source} />
+            </span>
           </div>
         </div>
       </header>
@@ -457,45 +660,7 @@ export function JobDetailPage() {
           </div>
         </div>
 
-        {events && events.length > 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '0.5rem' }}>
-            {events.map((ev) => {
-              const isReply = ev.event_type === 'AGENT_REPLY'
-              return (
-              <div
-                key={ev.id}
-                style={{
-                  display: 'flex',
-                  gap: '1rem',
-                  padding: '0.85rem 1rem',
-                  background: isReply ? '#f0fdf4' : '#f8fafc',
-                  border: isReply ? '1px solid #bbf7d0' : '1px solid var(--border-subtle)',
-                  borderRadius: '8px',
-                  alignItems: 'flex-start',
-                }}
-              >
-                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', minWidth: '150px' }}>
-                  {new Date(ev.created_at).toLocaleString()}
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)' }}>
-                    {ev.event_type}
-                  </div>
-                  {isReply && ev.payload?.reply ? (
-                    <div style={{ marginTop: '0.5rem', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{ev.payload.reply}</div>
-                  ) : ev.payload && Object.keys(ev.payload).length > 0 ? (
-                    <pre style={{ margin: '0.35rem 0 0', fontSize: '0.8rem', background: '#ffffff', padding: '0.5rem', borderRadius: '4px', border: '1px solid #e2e8f0', whiteSpace: 'pre-wrap' }}>
-                      {JSON.stringify(ev.payload, null, 2)}
-                    </pre>
-                  ) : null}
-                </div>
-              </div>
-              )
-            })}
-          </div>
-        ) : (
-          <div className="empty-tip">暂无事件轨迹记录</div>
-        )}
+        <JobTimeline events={events ?? []} />
       </div>
 
       <ConfirmDialog

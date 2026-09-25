@@ -3,7 +3,9 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/ai-employee-platform/server/internal/auth"
 	"github.com/ai-employee-platform/server/internal/authz"
@@ -59,7 +61,7 @@ func (d Deps) handleDashboard(w http.ResponseWriter, r *http.Request, sess *auth
 		}
 		wsRows = append(wsRows, map[string]any{
 			"id": v.ID, "name": v.Name, "status": v.Status,
-			"cpu_percent": v.CPUPercent, "memory_percent": v.MemoryPercent,
+			"cpu_percent": v.CPUPercent, "memory_percent": v.MemoryPercent, "disk_percent": v.DiskPercent,
 		})
 	}
 
@@ -95,7 +97,7 @@ func (d Deps) handleDashboard(w http.ResponseWriter, r *http.Request, sess *auth
 		"errors":              errors,
 		"recent_active_jobs":  activeJobs,
 		"workstations_detail": wsRows,
-		"my_quota":            d.buildMyQuota(r, sess),
+		"my_quota":            d.attachUsageBreakdown(r, sess, d.buildMyQuota(r, sess), jobs),
 	})
 }
 
@@ -104,6 +106,120 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+type usageBucket struct {
+	ID           string `json:"id,omitempty"`
+	Name         string `json:"name"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	TotalTokens  int64  `json:"total_tokens"`
+	Jobs         int    `json:"jobs"`
+}
+
+func (d Deps) attachUsageBreakdown(r *http.Request, sess *auth.Session, out map[string]any, jobs []*job.Job) map[string]any {
+	if out == nil {
+		out = map[string]any{}
+	}
+	if sess == nil {
+		return out
+	}
+	period, _ := out["period_key"].(string)
+	if period == "" {
+		period = time.Now().UTC().Format("2006-01")
+		out["period_key"] = period
+	}
+	empName := map[string]string{}
+	if d.Employees != nil {
+		if list, err := d.Employees.List(r.Context()); err == nil {
+			for _, e := range list {
+				if e != nil {
+					empName[e.ID] = e.Name
+				}
+			}
+		}
+	}
+	wsName := map[string]string{}
+	if d.Workstations != nil {
+		for _, w := range d.Workstations.List(r.Context()) {
+			wsName[w.ID] = w.Name
+		}
+	}
+	var inputSum, outputSum int64
+	byWS := map[string]*usageBucket{}
+	byEmp := map[string]*usageBucket{}
+	byAgent := map[string]*usageBucket{}
+	for _, j := range jobs {
+		if j == nil || j.CreatedBy != sess.UserID || j.CreatedAt.UTC().Format("2006-01") != period {
+			continue
+		}
+		if j.InputTokens == 0 && j.OutputTokens == 0 {
+			continue
+		}
+		inputSum += j.InputTokens
+		outputSum += j.OutputTokens
+		addBucket(byWS, j.WorkstationID, firstNonEmpty(wsName[j.WorkstationID], j.WorkstationID, "未指定工作站"), j)
+		addBucket(byEmp, j.EmployeeID, firstNonEmpty(empName[j.EmployeeID], j.EmployeeID, "未指定数字员工"), j)
+		agent := j.Agent
+		if agent == "" {
+			agent = "未识别 Agent"
+		}
+		addBucket(byAgent, agent, agent, j)
+	}
+	out["input_tokens"] = inputSum
+	out["output_tokens"] = outputSum
+	used := inputSum + outputSum
+	out["tokens_used"] = used
+	if limit, ok := out["token_limit"].(int64); ok && limit > 0 {
+		pct := float64(used) / float64(limit) * 100
+		if pct > 100 {
+			pct = 100
+		}
+		out["usage_percent"] = pct
+		rem := limit - used
+		if rem < 0 {
+			rem = 0
+		}
+		out["remaining"] = rem
+		out["unlimited"] = false
+	}
+	out["by_workstation"] = bucketList(byWS)
+	out["by_employee"] = bucketList(byEmp)
+	out["by_agent"] = bucketList(byAgent)
+	return out
+}
+
+func addBucket(m map[string]*usageBucket, id, name string, j *job.Job) {
+	if id == "" {
+		id = name
+	}
+	b := m[id]
+	if b == nil {
+		b = &usageBucket{ID: id, Name: name}
+		m[id] = b
+	}
+	b.InputTokens += j.InputTokens
+	b.OutputTokens += j.OutputTokens
+	b.TotalTokens += j.InputTokens + j.OutputTokens
+	b.Jobs++
+}
+
+func bucketList(m map[string]*usageBucket) []*usageBucket {
+	out := make([]*usageBucket, 0, len(m))
+	for _, b := range m {
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TotalTokens > out[j].TotalTokens })
+	return out
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // handleEmployeeOverview 对齐 §10：详情聚合。

@@ -237,7 +237,7 @@ func (d Deps) handleAuditArchive(w http.ResponseWriter, r *http.Request, sess *a
 // 覆盖旧 handleAudit：支持 prefix / target；按 Scope 过滤（§17）
 func (d Deps) handleAuditEnhanced(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 {
+	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
@@ -249,14 +249,18 @@ func (d Deps) handleAuditEnhanced(w http.ResponseWriter, r *http.Request, sess *
 		// OWN：只能看自己
 		actorFilter = sess.UserID
 	}
+	fetchLimit := limit
+	if q != "" {
+		// 先多取，补全操作人显示名后再按动作 / 操作人 / IP / 变更说明模糊过滤
+		fetchLimit = 2000
+	}
 	items := d.Audit.Query(audit.Filter{
-		Keyword:      q,
 		Actor:        actorFilter,
 		Action:       r.URL.Query().Get("action"),
 		ActionPrefix: r.URL.Query().Get("prefix"),
 		TargetType:   r.URL.Query().Get("target_type"),
 		TargetID:     r.URL.Query().Get("target_id"),
-		Limit:        limit,
+		Limit:        fetchLimit,
 	})
 	// 确保 metadata 无明文 secret 值，并补充友好操作主体名称
 	for i := range items {
@@ -293,17 +297,57 @@ func (d Deps) handleAuditEnhanced(w http.ResponseWriter, r *http.Request, sess *
 				}
 				items[i].Metadata["actor_name"] = fmt.Sprintf("%s（%s）", uname, roleCN)
 			case "SYSTEM":
-				items[i].Metadata["actor_name"] = "系统内核 (System)"
+				items[i].Metadata["actor_name"] = "系统"
 			case "EMPLOYEE":
 				if d.Employees != nil {
 					if emp, err := d.Employees.Get(r.Context(), items[i].ActorID); err == nil && emp != nil && emp.Name != "" {
-						items[i].Metadata["actor_name"] = emp.Name + " (AI 员工)"
+						items[i].Metadata["actor_name"] = emp.Name
 					}
 				}
 				if items[i].Metadata["actor_name"] == "" {
-					items[i].Metadata["actor_name"] = "AI 员工"
+					items[i].Metadata["actor_name"] = "数字员工"
+				}
+			case "WORKSTATION":
+				name := items[i].ActorID
+				if d.Workstations != nil && d.Workstations.Meta != nil {
+					if n := d.Workstations.Meta.GetName(r.Context(), items[i].ActorID); n != "" {
+						name = n
+					}
+				}
+				items[i].Metadata["actor_name"] = name
+			}
+		}
+		// 若为飞书来源或包含飞书 OpenID，将客户端 IP 解析为飞书人员真实姓名；未获取到时保留一串 ID
+		isFeishu := strings.EqualFold(items[i].Metadata["source"], "feishu") ||
+			strings.EqualFold(items[i].Metadata["source"], "飞书") ||
+			strings.HasPrefix(items[i].IP, "ou_")
+		if isFeishu && d.Feishu != nil {
+			openID := items[i].IP
+			if !strings.HasPrefix(openID, "ou_") && items[i].Metadata["employee_id"] != "" {
+				if bnd := d.Feishu.BindingByEmployee(items[i].Metadata["employee_id"]); bnd != nil {
+					openID = bnd.FeishuOpenID
 				}
 			}
+			if strings.HasPrefix(openID, "ou_") {
+				feishuName := d.Feishu.ResolveUserName(r.Context(), openID)
+				if feishuName != "" {
+					items[i].Metadata["client_name"] = feishuName
+					items[i].IP = feishuName
+				}
+			}
+		}
+	}
+	d.localizeAudit(r.Context(), items)
+	if q != "" {
+		filtered := items[:0]
+		for _, e := range items {
+			if audit.EntryMatches(e, q) {
+				filtered = append(filtered, e)
+			}
+		}
+		items = filtered
+		if len(items) > limit {
+			items = items[:limit]
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "store": "audit"})

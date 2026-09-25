@@ -160,6 +160,28 @@ func (s *CommandStore) UnackedAfter(wsID string, after uint64) []*aiev1.Command 
 	return out
 }
 
+// HasUnackedJob 该任务的启动命令是否仍未得到工作站确认。
+func (s *CommandStore) HasUnackedJob(wsID, jobID string) bool {
+	if wsID == "" || jobID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, ok := s.byWS[wsID]
+	if !ok {
+		return false
+	}
+	for _, pc := range w.pending {
+		if pc == nil || pc.Acked || pc.Command == nil {
+			continue
+		}
+		if pc.Command.GetJobId() == jobID && pc.Command.GetType() == aiev1.CommandType_COMMAND_TYPE_START_JOB {
+			return true
+		}
+	}
+	return false
+}
+
 // Ack 确认命令；过旧/未知返回错误语义由调用方转 ACK.accepted=false。
 func (s *CommandStore) Ack(wsID, commandID string, sequence uint64) error {
 	s.mu.Lock()

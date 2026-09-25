@@ -12,8 +12,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
+	// 时区数据编进二进制。运行镜像没有 tzdata 时，Asia/Shanghai 会加载失败并按 UTC 计时。
+	_ "time/tzdata"
 
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
 	"github.com/ai-employee-platform/server/internal/api"
@@ -44,8 +48,8 @@ import (
 	"github.com/ai-employee-platform/server/internal/session"
 	"github.com/ai-employee-platform/server/internal/workergrpc"
 	"github.com/ai-employee-platform/server/internal/workflowmcp"
-	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/workspace"
+	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/wsmember"
 )
 
@@ -68,19 +72,29 @@ func main() {
 		wsMetaStore workstation.MetaStore = workstation.NewMemoryMeta()
 		totpStore   approval.TOTPStore    = approval.NewMemoryTOTP()
 		certStore   certca.CertificateStore
-		wfStore     workflowmcp.Store     = workflowmcp.NewMemoryStore()
-		mcpTokStore mcpauth.Store         = mcpauth.NewMemoryStore()
-		autoStore   automation.Store      = automation.NewMemoryStore()
-		artStore    artifact.Store        = artifact.NewMemoryStore()
-		wsMembers   wsmember.Store        = wsmember.NewMemoryStore()
-		quotaStore  quota.Store           = quota.NewMemoryStore()
+		wfStore     workflowmcp.Store = workflowmcp.NewMemoryStore()
+		mcpTokStore mcpauth.Store     = mcpauth.NewMemoryStore()
+		autoStore   automation.Store  = automation.NewMemoryStore()
+		artStore    artifact.Store    = artifact.NewMemoryStore()
+		wsMembers   wsmember.Store    = wsmember.NewMemoryStore()
+		quotaStore  quota.Store       = quota.NewMemoryStore()
 		pgSQL       *sql.DB
 	)
 
 	if cfg.DatabaseURL != "" {
-		db, err := database.Open(cfg.DatabaseURL)
+		var db *database.DB
+		var err error
+		// Postgres 与本进程同时拉起时，第一次 ping 会拒绝连接。空库回退会让管理页误进首次设置。
+		for attempt := 1; attempt <= 30; attempt++ {
+			db, err = database.Open(cfg.DatabaseURL)
+			if err == nil {
+				break
+			}
+			fmt.Printf("⚠️ 连接 PostgreSQL 失败 (%v)，%d/30 秒后重试\n", err, attempt)
+			time.Sleep(time.Second)
+		}
 		if err != nil {
-			fmt.Printf("⚠️ 连接 PostgreSQL 失败 (%v)，回退到内存存储\n", err)
+			fmt.Printf("⚠️ 连接 PostgreSQL 仍失败 (%v)，回退到内存存储\n", err)
 		} else {
 			fmt.Println("✅ 数据库: 已连接 PostgreSQL，启用全量持久化 (Users, Employees, Workspaces, Jobs, Sessions, Workstations, TOTP, Certificates, WorkflowMCP, Automation, Artifacts)")
 			defer db.Close()
@@ -202,8 +216,21 @@ func main() {
 	sched := scheduler.New(jobSvc, empSvc, wsNodeSvc, presence, workerSvc)
 	sched.SetWorkspaces(wsSvc)
 
+	quotaSvc := quota.NewService(quotaStore)
 	autoSvc := automation.New(autoStore, jobSvc, sched, vault, auditor)
 	autoSvc.SetNotify(automation.FeishuBridge{Svc: feishuSvc}, notifySvc)
+	sched.OnTerminal = func(ctx context.Context, j *job.Job) {
+		_ = notifySvc.OnJobTerminal(ctx, j)
+		autoSvc.OnJobTerminal(ctx, j)
+	}
+	autoSvc.Quota = quotaSvc
+	autoSvc.Roles = func(ctx context.Context, userID string) []string {
+		u, err := users.FindByID(ctx, userID)
+		if err != nil || u == nil {
+			return nil
+		}
+		return u.Roles
+	}
 
 	workerSvc.OnEvent = func(wsID string, ev *aiev1.Event) {
 		ctx := context.Background()
@@ -282,6 +309,7 @@ func main() {
 					if uj.Result == "" && payload["reply"] != "" {
 						uj.Result = payload["reply"]
 					}
+					recordJobTokens(ctx, jobSvc, quotaStore, jobID, payload)
 					_ = notifySvc.OnJobTerminal(ctx, uj)
 					autoSvc.OnJobTerminal(ctx, uj)
 				}
@@ -298,6 +326,7 @@ func main() {
 					fmt.Printf("[Server] ⚠️ Transition to FAILED 失败 (job=%s): %v\n", jobID, err)
 				}
 				if err == nil && uj != nil {
+					recordJobTokens(ctx, jobSvc, quotaStore, jobID, payload)
 					_ = notifySvc.OnJobTerminal(ctx, uj)
 					autoSvc.OnJobTerminal(ctx, uj)
 				}
@@ -334,6 +363,14 @@ func main() {
 	bridge := &feishu.Bridge{
 		Employees: empSvc, Jobs: jobSvc, Messages: msgSvc,
 		Scheduler: sched, Notify: notifySvc, Feishu: feishuSvc,
+		Quota: quotaSvc,
+		Roles: func(ctx context.Context, userID string) []string {
+			u, err := users.FindByID(ctx, userID)
+			if err != nil || u == nil {
+				return nil
+			}
+			return u.Roles
+		},
 	}
 	bridge.Wire()
 
@@ -399,20 +436,20 @@ func main() {
 	}()
 
 	httpHandler := api.NewRouter(api.Deps{
-		Auth:         authSvc,
-		Enrollment:   enrollSvc,
-		CA:           ca,
-		Employees:    empSvc,
-		Workspaces:   wsSvc,
-		Workstations: wsNodeSvc,
-		Sessions:     sessSvc,
-		Jobs:         jobSvc,
-		Messages:     msgSvc,
-		Bus:          bus,
-		Audit:        auditor,
-		Feishu:       feishuSvc,
-		Scheduler:    sched,
-		Notify:       notifySvc,
+		Auth:            authSvc,
+		Enrollment:      enrollSvc,
+		CA:              ca,
+		Employees:       empSvc,
+		Workspaces:      wsSvc,
+		Workstations:    wsNodeSvc,
+		Sessions:        sessSvc,
+		Jobs:            jobSvc,
+		Messages:        msgSvc,
+		Bus:             bus,
+		Audit:           auditor,
+		Feishu:          feishuSvc,
+		Scheduler:       sched,
+		Notify:          notifySvc,
 		Secrets:         vault,
 		SecretMgr:       secretMgr,
 		Permission:      permEng,
@@ -426,7 +463,7 @@ func main() {
 		SkillSyncer:     sched,
 		Automation:      autoSvc,
 		WSMembers:       wsMembers,
-		Quota:           quota.NewService(quotaStore),
+		Quota:           quotaSvc,
 	})
 	mcpSrv := &mcpserver.Server{WF: wfSvc, MCPAuth: mcpAuthSvc, Auth: authSvc, Syncer: sched}
 	mux := http.NewServeMux()
@@ -453,6 +490,23 @@ func main() {
 	<-ch
 	_ = httpSrv.Close()
 	fmt.Println("已关闭")
+}
+
+func recordJobTokens(ctx context.Context, jobSvc *job.Service, store quota.Store, jobID string, payload map[string]string) {
+	inTok, _ := strconv.ParseInt(payload["input_tokens"], 10, 64)
+	outTok, _ := strconv.ParseInt(payload["output_tokens"], 10, 64)
+	src := payload["token_source"]
+	if src == "" && inTok == 0 && outTok == 0 {
+		return
+	}
+	userID, first, err := jobSvc.RecordTokens(ctx, jobID, inTok, outTok, payload["agent"], src)
+	if err != nil || !first || store == nil {
+		return
+	}
+	if userID == "" || userID == "feishu" || strings.HasPrefix(userID, "automation:") || strings.HasPrefix(userID, "feishu:") {
+		return
+	}
+	_, _ = store.AddUsage(ctx, quota.TypeUser, userID, quota.PeriodMonthly, inTok+outTok, 1)
 }
 
 func getenv(k, def string) string {

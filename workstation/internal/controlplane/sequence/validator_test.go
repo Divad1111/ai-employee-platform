@@ -53,6 +53,19 @@ func TestStrictSequenceAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestSequenceRewindAfterServerRestart(t *testing.T) {
+	v := sequence.NewValidator(0)
+	v.SetLastSequence(40)
+	c := cmd("new-epoch", 1, 0)
+	if r := v.Check(c); !r.Accept {
+		t.Fatalf("序号回绕应接受: %s", r.Error)
+	}
+	v.Commit(c)
+	if v.LastSequence() != 1 {
+		t.Fatalf("last=%d", v.LastSequence())
+	}
+}
+
 func TestTimestampWindow(t *testing.T) {
 	v := sequence.NewValidator(1000) // 1s
 	far := cmd("cx", 1, 60_000)
