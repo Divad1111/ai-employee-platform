@@ -34,6 +34,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/feishu"
 	"github.com/ai-employee-platform/server/internal/job"
+	"github.com/ai-employee-platform/server/internal/mcp"
 	"github.com/ai-employee-platform/server/internal/mcpauth"
 	"github.com/ai-employee-platform/server/internal/mcpserver"
 	"github.com/ai-employee-platform/server/internal/message"
@@ -78,6 +79,7 @@ func main() {
 		artStore    artifact.Store    = artifact.NewMemoryStore()
 		wsMembers   wsmember.Store    = wsmember.NewMemoryStore()
 		quotaStore  quota.Store       = quota.NewMemoryStore()
+		mcpStore    mcp.Store         = mcp.NewMemoryStore()
 		pgSQL       *sql.DB
 	)
 
@@ -114,6 +116,7 @@ func main() {
 			artStore = artifact.NewPostgresStore(db.SQL)
 			wsMembers = db.NewWSMemberStore()
 			quotaStore = quota.NewPostgresStore(db.SQL)
+			mcpStore = mcp.NewPGStore(db.SQL)
 		}
 	}
 
@@ -360,6 +363,7 @@ func main() {
 	met := metrics.New()
 	wfSvc := workflowmcp.NewService(wfStore)
 	mcpAuthSvc := mcpauth.NewService(mcpTokStore)
+	mcpSvc := mcp.NewService(mcpStore, secretMgr)
 	bridge := &feishu.Bridge{
 		Employees: empSvc, Jobs: jobSvc, Messages: msgSvc,
 		Scheduler: sched, Notify: notifySvc, Feishu: feishuSvc,
@@ -380,6 +384,7 @@ func main() {
 	}
 	sched.SetWorkflowMCP(wfSvc, mcpURL)
 	sched.SetMCPAuth(mcpAuthSvc)
+	sched.SetMCP(mcpSvc)
 	sched.SetFullPusher(workerSvc)
 
 	// 生产/真实运行模式：默认不注入演示数据，只使用实际接入的工作站与业务数据
@@ -460,6 +465,7 @@ func main() {
 		Metrics:         met,
 		WorkflowMCP:     wfSvc,
 		MCPAuth:         mcpAuthSvc,
+		MCP:             mcpSvc,
 		SkillSyncer:     sched,
 		Automation:      autoSvc,
 		WSMembers:       wsMembers,

@@ -14,6 +14,7 @@ import (
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/job"
+	"github.com/ai-employee-platform/server/internal/mcp"
 	"github.com/ai-employee-platform/server/internal/mcpauth"
 	"github.com/ai-employee-platform/server/internal/reliability"
 	"github.com/ai-employee-platform/server/internal/workflowmcp"
@@ -46,6 +47,7 @@ type Service struct {
 	OnTerminal         func(ctx context.Context, j *job.Job)
 	WorkflowMCP        *workflowmcp.Service
 	MCPAuth            *mcpauth.Service
+	MCP                *mcp.Service
 	MCPPublicURL       string // 例如 http://127.0.0.1:8080/mcp
 	MaxConcurrentPerWS int
 	MaxCPUPercent      float64 // 超过则不分新 Job（0=不限制）

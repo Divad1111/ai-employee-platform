@@ -15,6 +15,17 @@ import {
   type SkillPackage,
   type Workflow,
 } from '../api/workflowmcp'
+import {
+  bindEmployeeMCP,
+  listCredentials,
+  listEmployeeMCPBindings,
+  listMCPServers,
+  unbindEmployeeMCP,
+  updateEmployeeMCPBinding,
+  type Credential,
+  type EmployeeMCPBinding,
+  type MCPServer,
+} from '../api/mcp'
 import { StatusBadge } from '../components/StatusBadge'
 import { EntityName } from '../components/EntityName'
 import { IconAlertTriangle } from '../components/Icons'
@@ -100,6 +111,14 @@ export function EmployeeDetailPage() {
   const [mcpTokens, setMcpTokens] = useState<MCPToken[]>([])
   const [lastSecret, setLastSecret] = useState('')
 
+  // 多用户 MCP 绑定状态
+  const [mcpBindings, setMcpBindings] = useState<EmployeeMCPBinding[]>([])
+  const [mcpServers, setMcpServers] = useState<MCPServer[]>([])
+  const [credentials, setCredentials] = useState<Credential[]>([])
+  const [selectedServerId, setSelectedServerId] = useState('')
+  const [selectedCredId, setSelectedCredId] = useState('')
+  const [mcpBindingSubmitting, setMcpBindingSubmitting] = useState(false)
+
   const checkTotpStatus = () => {
     void apiGet<{ enabled: boolean }>('/auth/totp')
       .then((res) => setTotpEnabled(!!res.enabled))
@@ -167,6 +186,20 @@ export function EmployeeDetailPage() {
       })),
     [allWorkflows],
   )
+  const unbondedServers = useMemo(() => {
+    const boundIds = new Set(mcpBindings.map((b) => b.mcp_server_id))
+    return mcpServers.filter((s) => !boundIds.has(s.id))
+  }, [mcpServers, mcpBindings])
+
+  const mcpServerOptions = useMemo(
+    () =>
+      unbondedServers.map((s) => ({
+        value: s.id,
+        label: `${s.name} (${s.id}) · ${s.server_type}`,
+        keywords: `${s.id} ${s.name} ${s.server_type}`,
+      })),
+    [unbondedServers],
+  )
 
   async function onCreateWsQuick(ev: FormEvent) {
     ev.preventDefault()
@@ -202,18 +235,24 @@ export function EmployeeDetailPage() {
 
   async function load() {
     if (!id) return
-    const [data, wsData, wspData, wfAll, tokens] = await Promise.all([
+    const [data, wsData, wspData, wfAll, tokens, bindings, servers, creds] = await Promise.all([
       apiGet<Overview>(`/employees/${id}/overview`),
       apiGet<{ items: WsNode[] }>('/workstations').catch(() => ({ items: [] })),
       apiGet<{ items: Array<{ id: string; name?: string; path?: string }> }>('/workspaces').catch(() => ({ items: [] })),
       listWorkflows().catch(() => ({ items: [] as Workflow[] })),
       listMCPTokens(id).catch(() => ({ items: [] as MCPToken[] })),
+      listEmployeeMCPBindings(id).catch(() => ({ items: [] as EmployeeMCPBinding[] })),
+      listMCPServers().catch(() => ({ items: [] as MCPServer[] })),
+      listCredentials().catch(() => ({ items: [] as Credential[] })),
     ])
     setOv(data)
     setWorkstations(wsData.items ?? [])
     setWorkspaces(wspData.items ?? [])
     setAllWorkflows(wfAll.items ?? [])
     setMcpTokens(tokens.items ?? [])
+    setMcpBindings(bindings.items ?? [])
+    setMcpServers(servers.items ?? [])
+    setCredentials(creds.items ?? [])
     setProvider(data.employee.default_provider || '')
     setModel(data.employee.default_model || '')
     setWsId(data.employee.workstation_id || '')
@@ -240,6 +279,76 @@ export function EmployeeDetailPage() {
       await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存失败')
+    }
+  }
+
+  async function handleAddMcpBinding(ev: FormEvent) {
+    ev.preventDefault()
+    if (!id || !selectedServerId) return
+    setMcpBindingSubmitting(true)
+    setError('')
+    try {
+      await bindEmployeeMCP(id, {
+        mcp_server_id: selectedServerId,
+        credential_id: selectedCredId || undefined,
+        enabled: true,
+      })
+      setSelectedServerId('')
+      setSelectedCredId('')
+      setMsg('成功绑定 MCP 服务扩展能力')
+      const bRes = await listEmployeeMCPBindings(id)
+      setMcpBindings(bRes.items ?? [])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '绑定 MCP 失败')
+    } finally {
+      setMcpBindingSubmitting(false)
+    }
+  }
+
+  async function handleToggleMcpBinding(binding: EmployeeMCPBinding) {
+    if (!id) return
+    setError('')
+    try {
+      await updateEmployeeMCPBinding(id, binding.id, {
+        enabled: !binding.enabled,
+      })
+      const bRes = await listEmployeeMCPBindings(id)
+      setMcpBindings(bRes.items ?? [])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '更新状态失败')
+    }
+  }
+
+  async function handleChangeBindingCredential(bindingId: string, credentialId: string) {
+    if (!id) return
+    setError('')
+    try {
+      await updateEmployeeMCPBinding(id, bindingId, {
+        credential_id: credentialId || undefined,
+      })
+      setMsg('凭证绑定更新成功')
+      const bRes = await listEmployeeMCPBindings(id)
+      setMcpBindings(bRes.items ?? [])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '更新凭证失败')
+    }
+  }
+
+  async function handleUnbindMcp(binding: EmployeeMCPBinding) {
+    if (!id) return
+    if (binding.mcp_server_id === 'mcp-workflow') {
+      if (!confirm('确定要解绑内置 workflow-mcp 吗？解绑后该员工将无法调度执行平台预置的任何工作流与技能包。')) {
+        return
+      }
+    }
+    setError('')
+    try {
+      await unbindEmployeeMCP(id, binding.id)
+      setMsg('已解绑 MCP 服务')
+      const bRes = await listEmployeeMCPBindings(id)
+      setMcpBindings(bRes.items ?? [])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '解绑失败')
     }
   }
 
@@ -530,6 +639,166 @@ export function EmployeeDetailPage() {
               </tbody>
             </table>
           </div>
+        </div>
+      </div>
+
+      {/* 多用户 MCP 扩展能力与身份凭证绑定 */}
+      <div className="panel" style={{ marginTop: '1rem' }}>
+        <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+              <h2>MCP 扩展能力与身份凭证绑定 (Multi-User MCP)</h2>
+              <span className="badge badge-ok" style={{ fontSize: '0.75rem' }}>能力与身份解耦</span>
+            </div>
+            <p style={{ marginTop: '0.25rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+              MCP 服务提供工具能力，身份凭证（Credential）确定执行身份。平台在任务调度时按此配置动态解密并注入 MCP 配置。
+            </p>
+          </div>
+          <Link to="/mcp-servers" className="btn-ghost btn-sm" style={{ whiteSpace: 'nowrap' }}>
+            前往 MCP 服务与凭证保管库 →
+          </Link>
+        </div>
+
+        {/* 添加绑定表单 */}
+        {unbondedServers.length > 0 ? (
+          <form
+            className="inline-form"
+            onSubmit={handleAddMcpBinding}
+            style={{ marginTop: '0.75rem', padding: '0.75rem', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0', display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'flex-end' }}
+          >
+            <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>
+              选择要挂载的 MCP 服务
+              <SearchableSelect
+                value={selectedServerId}
+                onChange={setSelectedServerId}
+                options={mcpServerOptions}
+                placeholder="选择未挂载的 MCP 服务…"
+                style={{ minWidth: 260 }}
+              />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>
+              选择执行身份凭证 (可选)
+              <select
+                className="select"
+                value={selectedCredId}
+                onChange={(e) => setSelectedCredId(e.target.value)}
+                style={{ minWidth: 220, height: '36px' }}
+              >
+                <option value="">（无 / 使用默认配置）</option>
+                {credentials.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.credential_name} ({c.provider} · {c.auth_type})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button type="submit" disabled={!selectedServerId || mcpBindingSubmitting}>
+              {mcpBindingSubmitting ? '添加中...' : '绑定 MCP 能力'}
+            </button>
+          </form>
+        ) : (
+          <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+            ✓ 所有已注册的 MCP 服务均已绑定到此员工。如需新增 MCP，请前往 <Link to="/mcp-servers">MCP 服务管理</Link>。
+          </div>
+        )}
+
+        {/* 已绑定列表 */}
+        <div className="table-wrapper" style={{ marginTop: '1rem' }}>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>MCP 服务名称</th>
+                <th>服务类型 / 传输协议</th>
+                <th>绑定身份凭证 (Credential)</th>
+                <th>状态</th>
+                <th style={{ textAlign: 'right' }}>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mcpBindings.length > 0 ? (
+                mcpBindings.map((b) => {
+                  const server = mcpServers.find((s) => s.id === b.mcp_server_id)
+                  const isBuiltinWorkflow = b.mcp_server_id === 'mcp-workflow'
+                  return (
+                    <tr key={b.id}>
+                      <td>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <span style={{ fontWeight: 600 }}>{server?.name || b.mcp_server_name || b.mcp_server_id}</span>
+                          {isBuiltinWorkflow && (
+                            <span className="badge badge-ok" style={{ fontSize: '0.7rem' }}>系统内置</span>
+                          )}
+                        </div>
+                        <div className="mono" style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                          ID: {b.mcp_server_id}
+                        </div>
+                      </td>
+                      <td>
+                        <div style={{ fontSize: '0.85rem' }}>
+                          <span className="badge" style={{ textTransform: 'uppercase', marginRight: '0.35rem' }}>
+                            {server?.transport || 'http'}
+                          </span>
+                          <span style={{ color: 'var(--text-secondary)' }}>
+                            {server?.server_type === 'builtin' ? '系统核心' : '自定义扩展'}
+                          </span>
+                        </div>
+                        {server?.endpoint && (
+                          <div className="mono" style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
+                            {server.endpoint}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        <select
+                          className="select"
+                          value={b.credential_id || ''}
+                          onChange={(e) => void handleChangeBindingCredential(b.id, e.target.value)}
+                          style={{ fontSize: '0.82rem', padding: '0.25rem 0.5rem', minWidth: 180 }}
+                        >
+                          <option value="">（无凭证 / 免鉴权）</option>
+                          {credentials.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.credential_name} ({c.provider})
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className={b.enabled ? 'badge badge-ok' : 'badge badge-muted'}
+                          style={{ cursor: 'pointer', border: 'none' }}
+                          onClick={() => void handleToggleMcpBinding(b)}
+                          title="点击切换启用状态"
+                        >
+                          {b.enabled ? '✓ 已启用' : '已停用'}
+                        </button>
+                      </td>
+                      <td style={{ textAlign: 'right' }}>
+                        <div style={{ display: 'flex', gap: '0.4rem', justifyContent: 'flex-end', alignItems: 'center' }}>
+                          {isBuiltinWorkflow && (
+                            <Link to="/mcp-servers/workflow-mcp" className="btn-ghost btn-sm">
+                              工作流配置 →
+                            </Link>
+                          )}
+                          <button
+                            type="button"
+                            className="btn-danger btn-sm"
+                            onClick={() => void handleUnbindMcp(b)}
+                          >
+                            解绑
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })
+              ) : (
+                <tr>
+                  <td colSpan={5} className="empty-tip">暂无挂载任何 MCP 服务</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 

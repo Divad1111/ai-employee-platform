@@ -2,6 +2,7 @@
  * 工作流MCP 管理页：工作流 / 技能包 / 知识库 三 Tab。
  */
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { PageFeatureGuide } from '../../components/PageFeatureGuide'
 import { EntityName } from '../../components/EntityName'
 import { IconBook, IconZap } from '../../components/Icons'
@@ -273,9 +274,21 @@ export function WorkflowMcpPage() {
 
   return (
     <div className="page">
+      <div style={{ marginBottom: '1rem', fontSize: '0.88rem' }}>
+        <Link to="/mcp-servers" style={{ color: 'var(--primary)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <span>← 返回 MCP 服务管理</span>
+        </Link>
+        <span style={{ margin: '0 8px', color: 'var(--text-muted)' }}>/</span>
+        <span style={{ color: 'var(--text-secondary)' }}>workflow-mcp (系统内置)</span>
+      </div>
       <div className="page-header">
-        <h1>工作流管理</h1>
-        <p className="muted">管理工作流、技能包与知识库（工作流MCP）</p>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <h1>workflow-mcp 服务配置与详情</h1>
+            <span className="badge badge-ok">系统内置 Builtin</span>
+          </div>
+          <p className="muted">系统内置核心能力：统一提供标准 SOP 工作流编排、技能包同步与企业知识库检索</p>
+        </div>
       </div>
       <PageFeatureGuide
         title="工作流MCP"

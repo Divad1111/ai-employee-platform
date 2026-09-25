@@ -16,7 +16,6 @@ import {
   IconJobs,
   IconTerminal,
   IconMessage,
-  IconZap,
   IconShield,
   IconCheckCircle,
   IconKey,
@@ -26,6 +25,7 @@ import {
   IconLogOut,
   IconFolder,
   IconClock,
+  IconPlug,
 } from './Icons'
 
 type NavItem = {
@@ -71,7 +71,7 @@ const navSections: NavSection[] = [
   {
     title: '能力与协同扩展',
     items: [
-      { to: '/workflows', label: '工作流管理', icon: IconZap, perm: 'workflow.read' },
+      { to: '/mcp-servers', label: 'MCP 服务管理', icon: IconPlug, perm: 'workflow.read' },
       // 飞书应用配置属系统集成，需 system.write
       { to: '/feishu', label: '飞书应用协同', icon: IconMessage, perm: 'system.write' },
     ],

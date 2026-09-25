@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
+	"github.com/ai-employee-platform/server/internal/mcp"
 	"github.com/ai-employee-platform/server/internal/mcpauth"
 	"github.com/ai-employee-platform/server/internal/workflowmcp"
 )
@@ -24,6 +26,9 @@ func (s *Service) SetWorkflowMCP(wf *workflowmcp.Service, mcpPublicURL string) {
 
 // SetMCPAuth 注入 MCP Token 服务。
 func (s *Service) SetMCPAuth(a *mcpauth.Service) { s.MCPAuth = a }
+
+// SetMCP 注入多用户 MCP 服务。
+func (s *Service) SetMCP(m *mcp.Service) { s.MCP = m }
 
 // SetFullPusher 注入支持结构化载荷的 Pusher。
 func (s *Service) SetFullPusher(p FullCommandPusher) { s.FullPusher = p }
@@ -122,8 +127,79 @@ func (s *Service) buildStartJobPayload(ctx context.Context, employeeID, prompt, 
 		}
 		start.SkillPackages = append(start.SkillPackages, pkg)
 	}
-	// MCP Server：指向 CP /mcp，携带员工 Token
-	if s.MCPPublicURL != "" && s.MCPAuth != nil {
+	// 多用户 MCP 绑定下发：查询当前员工启用的所有 MCP 绑定 (§7, §30)
+	hasWorkflowMCP := false
+	if s.MCP != nil {
+		if bnds, err := s.MCP.ListBindingsByEmployee(ctx, employeeID); err == nil && len(bnds) > 0 {
+			for _, b := range bnds {
+				if !b.Enabled {
+					continue
+				}
+				if b.MCPServerID == "mcp-workflow" || strings.EqualFold(b.MCPServerName, "workflow-mcp") {
+					hasWorkflowMCP = true
+					continue
+				}
+				srv, err := s.MCP.GetServer(ctx, b.MCPServerID)
+				if err != nil || srv.Status != mcp.StatusActive {
+					continue
+				}
+				spec := &aiev1.MCPServerSpec{
+					Name:    srv.Name,
+					Type:    srv.Transport,
+					Url:     srv.Endpoint,
+					Headers: map[string]string{},
+					Env:     map[string]string{},
+				}
+				if srv.Config != nil {
+					if h, ok := srv.Config["headers"].(map[string]any); ok {
+						for k, v := range h {
+							if str, ok := v.(string); ok {
+								spec.Headers[k] = str
+							}
+						}
+					}
+					if e, ok := srv.Config["env"].(map[string]any); ok {
+						for k, v := range e {
+							if str, ok := v.(string); ok {
+								spec.Env[k] = str
+							}
+						}
+					}
+					if args, ok := srv.Config["args"].([]any); ok {
+						for _, a := range args {
+							if str, ok := a.(string); ok {
+								spec.Args = append(spec.Args, str)
+							}
+						}
+					}
+					if cmd, ok := srv.Config["command"].(string); ok && cmd != "" {
+						spec.Command = cmd
+					}
+				}
+				if spec.Type == "" {
+					spec.Type = "http"
+				}
+				if spec.Type == "stdio" && spec.Command == "" {
+					spec.Command = srv.Endpoint
+				}
+				// 注入已绑定的身份凭证（若有）
+				if b.CredentialID != "" {
+					if secretVal, err := s.MCP.ResolveSecretValue(ctx, b.CredentialID); err == nil && secretVal != "" {
+						spec.Headers["Authorization"] = "Bearer " + secretVal
+					}
+				}
+				start.McpServers = append(start.McpServers, spec)
+			}
+		} else {
+			// 若无任何绑定记录，保持向下兼容：默认启用 workflow-mcp
+			hasWorkflowMCP = true
+		}
+	} else {
+		hasWorkflowMCP = true
+	}
+
+	// 若绑定了 workflow-mcp（或兜底）：下发系统内置 workflow-mcp，携带员工动态 Token
+	if hasWorkflowMCP && s.MCPPublicURL != "" && s.MCPAuth != nil {
 		res, err := s.MCPAuth.Issue(ctx, mcpauth.SubjectEmployee, employeeID,
 			mcpauth.ScopeRead, "job-runtime", "scheduler", 24*time.Hour)
 		if err == nil && res != nil {

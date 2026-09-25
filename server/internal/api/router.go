@@ -25,6 +25,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/feishu"
 	"github.com/ai-employee-platform/server/internal/job"
+	"github.com/ai-employee-platform/server/internal/mcp"
 	"github.com/ai-employee-platform/server/internal/mcpauth"
 	"github.com/ai-employee-platform/server/internal/message"
 	"github.com/ai-employee-platform/server/internal/metrics"
@@ -67,6 +68,7 @@ type Deps struct {
 	Metrics         *metrics.Registry
 	WorkflowMCP     *workflowmcp.Service
 	MCPAuth         *mcpauth.Service
+	MCP             *mcp.Service
 	SkillSyncer     SkillSyncer
 	Automation      *automation.Service
 	WSMembers       wsmember.Store
@@ -218,6 +220,24 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/employees/{id}/mcp-tokens", d.requirePerm("workflow.grant", d.handleListEmployeeMCPTokens))
 	mux.HandleFunc("POST /api/employees/{id}/mcp-tokens", d.requirePerm("workflow.grant", d.handleIssueEmployeeMCPToken))
 	mux.HandleFunc("DELETE /api/mcp-tokens/{id}", d.requirePerm("workflow.grant", d.handleRevokeMCPToken))
+
+	// 多用户 MCP Server、凭证库与员工绑定管理 (§5, §6, §7)
+	mux.HandleFunc("GET /api/mcp-servers", d.requirePerm("workflow.read", d.handleListMCPServers))
+	mux.HandleFunc("POST /api/mcp-servers", d.requirePerm("workflow.write", d.handleCreateMCPServer))
+	mux.HandleFunc("GET /api/mcp-servers/{id}", d.requirePerm("workflow.read", d.handleGetMCPServer))
+	mux.HandleFunc("PUT /api/mcp-servers/{id}", d.requirePerm("workflow.write", d.handleUpdateMCPServer))
+	mux.HandleFunc("DELETE /api/mcp-servers/{id}", d.requirePerm("workflow.delete", d.handleDeleteMCPServer))
+
+	mux.HandleFunc("GET /api/credentials", d.requirePerm("workflow.read", d.handleListCredentials))
+	mux.HandleFunc("POST /api/credentials", d.requirePerm("workflow.write", d.handleCreateCredential))
+	mux.HandleFunc("GET /api/credentials/{id}", d.requirePerm("workflow.read", d.handleGetCredential))
+	mux.HandleFunc("PUT /api/credentials/{id}", d.requirePerm("workflow.write", d.handleUpdateCredential))
+	mux.HandleFunc("DELETE /api/credentials/{id}", d.requirePerm("workflow.delete", d.handleDeleteCredential))
+
+	mux.HandleFunc("GET /api/employees/{id}/mcp-bindings", d.requirePerm("workflow.read", d.handleListEmployeeMCPBindings))
+	mux.HandleFunc("POST /api/employees/{id}/mcp-bindings", d.requirePerm("workflow.grant", d.handleCreateEmployeeMCPBinding))
+	mux.HandleFunc("PUT /api/employees/{id}/mcp-bindings/{bindingId}", d.requirePerm("workflow.grant", d.handleUpdateEmployeeMCPBinding))
+	mux.HandleFunc("DELETE /api/employees/{id}/mcp-bindings/{bindingId}", d.requirePerm("workflow.grant", d.handleDeleteEmployeeMCPBinding))
 
 	mux.HandleFunc("PUT /api/permission/profiles", d.requirePerm("system.write", d.handleUpsertPermissionProfile))
 	mux.HandleFunc("PUT /api/permission/rules", d.requirePerm("system.write", d.handleUpsertPermissionRule))
