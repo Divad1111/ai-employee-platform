@@ -26,6 +26,8 @@ import (
 	"github.com/ai-employee-platform/server/internal/audit"
 	"github.com/ai-employee-platform/server/internal/auth"
 	"github.com/ai-employee-platform/server/internal/automation"
+	"github.com/ai-employee-platform/server/internal/backup"
+	backupdb "github.com/ai-employee-platform/server/internal/backup/database"
 	"github.com/ai-employee-platform/server/internal/certca"
 	"github.com/ai-employee-platform/server/internal/config"
 	"github.com/ai-employee-platform/server/internal/database"
@@ -349,7 +351,23 @@ func main() {
 	_ = os.MkdirAll(artRoot, 0o750)
 	artSvc := artifact.New(artStore, artRoot)
 	artSvc.SetJobLookup(artifactJobLookup{jobs: jobSvc})
-	_ = pgSQL // 保留连接引用供未来扩展；制品已走 artStore
+
+	var backupSvc *backup.Service
+	if pgSQL != nil {
+		backupStore := backup.NewPostgresStore(pgSQL)
+		dbBackupProvider := backupdb.NewPostgresProvider(pgSQL)
+		backupWorkDir := getenv("AIE_BACKUP_WORK_DIR", "/data/backup_work")
+		backupDir := getenv("AIE_BACKUP_DIR", "/data/backups")
+		_ = os.MkdirAll(backupDir, 0o750)
+		_ = os.MkdirAll(backupWorkDir, 0o750)
+		backupSvc = backup.NewService(backupStore, dbBackupProvider, backup.Config{
+			CADir:       caDir,
+			SecretDir:   getenv("AIE_SECRET_DIR", "/data/secrets"),
+			ArtifactDir: artRoot,
+			WorkDir:     backupWorkDir,
+			MasterKey:   getenv("AIE_MASTER_KEY", ""),
+		})
+	}
 	regSvc, _, err := registry.New(registry.NewMemoryStore(), getenv("AIE_PROVIDER_SIGNING_PUBKEY", ""))
 	if err != nil {
 		fatal("初始化 Provider Registry 失败: %v", err)
@@ -416,6 +434,9 @@ func main() {
 			case <-t.C:
 				sched.Tick(context.Background())
 				autoSvc.Tick(context.Background(), time.Now().UTC())
+				if backupSvc != nil && backupSvc.Scheduler != nil {
+					backupSvc.Scheduler.Tick(context.Background(), time.Now().UTC())
+				}
 				// 刷新基础 metrics
 				nOnline := 0
 				for _, v := range wsNodeSvc.List(context.Background()) {
@@ -470,6 +491,7 @@ func main() {
 		Automation:      autoSvc,
 		WSMembers:       wsMembers,
 		Quota:           quotaSvc,
+		Backup:          backupSvc,
 	})
 	mcpSrv := &mcpserver.Server{WF: wfSvc, MCPAuth: mcpAuthSvc, Auth: authSvc, Syncer: sched}
 	mux := http.NewServeMux()

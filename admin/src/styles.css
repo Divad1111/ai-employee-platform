@@ -490,14 +490,16 @@ a.stat-card:focus-visible {
   width: 100%;
 }
 
-.table {
+.table,
+.data-table {
   width: 100%;
   border-collapse: collapse;
   text-align: left;
   font-size: 0.9rem;
 }
 
-.table th {
+.table th,
+.data-table th {
   background: #f8fafc;
   color: var(--text-muted);
   font-weight: 600;
@@ -508,22 +510,26 @@ a.stat-card:focus-visible {
   white-space: nowrap;
 }
 
-.table td {
+.table td,
+.data-table td {
   padding: 0.85rem 1.1rem;
   border-bottom: 1px solid #f1f5f9;
   color: var(--text-secondary);
   vertical-align: middle;
 }
 
-.table tbody tr {
+.table tbody tr,
+.data-table tbody tr {
   transition: background-color 0.12s ease;
 }
 
-.table tbody tr:hover {
+.table tbody tr:hover,
+.data-table tbody tr:hover {
   background-color: #f8fafc;
 }
 
-.table tbody tr:last-child td {
+.table tbody tr:last-child td,
+.data-table tbody tr:last-child td {
   border-bottom: none;
 }
 
@@ -1195,7 +1201,8 @@ a:hover {
 }
 
 /* 全局现代化通用弹窗 (Modal System) */
-.modal-backdrop {
+.modal-backdrop,
+.modal-overlay {
   position: fixed;
   inset: 0;
   background: rgba(15, 23, 42, 0.65);
@@ -1209,7 +1216,8 @@ a:hover {
   animation: modalFadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.modal-card {
+.modal-card,
+.modal {
   background: #ffffff;
   border-radius: 14px;
   width: 580px;

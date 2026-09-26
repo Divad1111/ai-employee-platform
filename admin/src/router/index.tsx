@@ -5,6 +5,7 @@ import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom
 import { AppShell } from '../components/AppShell'
 import { ApprovalsPage } from '../pages/ApprovalsPage'
 import { ArtifactsPage } from '../pages/ArtifactsPage'
+import { BackupsPage } from '../pages/backups/BackupsPage'
 import { SecretsPage } from '../pages/SecretsPage'
 import { AuditPage, SettingsPage } from '../pages/MiscPages'
 import { DashboardPage } from '../pages/DashboardPage'
@@ -71,6 +72,7 @@ export function AppRouter() {
             <Route path="/quotas" element={<QuotasPage />} />
             <Route path="/approvals" element={<ApprovalsPage />} />
             <Route path="/secrets" element={<SecretsPage />} />
+            <Route path="/backups" element={<BackupsPage />} />
             <Route path="/artifacts" element={<ArtifactsPage />} />
             <Route path="/audit" element={<AuditPage />} />
             <Route path="/settings" element={<SettingsPage />} />

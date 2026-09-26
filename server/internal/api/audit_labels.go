@@ -90,6 +90,20 @@ func actionLabelCN(action string) string {
 		"permission.profile.upsert":   "保存权限配置",
 		"permission.rule.upsert":      "保存权限规则",
 		"audit.archive":               "归档审计",
+		"backup.destination.create":   "新建存储目标",
+		"backup.destination.update":   "修改存储目标",
+		"backup.destination.delete":   "删除存储目标",
+		"backup.destination.test":     "测试存储目标",
+		"backup.policy.create":        "新建备份策略",
+		"backup.policy.update":        "修改备份策略",
+		"backup.policy.delete":        "删除备份策略",
+		"backup.policy.enable":        "启用备份策略",
+		"backup.policy.disable":       "停用备份策略",
+		"backup.policy.run":           "执行策略备份",
+		"backup.manual.run":           "执行即时备份",
+		"backup.run.verify":           "校验备份快照",
+		"backup.run.delete":           "删除备份快照",
+		"backup.run.restore":          "执行容灾恢复",
 	}
 	if cn, ok := labels[action]; ok {
 		return cn
@@ -176,6 +190,13 @@ func permLabelCN(code string) string {
 		"role.update":       "修改角色",
 		"role.delete":       "删除角色",
 		"automation.write":  "编辑自动化",
+		"backup.view":        "查看备份",
+		"backup.create":      "发起备份",
+		"backup.manage":      "管理备份策略",
+		"backup.destination": "管理存储目标",
+		"backup.verify":      "校验备份快照",
+		"backup.delete":      "删除备份数据",
+		"backup.restore":     "执行容灾恢复",
 	}
 	if cn, ok := labels[code]; ok {
 		return cn
@@ -337,6 +358,8 @@ func (d Deps) auditReplacePairs(ctx context.Context) []replacePair {
 		"workflow.delete", "workflow.grant", "quota.read", "quota.update",
 		"user.create", "user.read", "user.update", "user.delete", "user.disable",
 		"role.create", "role.update", "role.delete", "automation.write",
+		"backup.view", "backup.create", "backup.manage", "backup.destination",
+		"backup.verify", "backup.delete", "backup.restore",
 	} {
 		add(code, permLabelCN(code))
 	}
@@ -379,7 +402,8 @@ func fallbackAuditSummary(m map[string]string) string {
 		"resource_id": "对象", "token_limit": "Token 限额", "before": "原值",
 		"after": "新值", "workstation_id": "工作站", "user_id": "用户",
 		"prompt": "提示词", "source": "来源", "status": "状态",
-		"client_name": "客户端",
+		"client_name": "客户端", "dest_id": "存储目标", "policy_id": "备份策略",
+		"run_id": "备份快照", "job_id": "恢复任务",
 	}
 	var parts []string
 	for k, v := range m {

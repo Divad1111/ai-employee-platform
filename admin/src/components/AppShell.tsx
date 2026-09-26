@@ -90,6 +90,7 @@ const navSections: NavSection[] = [
       // 策略引擎 / 系统配置属于运维写操作，需 system.write（VIEWER 仅有 system.read 不应进入）
       { to: '/permissions', label: '权限策略引擎', icon: IconShield, perm: 'system.write' },
       { to: '/secrets', label: '机密凭证保管箱', icon: IconKey, perm: 'secret.read' },
+      { to: '/backups', label: '备份与容灾恢复', icon: IconServer, perm: 'backup.view' },
       { to: '/audit', label: '操作审计日志', icon: IconFileText, perm: 'audit.read' },
       { to: '/settings', label: '系统架构配置', icon: IconSettings, perm: 'system.write' },
     ],

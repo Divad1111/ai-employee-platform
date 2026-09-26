@@ -19,6 +19,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/auth"
 	"github.com/ai-employee-platform/server/internal/authz"
 	"github.com/ai-employee-platform/server/internal/automation"
+	"github.com/ai-employee-platform/server/internal/backup"
 	"github.com/ai-employee-platform/server/internal/certca"
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/enrollment"
@@ -73,6 +74,7 @@ type Deps struct {
 	Automation      *automation.Service
 	WSMembers       wsmember.Store
 	Quota           *quota.Service
+	Backup          *backup.Service
 }
 
 // SkillSyncer 向工作站推送技能包同步命令。
@@ -294,6 +296,34 @@ func NewRouter(d Deps) http.Handler {
 	if d.Metrics != nil {
 		mux.HandleFunc("GET /metrics", d.Metrics.Handler())
 	}
+
+	// 备份与容灾恢复 (Center Server Backup System)
+	mux.HandleFunc("GET /api/backups/overview", d.requirePerm("backup.view", d.handleBackupOverview))
+	mux.HandleFunc("GET /api/backups/destinations", d.requirePerm("backup.view", d.handleListBackupDestinations))
+	mux.HandleFunc("POST /api/backups/destinations", d.requirePerm("backup.destination", d.handleCreateBackupDestination))
+	mux.HandleFunc("GET /api/backups/destinations/{id}", d.requirePerm("backup.view", d.handleGetBackupDestination))
+	mux.HandleFunc("PUT /api/backups/destinations/{id}", d.requirePerm("backup.destination", d.handleUpdateBackupDestination))
+	mux.HandleFunc("DELETE /api/backups/destinations/{id}", d.requirePerm("backup.destination", d.handleDeleteBackupDestination))
+	mux.HandleFunc("POST /api/backups/destinations/{id}/test", d.requirePerm("backup.destination", d.handleTestBackupDestination))
+
+	mux.HandleFunc("GET /api/backups/policies", d.requirePerm("backup.view", d.handleListBackupPolicies))
+	mux.HandleFunc("POST /api/backups/policies", d.requirePerm("backup.manage", d.handleCreateBackupPolicy))
+	mux.HandleFunc("GET /api/backups/policies/{id}", d.requirePerm("backup.view", d.handleGetBackupPolicy))
+	mux.HandleFunc("PUT /api/backups/policies/{id}", d.requirePerm("backup.manage", d.handleUpdateBackupPolicy))
+	mux.HandleFunc("DELETE /api/backups/policies/{id}", d.requirePerm("backup.manage", d.handleDeleteBackupPolicy))
+	mux.HandleFunc("POST /api/backups/policies/{id}/run", d.requirePerm("backup.create", d.handleRunBackupPolicy))
+	mux.HandleFunc("POST /api/backups/policies/{id}/enable", d.requirePerm("backup.manage", d.handleEnableBackupPolicy))
+	mux.HandleFunc("POST /api/backups/policies/{id}/disable", d.requirePerm("backup.manage", d.handleDisableBackupPolicy))
+	mux.HandleFunc("POST /api/backups/manual", d.requirePerm("backup.create", d.handleRunBackupManual))
+
+	mux.HandleFunc("GET /api/backups/runs", d.requirePerm("backup.view", d.handleListBackupRuns))
+	mux.HandleFunc("GET /api/backups/runs/{id}", d.requirePerm("backup.view", d.handleGetBackupRun))
+	mux.HandleFunc("POST /api/backups/runs/{id}/verify", d.requirePerm("backup.verify", d.handleVerifyBackupRun))
+	mux.HandleFunc("DELETE /api/backups/runs/{id}", d.requirePerm("backup.delete", d.handleDeleteBackupRun))
+
+	mux.HandleFunc("POST /api/backups/runs/{id}/restore", d.requirePermStepUp("backup.restore", d.handleRestoreBackupRun))
+	mux.HandleFunc("GET /api/backups/restore-jobs", d.requirePerm("backup.view", d.handleListRestoreJobs))
+	mux.HandleFunc("GET /api/backups/restore-jobs/{id}", d.requirePerm("backup.view", d.handleGetRestoreJob))
 
 	return mux
 }

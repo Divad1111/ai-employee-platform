@@ -21,7 +21,7 @@ WORKDIR /src/server
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o /out/server ./cmd/server \
  && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o /out/migrate ./cmd/migrate
 # 预创建数据目录并赋予 nonroot 用户 (UID 65532) 写权限
-RUN mkdir -p /data/ca /data/secrets && chown -R 65532:65532 /data
+RUN mkdir -p /data/ca /data/secrets /data/artifacts /data/backups /data/backup_work && chown -R 65532:65532 /data
 
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app

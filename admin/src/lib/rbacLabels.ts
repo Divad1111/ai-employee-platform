@@ -43,9 +43,23 @@ export function roleDisplayName(name: string, description?: string) {
   return map[name] || name
 }
 
+const PERM_DESCRIPTIONS: Record<string, string> = {
+  'backup.view': '查看备份策略、存储目标与记录',
+  'backup.create': '手动执行系统备份',
+  'backup.manage': '管理备份策略与调度设置',
+  'backup.destination': '管理备份存储目标',
+  'backup.verify': '校验备份文件完整性',
+  'backup.delete': '删除备份历史产物',
+  'backup.restore': '执行系统全量容灾恢复',
+}
+
 export function permLabel(code: string, description?: string) {
   if (description && description.trim() && description !== code) {
     return `${description}（${code}）`
   }
+  if (PERM_DESCRIPTIONS[code]) {
+    return `${PERM_DESCRIPTIONS[code]}（${code}）`
+  }
   return code
 }
+

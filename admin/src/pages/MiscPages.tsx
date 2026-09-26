@@ -69,6 +69,10 @@ function formatAuditDetail(a: AuditItem): string {
     status: '状态',
     workstation_id: '工作站',
     client_name: '客户端',
+    dest_id: '存储目标',
+    policy_id: '备份策略',
+    run_id: '备份快照',
+    job_id: '恢复任务',
   }
   const parts = Object.entries(m)
     .filter(([k, v]) => !skip.has(k) && v)
