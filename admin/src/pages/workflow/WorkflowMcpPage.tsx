@@ -5,7 +5,8 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { PageFeatureGuide } from '../../components/PageFeatureGuide'
 import { EntityName } from '../../components/EntityName'
-import { IconBook, IconZap } from '../../components/Icons'
+import { IconBook, IconPackage, IconZap } from '../../components/Icons'
+import { CodeEditor } from '../../components/CodeEditor'
 import {
   deleteKnowledge,
   deleteSkill,
@@ -269,6 +270,10 @@ export function WorkflowMcpPage() {
   }
 
   const searchActive = searchSnap !== null
+  const isEditing =
+    (tab === 'workflows' && selectedWf !== null) ||
+    (tab === 'skills' && selectedSkill !== null) ||
+    (tab === 'knowledge' && selectedDoc !== null)
   const rowCount =
     tab === 'workflows' ? workflows.length : tab === 'skills' ? skills.length : docs.length
 
@@ -383,266 +388,327 @@ export function WorkflowMcpPage() {
         </div>
       )}
 
-      <div className="wf-tabs">
-        {(
-          [
-            ['workflows', '工作流'],
-            ['skills', '技能包'],
-            ['knowledge', '知识库'],
-          ] as const
-        ).map(([k, label]) => (
-          <button
-            key={k}
-            type="button"
-            className={tab === k ? 'btn-sm' : 'btn-ghost btn-sm'}
-            onClick={() => {
-              setTab(k)
-              setSelectedWf(null)
-              setSelectedSkill(null)
-              setSelectedDoc(null)
-              if (searchSnap) {
-                setWorkflows(searchSnap.workflows)
-                setSkills(searchSnap.skills)
-                setDocs(searchSnap.docs)
-              }
-            }}
-          >
-            {label}
-            {searchActive && searchSnap
-              ? ` (${k === 'workflows' ? searchSnap.workflows.length : k === 'skills' ? searchSnap.skills.length : searchSnap.docs.length})`
-              : ''}
-          </button>
-        ))}
+      {/* 现代化分段选项卡导航 */}
+      <div className="tab-nav">
+        <button
+          type="button"
+          className={`tab-btn ${tab === 'workflows' ? 'active' : ''}`}
+          onClick={() => {
+            setTab('workflows')
+            setSelectedWf(null)
+            setSelectedSkill(null)
+            setSelectedDoc(null)
+            if (searchSnap) {
+              setWorkflows(searchSnap.workflows)
+              setSkills(searchSnap.skills)
+              setDocs(searchSnap.docs)
+            }
+          }}
+        >
+          <IconZap size={16} />
+          <span>工作流</span>
+          <span className="tab-count">
+            {searchActive && searchSnap ? searchSnap.workflows.length : allWorkflows.length}
+          </span>
+        </button>
+        <button
+          type="button"
+          className={`tab-btn ${tab === 'skills' ? 'active' : ''}`}
+          onClick={() => {
+            setTab('skills')
+            setSelectedWf(null)
+            setSelectedSkill(null)
+            setSelectedDoc(null)
+            if (searchSnap) {
+              setWorkflows(searchSnap.workflows)
+              setSkills(searchSnap.skills)
+              setDocs(searchSnap.docs)
+            }
+          }}
+        >
+          <IconPackage size={16} />
+          <span>技能包</span>
+          <span className="tab-count">
+            {searchActive && searchSnap ? searchSnap.skills.length : allSkills.length}
+          </span>
+        </button>
+        <button
+          type="button"
+          className={`tab-btn ${tab === 'knowledge' ? 'active' : ''}`}
+          onClick={() => {
+            setTab('knowledge')
+            setSelectedWf(null)
+            setSelectedSkill(null)
+            setSelectedDoc(null)
+            if (searchSnap) {
+              setWorkflows(searchSnap.workflows)
+              setSkills(searchSnap.skills)
+              setDocs(searchSnap.docs)
+            }
+          }}
+        >
+          <IconBook size={16} />
+          <span>知识库</span>
+          <span className="tab-count">
+            {searchActive && searchSnap ? searchSnap.docs.length : allDocs.length}
+          </span>
+        </button>
       </div>
 
       {/* 单一 panel，避免切 Tab 时整块卸载导致跳动 */}
       <div className="panel wf-panel">
-        <div className="wf-panel-toolbar">
-          <h3>
-            {TAB_LABEL[tab]}列表
-            <span className="muted" style={{ fontWeight: 400, marginLeft: 8, fontSize: 13 }}>
-              {searchActive ? `筛选 ${rowCount} 条` : `共 ${rowCount} 条`}
-            </span>
-          </h3>
-          <div className="wf-panel-toolbar-actions">
-            {/* 固定占位，避免仅知识库页签出现过滤框时工具栏宽度变化 */}
-            <input
-              className="wf-ns-filter"
-              placeholder="namespace 过滤（如 cases）"
-              value={nsFilter}
-              onChange={(e) => setNsFilter(e.target.value)}
-              disabled={tab !== 'knowledge' || searchActive}
-              style={{ visibility: tab === 'knowledge' ? 'visible' : 'hidden' }}
-              title={
-                tab !== 'knowledge'
-                  ? undefined
-                  : searchActive
-                    ? '搜索筛选中时禁用 namespace 过滤'
-                    : undefined
-              }
-              tabIndex={tab === 'knowledge' ? 0 : -1}
-              aria-hidden={tab !== 'knowledge'}
-            />
-            {tab === 'workflows' && (
-              <button
-                type="button"
-                className="btn-sm"
-                onClick={() => {
-                  setSelectedWf('__new__')
-                  setWfYaml(
-                    'id: my-workflow\nname: 新工作流\nversion: 1.0.0\ndescription: \nskills: []\nknowledge: []\nsteps:\n  - id: step1\n    description: 第一步\n',
-                  )
-                }}
-              >
-                新建
-              </button>
-            )}
-            {tab === 'skills' && (
-              <button
-                type="button"
-                className="btn-sm"
-                onClick={() => {
-                  setSelectedSkill('__new__')
-                  setSkillMd(
-                    '---\nname: my-skill\nid: my.skill\ntitle: 我的技能\nversion: 1.0.0\ndescription: \ndisable-model-invocation: true\n---\n# 我的技能\n\n说明...\n',
-                  )
-                }}
-              >
-                新建
-              </button>
-            )}
+        {!isEditing ? (
+          <>
+            <div className="wf-panel-toolbar">
+              <h3>
+                {TAB_LABEL[tab]}列表
+                <span className="muted" style={{ fontWeight: 400, marginLeft: 8, fontSize: 13 }}>
+                  {searchActive ? `筛选 ${rowCount} 条` : `共 ${rowCount} 条`}
+                </span>
+              </h3>
+              <div className="wf-panel-toolbar-actions">
+                {/* 固定占位，避免仅知识库页签出现过滤框时工具栏宽度变化 */}
+                <input
+                  className="wf-ns-filter"
+                  placeholder="namespace 过滤（如 cases）"
+                  value={nsFilter}
+                  onChange={(e) => setNsFilter(e.target.value)}
+                  disabled={tab !== 'knowledge' || searchActive}
+                  style={{ visibility: tab === 'knowledge' ? 'visible' : 'hidden' }}
+                  title={
+                    tab !== 'knowledge'
+                      ? undefined
+                      : searchActive
+                        ? '搜索筛选中时禁用 namespace 过滤'
+                        : undefined
+                  }
+                  tabIndex={tab === 'knowledge' ? 0 : -1}
+                  aria-hidden={tab !== 'knowledge'}
+                />
+                {tab === 'workflows' && (
+                  <button
+                    type="button"
+                    className="btn-sm"
+                    onClick={() => {
+                      setSelectedWf('__new__')
+                      setWfYaml(
+                        'id: my-workflow\nname: 新工作流\nversion: 1.0.0\ndescription: \nskills: []\nknowledge: []\nsteps:\n  - id: step1\n    description: 第一步\n',
+                      )
+                    }}
+                  >
+                    新建
+                  </button>
+                )}
+                {tab === 'skills' && (
+                  <button
+                    type="button"
+                    className="btn-sm"
+                    onClick={() => {
+                      setSelectedSkill('__new__')
+                      setSkillMd(
+                        '---\nname: my-skill\nid: my.skill\ntitle: 我的技能\nversion: 1.0.0\ndescription: \ndisable-model-invocation: true\n---\n# 我的技能\n\n说明...\n',
+                      )
+                    }}
+                  >
+                    新建
+                  </button>
+                )}
+                {tab === 'knowledge' && (
+                  <button
+                    type="button"
+                    className="btn-sm"
+                    onClick={() => {
+                      setSelectedDoc('__new__')
+                      setDocPath('notes/example.md')
+                      setDocContent('---\ntitle: 示例\nnamespace: notes\nversion: 1.0.0\n---\n# 示例\n\n内容...\n')
+                    }}
+                  >
+                    新建
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="table-wrapper">
+              <table className="table wf-table">
+                <colgroup>
+                  <col />
+                  <col style={{ width: '22%' }} />
+                  <col style={{ width: '18%' }} />
+                  <col className="col-actions" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>{tab === 'knowledge' ? '标题 / ID' : '名称 / ID'}</th>
+                    <th>{tab === 'workflows' ? '版本' : tab === 'skills' ? 'cursor_name' : '命名空间'}</th>
+                    <th>{tab === 'workflows' ? '技能引用' : tab === 'skills' ? '版本' : '路径'}</th>
+                    <th className="col-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tab === 'workflows' &&
+                    workflows.map((w) => (
+                      <tr key={w.id}>
+                        <td>
+                          <EntityName name={w.name} id={w.id} icon={<IconZap size={16} />} />
+                          {w.description ? (
+                            <div className="muted" style={{ fontSize: 12 }}>
+                              {w.description}
+                            </div>
+                          ) : null}
+                        </td>
+                        <td>{w.version || '—'}</td>
+                        <td>{(w.skills || []).join(', ') || '—'}</td>
+                        <td className="col-actions">
+                          <div className="table-actions">
+                            <button type="button" className="btn-ghost btn-sm" onClick={() => void openWorkflow(w.id)}>
+                              编辑
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-danger btn-sm"
+                              onClick={() => void deleteWorkflow(w.id).then(load).catch((e) => setErr(String(e)))}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  {tab === 'skills' &&
+                    skills.map((s) => (
+                      <tr key={s.id}>
+                        <td>
+                          <EntityName name={s.name || s.id} id={s.id} icon={<IconZap size={16} />} />
+                        </td>
+                        <td>{s.cursor_name || '—'}</td>
+                        <td>{s.version || '—'}</td>
+                        <td className="col-actions">
+                          <div className="table-actions">
+                            <button type="button" className="btn-ghost btn-sm" onClick={() => void openSkill(s.id)}>
+                              编辑
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-danger btn-sm"
+                              onClick={() => void deleteSkill(s.id).then(load).catch((e) => setErr(String(e)))}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  {tab === 'knowledge' &&
+                    docs.map((d) => (
+                      <tr key={d.id}>
+                        <td>
+                          <EntityName name={d.title} id={d.id} icon={<IconBook size={16} />} />
+                        </td>
+                        <td>{d.namespace || '—'}</td>
+                        <td className="muted">{d.path || '—'}</td>
+                        <td className="col-actions">
+                          <div className="table-actions">
+                            <button type="button" className="btn-ghost btn-sm" onClick={() => void openDoc(d.id)}>
+                              编辑
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-danger btn-sm"
+                              onClick={() => void deleteKnowledge(d.id).then(load).catch((e) => setErr(String(e)))}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  {rowCount === 0 && (
+                    <tr>
+                      <td colSpan={4} className="muted" style={{ textAlign: 'center', padding: '1.5rem' }}>
+                        {searchActive ? '当前页签无匹配结果，可点击上方计数切换到其他页签' : '暂无数据'}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : (
+          <form
+            onSubmit={(e) => {
+              if (tab === 'workflows') void saveWorkflow(e)
+              else if (tab === 'skills') void saveSkill(e)
+              else if (tab === 'knowledge') void saveDoc(e)
+            }}
+            style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                gap: '0.75rem',
+                paddingBottom: '0.75rem',
+                borderBottom: '1px solid #e2e8f0',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600 }}>
+                  {tab === 'workflows'
+                    ? (selectedWf === '__new__' ? '新建工作流' : `编辑工作流：${selectedWf}`)
+                    : tab === 'skills'
+                    ? (selectedSkill === '__new__' ? '新建技能包' : `编辑技能包：${selectedSkill}`)
+                    : (selectedDoc === '__new__' ? '新建知识库文档' : `编辑知识库文档：${docPath || selectedDoc}`)}
+                </h3>
+                <span className="badge badge-ok" style={{ fontSize: '0.75rem' }}>
+                  {tab === 'workflows' ? 'YAML 编排定义' : 'Markdown / Frontmatter'}
+                </span>
+              </div>
+              <div className="table-actions" style={{ display: 'flex', gap: '0.5rem' }}>
+                <button type="submit" className="btn-sm">
+                  保存
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost btn-sm"
+                  onClick={() => {
+                    setSelectedWf(null)
+                    setSelectedSkill(null)
+                    setSelectedDoc(null)
+                  }}
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+
             {tab === 'knowledge' && (
-              <button
-                type="button"
-                className="btn-sm"
-                onClick={() => {
-                  setSelectedDoc('__new__')
-                  setDocPath('notes/example.md')
-                  setDocContent('---\ntitle: 示例\nnamespace: notes\nversion: 1.0.0\n---\n# 示例\n\n内容...\n')
-                }}
-              >
-                新建
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                  文档相对路径:
+                </label>
+                <input
+                  value={docPath}
+                  onChange={(e) => setDocPath(e.target.value)}
+                  placeholder="例如 notes/cases.md 或 guide.md"
+                  style={{ flex: 1, height: 36 }}
+                  required
+                />
+              </div>
             )}
-          </div>
-        </div>
 
-        <div className="table-wrapper">
-          <table className="table wf-table">
-            <colgroup>
-              <col />
-              <col style={{ width: '22%' }} />
-              <col style={{ width: '18%' }} />
-              <col className="col-actions" />
-            </colgroup>
-            <thead>
-              <tr>
-                <th>{tab === 'knowledge' ? '标题 / ID' : '名称 / ID'}</th>
-                <th>{tab === 'workflows' ? '版本' : tab === 'skills' ? 'cursor_name' : '命名空间'}</th>
-                <th>{tab === 'workflows' ? '技能引用' : tab === 'skills' ? '版本' : '路径'}</th>
-                <th className="col-actions">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tab === 'workflows' &&
-                workflows.map((w) => (
-                  <tr key={w.id}>
-                    <td>
-                      <EntityName name={w.name} id={w.id} icon={<IconZap size={16} />} />
-                      {w.description ? (
-                        <div className="muted" style={{ fontSize: 12 }}>
-                          {w.description}
-                        </div>
-                      ) : null}
-                    </td>
-                    <td>{w.version || '—'}</td>
-                    <td>{(w.skills || []).join(', ') || '—'}</td>
-                    <td className="col-actions">
-                      <div className="table-actions">
-                        <button type="button" className="btn-ghost btn-sm" onClick={() => void openWorkflow(w.id)}>
-                          编辑
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-danger btn-sm"
-                          onClick={() => void deleteWorkflow(w.id).then(load).catch((e) => setErr(String(e)))}
-                        >
-                          删除
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              {tab === 'skills' &&
-                skills.map((s) => (
-                  <tr key={s.id}>
-                    <td>
-                      <EntityName name={s.name || s.id} id={s.id} icon={<IconZap size={16} />} />
-                    </td>
-                    <td>{s.cursor_name || '—'}</td>
-                    <td>{s.version || '—'}</td>
-                    <td className="col-actions">
-                      <div className="table-actions">
-                        <button type="button" className="btn-ghost btn-sm" onClick={() => void openSkill(s.id)}>
-                          编辑
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-danger btn-sm"
-                          onClick={() => void deleteSkill(s.id).then(load).catch((e) => setErr(String(e)))}
-                        >
-                          删除
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              {tab === 'knowledge' &&
-                docs.map((d) => (
-                  <tr key={d.id}>
-                    <td>
-                      <EntityName name={d.title} id={d.id} icon={<IconBook size={16} />} />
-                    </td>
-                    <td>{d.namespace || '—'}</td>
-                    <td className="muted">{d.path || '—'}</td>
-                    <td className="col-actions">
-                      <div className="table-actions">
-                        <button type="button" className="btn-ghost btn-sm" onClick={() => void openDoc(d.id)}>
-                          编辑
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-danger btn-sm"
-                          onClick={() => void deleteKnowledge(d.id).then(load).catch((e) => setErr(String(e)))}
-                        >
-                          删除
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              {rowCount === 0 && (
-                <tr>
-                  <td colSpan={4} className="muted" style={{ textAlign: 'center', padding: '1.5rem' }}>
-                    {searchActive ? '当前页签无匹配结果，可点击上方计数切换到其他页签' : '暂无数据'}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        {tab === 'workflows' && selectedWf && (
-          <form className="stack-form" onSubmit={saveWorkflow} style={{ marginTop: '1rem' }}>
-            <label>
-              YAML
-              <textarea rows={16} value={wfYaml} onChange={(e) => setWfYaml(e.target.value)} style={{ fontFamily: 'monospace' }} />
-            </label>
-            <div className="table-actions">
-              <button type="submit">保存</button>
-              <button type="button" className="btn-ghost" onClick={() => setSelectedWf(null)}>
-                取消
-              </button>
-            </div>
-          </form>
-        )}
-
-        {tab === 'skills' && selectedSkill && (
-          <form className="stack-form" onSubmit={saveSkill} style={{ marginTop: '1rem' }}>
-            <label>
-              SKILL.md
-              <textarea rows={16} value={skillMd} onChange={(e) => setSkillMd(e.target.value)} style={{ fontFamily: 'monospace' }} />
-            </label>
-            <div className="table-actions">
-              <button type="submit">保存</button>
-              <button type="button" className="btn-ghost" onClick={() => setSelectedSkill(null)}>
-                取消
-              </button>
-            </div>
-          </form>
-        )}
-
-        {tab === 'knowledge' && selectedDoc && (
-          <form className="stack-form" onSubmit={saveDoc} style={{ marginTop: '1rem' }}>
-            <label>
-              路径
-              <input value={docPath} onChange={(e) => setDocPath(e.target.value)} required />
-            </label>
-            <label>
-              Markdown
-              <textarea
-                rows={14}
-                value={docContent}
-                onChange={(e) => setDocContent(e.target.value)}
-                style={{ fontFamily: 'monospace' }}
-              />
-            </label>
-            <div className="table-actions">
-              <button type="submit">保存</button>
-              <button type="button" className="btn-ghost" onClick={() => setSelectedDoc(null)}>
-                取消
-              </button>
-            </div>
+            <CodeEditor
+              value={tab === 'workflows' ? wfYaml : tab === 'skills' ? skillMd : docContent}
+              onChange={(val) => {
+                if (tab === 'workflows') setWfYaml(val)
+                else if (tab === 'skills') setSkillMd(val)
+                else if (tab === 'knowledge') setDocContent(val)
+              }}
+              language={tab === 'workflows' ? 'yaml' : 'markdown'}
+              height="540px"
+            />
           </form>
         )}
       </div>

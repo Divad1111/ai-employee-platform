@@ -6,12 +6,8 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../api/client'
 import {
   grantEmployeeWorkflow,
-  issueMCPToken,
-  listMCPTokens,
   listWorkflows,
   revokeEmployeeWorkflow,
-  revokeMCPToken,
-  type MCPToken,
   type SkillPackage,
   type Workflow,
 } from '../api/workflowmcp'
@@ -108,8 +104,6 @@ export function EmployeeDetailPage() {
   const [modalError, setModalError] = useState('')
   const [allWorkflows, setAllWorkflows] = useState<Workflow[]>([])
   const [grantWfId, setGrantWfId] = useState('')
-  const [mcpTokens, setMcpTokens] = useState<MCPToken[]>([])
-  const [lastSecret, setLastSecret] = useState('')
 
   // 多用户 MCP 绑定状态
   const [mcpBindings, setMcpBindings] = useState<EmployeeMCPBinding[]>([])
@@ -235,12 +229,11 @@ export function EmployeeDetailPage() {
 
   async function load() {
     if (!id) return
-    const [data, wsData, wspData, wfAll, tokens, bindings, servers, creds] = await Promise.all([
+    const [data, wsData, wspData, wfAll, bindings, servers, creds] = await Promise.all([
       apiGet<Overview>(`/employees/${id}/overview`),
       apiGet<{ items: WsNode[] }>('/workstations').catch(() => ({ items: [] })),
       apiGet<{ items: Array<{ id: string; name?: string; path?: string }> }>('/workspaces').catch(() => ({ items: [] })),
       listWorkflows().catch(() => ({ items: [] as Workflow[] })),
-      listMCPTokens(id).catch(() => ({ items: [] as MCPToken[] })),
       listEmployeeMCPBindings(id).catch(() => ({ items: [] as EmployeeMCPBinding[] })),
       listMCPServers().catch(() => ({ items: [] as MCPServer[] })),
       listCredentials().catch(() => ({ items: [] as Credential[] })),
@@ -249,7 +242,6 @@ export function EmployeeDetailPage() {
     setWorkstations(wsData.items ?? [])
     setWorkspaces(wspData.items ?? [])
     setAllWorkflows(wfAll.items ?? [])
-    setMcpTokens(tokens.items ?? [])
     setMcpBindings(bindings.items ?? [])
     setMcpServers(servers.items ?? [])
     setCredentials(creds.items ?? [])
@@ -849,107 +841,61 @@ export function EmployeeDetailPage() {
         </div>
       </div>
 
-      <div className="detail-grid" style={{ marginTop: '1rem' }}>
-        <div className="panel" style={{ margin: 0 }}>
-          <h2>已授权工作流</h2>
-          <form
-            className="inline-form"
-            style={{ marginTop: '0.75rem' }}
-            onSubmit={(ev) => {
-              ev.preventDefault()
-              if (!id || !grantWfId) return
-              void grantEmployeeWorkflow(id, grantWfId)
-                .then(() => load())
-                .then(() => setMsg('已授权工作流'))
-                .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-            }}
-          >
-            <SearchableSelect
-              value={grantWfId}
-              onChange={setGrantWfId}
-              options={workflowOptions}
-              placeholder="选择工作流…"
-              style={{ minWidth: 220 }}
-            />
-            <button type="submit">授权</button>
-          </form>
-          {workflows && workflows.length > 0 ? (
-            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
-              {workflows.map((w) => (
-                <span key={w.id} className="badge badge-ok" style={{ display: 'inline-flex', gap: '0.35rem', alignItems: 'center' }}>
-                  {w.name}
-                  <button
-                    type="button"
-                    className="btn-ghost btn-sm"
-                    style={{ padding: '0 0.25rem' }}
-                    onClick={() => {
-                      if (!id) return
-                      void revokeEmployeeWorkflow(id, w.id).then(() => load()).catch((err) => setError(String(err)))
-                    }}
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-            </div>
-          ) : (
-            <p className="empty-tip">尚未授权任何工作流</p>
-          )}
-          <h3 style={{ marginTop: '1rem' }}>因此可访问的技能包</h3>
-          {effective_skills && effective_skills.length > 0 ? (
-            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.5rem' }}>
-              {effective_skills.map((sk) => (
-                <span key={sk.id} className="badge">{sk.name || sk.id} @{sk.cursor_name}</span>
-              ))}
-            </div>
-          ) : (
-            <p className="empty-tip">无（随工作流引用自动开放）</p>
-          )}
-        </div>
-
-        <div className="panel" style={{ margin: 0 }}>
-          <h2>MCP Token</h2>
-          <button
-            type="button"
-            className="btn-sm"
-            style={{ marginTop: '0.5rem' }}
-            onClick={() => {
-              if (!id) return
-              void issueMCPToken(id, 'admin-issued')
-                .then((res) => {
-                  setLastSecret(res.secret)
-                  setMsg('已签发 MCP Token（明文仅显示一次）')
-                  return listMCPTokens(id)
-                })
-                .then((t) => setMcpTokens(t.items ?? []))
-                .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-            }}
-          >
-            签发只读 Token
-          </button>
-          {lastSecret && (
-            <pre style={{ marginTop: '0.75rem', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-              {JSON.stringify({ url: '/mcp', headers: { Authorization: `Bearer ${lastSecret}` } }, null, 2)}
-            </pre>
-          )}
-          <ul style={{ marginTop: '0.75rem', paddingLeft: '1.1rem' }}>
-            {mcpTokens.map((t) => (
-              <li key={t.id} style={{ fontSize: '0.85rem', marginBottom: '0.35rem' }}>
-                {t.id} · {t.scope} · {t.label || '—'}
-                {!t.revoked_at && (
-                  <button
-                    type="button"
-                    className="btn-danger btn-sm"
-                    style={{ marginLeft: '0.5rem' }}
-                    onClick={() => void revokeMCPToken(t.id).then(() => load()).catch((err) => setError(String(err)))}
-                  >
-                    吊销
-                  </button>
-                )}
-              </li>
+      <div className="panel" style={{ marginTop: '1rem' }}>
+        <h2>已授权工作流</h2>
+        <form
+          className="inline-form"
+          style={{ marginTop: '0.75rem' }}
+          onSubmit={(ev) => {
+            ev.preventDefault()
+            if (!id || !grantWfId) return
+            void grantEmployeeWorkflow(id, grantWfId)
+              .then(() => load())
+              .then(() => setMsg('已授权工作流'))
+              .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+          }}
+        >
+          <SearchableSelect
+            value={grantWfId}
+            onChange={setGrantWfId}
+            options={workflowOptions}
+            placeholder="选择工作流…"
+            style={{ minWidth: 220 }}
+          />
+          <button type="submit">授权</button>
+        </form>
+        {workflows && workflows.length > 0 ? (
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
+            {workflows.map((w) => (
+              <span key={w.id} className="badge badge-ok" style={{ display: 'inline-flex', gap: '0.35rem', alignItems: 'center' }}>
+                {w.name}
+                <button
+                  type="button"
+                  className="btn-ghost btn-sm"
+                  style={{ padding: '0 0.25rem' }}
+                  onClick={() => {
+                    if (!id) return
+                    void revokeEmployeeWorkflow(id, w.id).then(() => load()).catch((err) => setError(String(err)))
+                  }}
+                >
+                  ×
+                </button>
+              </span>
             ))}
-          </ul>
-        </div>
+          </div>
+        ) : (
+          <p className="empty-tip">尚未授权任何工作流</p>
+        )}
+        <h3 style={{ marginTop: '1rem' }}>因此可访问的技能包</h3>
+        {effective_skills && effective_skills.length > 0 ? (
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+            {effective_skills.map((sk) => (
+              <span key={sk.id} className="badge">{sk.name || sk.id} @{sk.cursor_name}</span>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-tip">无（随工作流引用自动开放）</p>
+        )}
       </div>
 
       {feishu ? (
