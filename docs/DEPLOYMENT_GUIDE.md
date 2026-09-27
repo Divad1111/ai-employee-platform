@@ -1,23 +1,23 @@
 # AI Employee Platform 安装与部署手册
 
-本手册详细指导如何在宿主机/服务器上部署 **中心服务器（Control Plane Stack）** 以及在开发机（macOS / Linux）上安装配置 **计算工作站（Workstation Daemon）**，实现端到端基于 mTLS 双向认证的安全协同。
+本手册详细指导如何在宿主机/服务器上部署 **中心服务器（Control Plane Stack）** 以及在开发机（Windows / macOS / Linux）上安装配置 **计算工作站（Workstation Daemon）**，实现端到端基于 mTLS 双向认证的安全协同。
 
 ---
 
 ## 目录
 - [一、系统架构与组件拓扑](#一系统架构与组件拓扑)
-- [二、环境前置准备](#二环境前置准备)
+- [二、环境前置准备与目录规划](#二环境前置准备与目录规划)
 - [三、中心服务器安装与部署](#三中心服务器安装与部署)
-  - [3.1 Docker 一键容器化部署（生产推荐）](#31-docker-一键容器化部署生产推荐)
+  - [3.1 Docker 一键容器化部署（多架构 / 群晖 / 离线导入）](#31-容器化一键部署生产--群晖-dsm-推荐)
   - [3.2 首次部署向导（Setup Wizard）配置](#32-首次部署向导setup-wizard配置)
 - [四、计算工作站（Workstation）安装与接入](#四计算工作站workstation安装与接入)
-  - [4.1 构建工作站 CLI/Daemon 程序](#41-构建工作站-clidaemon-程序)
+  - [4.1 获取并安装工作站 CLI/Daemon 程序（预编译包 / 源码）](#41-获取并安装工作站-clidaemon-程序)
   - [4.2 获取工作站接入令牌（Enrollment Token）](#42-获取工作站接入令牌enrollment-token)
   - [4.3 执行工作站身份注册与 mTLS 证书签发](#43-执行工作站身份注册与-mtls-证书签发)
   - [4.4 启动工作站守护进程并验证状态](#44-启动工作站守护进程并验证状态)
   - [4.5 配置工作站开机自启（macOS / Linux / Windows）](#45-配置工作站开机自启macos--linux--windows)
 - [五、端到端业务闭环验证](#五端到端业务闭环验证)
-- [六、常见运维与故障排查 FAQ](#六常见运维与故障排查-faq)
+- [六、常见运维与故障排查 FAQ（含数据备份与容灾恢复）](#六常见运维与故障排查-faq)
 
 ---
 
@@ -95,11 +95,12 @@
 ##### A. 中心服务器（Control Plane Stack）
 | 部署方式 | 目录路径 | 属主与建议权限 | 用途说明 |
 | :--- | :--- | :--- | :--- |
-| **Docker Compose（推荐）** | `/opt/ai-employee-platform` (或任意工作目录) | `deploy:deploy` 或当前用户 `0755` | 存放项目源码、`docker-compose.yml` 及构建文件 |
-| **Postgres 数据持久卷** | Docker 命名卷 `aie_pg_data` (由 Docker 自动托管) | 内部 `postgres:postgres (0700)` | 数据库全量持久化数据目录 |
-| **任务制品归档（可选）** | `/var/lib/aie/artifacts` (映射环境变量 `AIE_ARTIFACT_DIR`) | `aie:aie (0750)` | 存放数字员工任务产物、代码补丁和日志产物 |
-| **机密凭证落盘（可选）** | `/var/lib/aie/secrets` (映射环境变量 `AIE_SECRET_DIR`) | `aie:aie (0700)` | 启用 FileVault 时存储落盘 AES-GCM 加密机密文件 |
-| **主机日志** | `/var/log/aie` | `aie:aie (0755)` | 物理机或容器日志归档（若使用 Docker 日志驱动则可由 Docker 统一管理） |
+| **Docker Compose（推荐）** | `/opt/ai-employee-platform` (或任意部署目录) | `0755` | 存放项目配置文件、`docker-compose.yml` 及 `.env` 变量 |
+| **Postgres 数据库数据** | `./data/postgres` (容器内 `/var/lib/postgresql/data`) | 映射宿主机目录 `0700` | PostgreSQL 主数据库全量数据，镜像更新与重启绝不丢失 |
+| **CA 根证书与私钥** | `./data/server/ca` (容器内 `/data/ca`) | 容器用户 `0700` | mTLS 根证书体系，持久化确保证书在服务升级后长期有效 |
+| **机密凭证落盘** | `./data/server/secrets` (容器内 `/data/secrets`) | 容器用户 `0700` | 经由 AES-256-GCM 加密的安全保险库持久化目录 |
+| **系统数据备份与应急快照** | `./data/server/backups` (容器内 `/data/backups`) | 容器用户 `0750` | 存放全量数据备份快照与容灾还原前自动生成的 Emergency 快照 |
+| **任务产物与归档** | `./data/server/artifacts` (容器内 `/data/artifacts`) | 容器用户 `0750` | 存放数字员工任务执行生成的代码产物与归档文件 |
 
 ##### B. 计算工作站（Workstation / aew）
 工作站端分为 **用户级目录模式（推荐，免 sudo，不污染系统）** 与 **系统级默认模式**：
@@ -119,16 +120,22 @@
 
 ### 3.1 容器化一键部署（生产 / 群晖 DSM 推荐）
 
-平台支持**直接通过发布的多架构容器镜像部署**（无需本地 Go / Node 构建环境，兼容 Linux x86_64 与 ARM64 / 群晖 NAS）。
+平台支持**直接通过发布的多架构容器镜像部署**，无需本地安装 Go / Node 构建环境，原生兼容 Linux x86_64、Linux ARM64、群晖 DSM NAS、macOS (Docker Desktop / OrbStack) 与 Windows (Docker Desktop / WSL2)。
 
-#### 方式 A：标准宿主机通过镜像部署（推荐）
+* **官方在线镜像地址 (GHCR)**：
+  - 管控面与数据库迁移：`ghcr.io/divad1111/ai-employee-platform/control-plane:latest`
+  - 前端管理后台 (Web)：`ghcr.io/divad1111/ai-employee-platform/admin:latest`
+
+---
+
+#### 方式 A：标准宿主机在线拉取镜像部署（通用推荐）
 1. **获取部署配置**：
    下载 `deploy/docker-compose.yml` 与 `deploy/.env.example`（或直接克隆仓库）：
    ```bash
    cd deploy
    cp .env.example .env
    ```
-2. **启动容器栈**：
+2. **拉取镜像并一键后台启动**：
    ```bash
    docker compose pull
    docker compose up -d
@@ -138,7 +145,34 @@
    - 映射 `./data/server` 持久化保存 CA 根证书与私钥，已接入工作站 mTLS 证书长期有效；
    - 自动启动 `migrate` 容器执行增量数据库表结构迁移。
 
-#### 方式 B：群晖 DSM (Container Manager) 一键部署
+---
+
+#### 方式 B：下载 GitHub Releases 离线镜像包（无外网服务器 / 群晖 DSM 导入推荐）
+若服务器处于受限内网环境，或希望在群晖 NAS 上跳过外网拉取过程，可直接在 GitHub Releases 资产列表中下载离线镜像压缩包：
+* **x86_64 (amd64) 架构**：
+  - `control-plane-dsm-<version>-amd64.tar.gz`
+  - `admin-dsm-<version>-amd64.tar.gz`
+* **ARM64 / aarch64 架构**（如 ARM 架构群晖 NAS、树莓派等）：
+  - `control-plane-dsm-<version>-arm64.tar.gz`
+  - `admin-dsm-<version>-arm64.tar.gz`
+
+**导入与启动方法**：
+1. **命令行导入**：
+   ```bash
+   # 解压并直接导入 Docker 本地镜像库
+   gzip -dc control-plane-dsm-*-amd64.tar.gz | docker load
+   gzip -dc admin-dsm-*-amd64.tar.gz | docker load
+   ```
+2. **群晖 DSM Container Manager 界面导入**：
+   - 打开 DSM 的 **Container Manager** -> 点击左侧 **「映像」**。
+   - 点击顶部 **「新增」** -> **「从文件添加」**。
+   - 分别选取下载的两个 `.tar.gz` 压缩包上传，群晖将自动解包并注册到本地镜像列表中。
+3. **秒级启动**：
+   进入 `deploy` 目录直接执行 `docker compose up -d`，系统将直接使用已导入的本地镜像秒级启动！
+
+---
+
+#### 方式 C：群晖 DSM (Container Manager) 在线项目部署
 1. 打开群晖 DSM，进入 **Container Manager**。
 2. 进入 **「项目 (Project)」** -> 点击 **「新增」**。
 3. 设定项目名称（如 `ai-employee`），路径选择 NAS 共享文件夹（例如 `/volume1/docker/ai-employee`）。
@@ -151,7 +185,9 @@
 6. 点击下一步完成启动。
 7. **零配置更新升级**：在群晖 Container Manager 项目中点击 **“操作” -> “拉取最新映像”** 并重启，系统会自动进行增量数据迁移，已有数据库配置与管理员完全保留！
 
-#### 方式 C：本地源码编译构建部署（开发调试）
+---
+
+#### 方式 D：本地源码编译构建部署（开发调试）
 ```bash
 cd deploy
 docker compose -f docker-compose.yml -f docker-compose.build.yml up --build -d
@@ -187,36 +223,64 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up --build -d
 
 计算工作站作为实际承载研发任务和本地 IDE / Agent 操作的计算节点，通过双向 mTLS 证书安全接入中心控制面。
 
-### 4.1 构建工作站 CLI/Daemon 程序
+### 4.1 获取并安装工作站 CLI/Daemon 程序
 
-根据工作站主机的操作系统，进入 `workstation` 目录执行构建：
+#### 方式 A：直接从 GitHub Releases 下载预编译文件（推荐，无需 Go 环境）
 
-**Windows 环境（PowerShell）**：
-```powershell
-cd workstation
-go build -o bin\aew.exe .\cmd\aew
-```
+工作站端程序（`aew`）已在项目的 GitHub Releases 中提供全平台的预编译独立单文件，无需安装配置 Go 编译环境，直接下载对应系统架构的文件即可开箱使用：
 
-**macOS / Linux 环境（Bash / Zsh）**：
-```bash
-cd workstation
-go build -o bin/aew ./cmd/aew
-```
+| 操作系统与处理器架构 | GitHub Releases 对应产物文件名 | 本地重命名目标 |
+| :--- | :--- | :--- |
+| **Windows (x64 / Intel / AMD)** | `aew-<version>-windows-amd64.exe` | `aew.exe` |
+| **Windows (ARM64 / 骁龙平台)** | `aew-<version>-windows-arm64.exe` | `aew.exe` |
+| **macOS (Apple Silicon M1/M2/M3/M4)** | `aew-<version>-darwin-arm64` | `aew` |
+| **macOS (Intel 处理器)** | `aew-<version>-darwin-amd64` | `aew` |
+| **Linux (x86_64 / amd64)** | `aew-<version>-linux-amd64` | `aew` |
+| **Linux (ARM64 / aarch64)** | `aew-<version>-linux-arm64` | `aew` |
 
-**跨平台交叉编译（在任意机器上为 Windows 构建 `aew.exe`）**：
-```bash
-cd workstation
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o bin/aew.exe ./cmd/aew
-```
+**快速初始化与全局命令链接**：
+1. **macOS / Linux 环境**：
+   ```bash
+   # 1. 赋予执行权限并重命名
+   chmod +x aew-*-darwin-arm64
+   mv aew-*-darwin-arm64 aew
+   
+   # 2. 建立系统全局软链接（自动识别 /usr/local/bin 或 ~/.local/bin）
+   ./aew link
+   ```
+2. **Windows 环境（PowerShell）**：
+   ```powershell
+   # 1. 重命名为 aew.exe
+   Rename-Item -Path "aew-*-windows-amd64.exe" -NewName "aew.exe"
+   
+   # 2. 建立系统 PATH 全局软链接
+   .\aew.exe link
+   ```
+执行 `link` 后，无论在哪个工作目录下均可直接输入 `aew` 运行！
 
-**配置全局命令软链接（全平台支持，推荐）**：
-编译完成后，执行以下命令即可自动在系统全局 PATH 目录建立软链接：
-```bash
-# macOS / Linux / Windows
-./bin/aew link
-```
-执行后程序会自动根据当前系统探测并建立全局软链接（macOS/Linux 为 `/opt/homebrew/bin/aew`、`/usr/local/bin/aew` 或 `~/.local/bin/aew`；Windows 为系统 PATH 脚本），之后在任何目录下均可直接输入 `aew` 运行！
-*(注：后续执行 `aew service install` 时也会自动建立此全局软链接)*
+---
+
+#### 方式 B：本地源码自主构建（开发人员）
+
+若希望直接从源码编译最新代码，进入 `workstation` 目录执行编译：
+
+* **Windows 环境（PowerShell）**：
+  ```powershell
+  cd workstation
+  go build -o bin\aew.exe .\cmd\aew
+  .\bin\aew.exe link
+  ```
+* **macOS / Linux 环境（Bash / Zsh）**：
+  ```bash
+  cd workstation
+  go build -o bin/aew ./cmd/aew
+  ./bin/aew link
+  ```
+* **跨平台交叉编译（在任意 Linux/Mac 机器上为 Windows 构建 `aew.exe`）**：
+  ```bash
+  cd workstation
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o bin/aew.exe ./cmd/aew
+  ```
 
 ---
 
@@ -531,15 +595,26 @@ sudo systemctl status aie-workstation
 - 管理员可在管理后台“工作站管理”中选中目标工作站，点击 **“吊销证书 (Revoke Certificate)”**（需输入管理员密码进行二次高危鉴权 Step-Up）。
 - 吊销后中心 CA 证书注销列表（CRL）将生效，中心控制面立即切断该节点的长连，并永久拒绝其重连。
 
-### Q3: 如何备份与还原中心数据？
-- 数据库位于 Docker volume `aie_pg_data` 中，可通过标准命令备份：
-  ```bash
-  docker exec -t aie-postgres pg_dumpall -c -U aie > aie_backup_$(date +%Y%m%d).sql
-  ```
-- 还原备份：
-  ```bash
-  cat aie_backup.sql | docker exec -i aie-postgres psql -U aie -d aie
-  ```
+### Q3: 如何备份与容灾还原中心服务器数据？
+- **方式一：通过 Admin Web 内置备份与容灾恢复系统（强烈推荐，图形化开箱即用）**：
+  登录管理后台，进入左侧导航 **「安全治理与系统」->「备份与容灾恢复」**（`http://<中心服务器IP>:8088/backups`）：
+  1. **全量资产范围**：全自动打包 PostgreSQL 关系数据库、mTLS CA 根证书私钥、AES 加密机密保险库、任务产物等中心全量资产（CENTER_FULL）。
+  2. **多目标分发与保留策略**：支持配置每日/每周定时策略（Cron），保留最新 N 份自动淘汰；支持本地目录（Local）、对象存储（S3/MinIO）、SFTP 以及企业 NAS (SMB/CIFS)。
+  3. **加密与压缩可选**：支持启用工业级 AES-256-GCM 认证加密，亦可根据需要配置未加密透明归档（采用 Zstandard 无损压缩）。
+  4. **完整性防篡改校验**：随时针对历史快照执行 SHA-256 流式校验与 Manifest 清单核验。
+  5. **安全容灾还原与前置应急保护**：
+     - 还原高危操作由 Step-Up 二次管理员密码鉴权强力防护；
+     - **全自动应急备份**：在覆盖当前数据前，系统会自动打一份当前现场状态的 **Emergency Backup 应急快照**并入库保护。若还原发生意外随时可在恢复历史中点击「查看应急快照」执行二次回滚！
+- **方式二：宿主机物理文件备份（底层兜底）**：
+  由于全量数据均已持久化映射到宿主机本地目录 `./data/`：
+  - **整机冷备份**：停止容器后直接打包宿主机 `./data` 目录：
+    ```bash
+    tar -czvf aie_cold_backup_$(date +%Y%m%d).tar.gz ./data
+    ```
+  - **数据库热转储**：
+    ```bash
+    docker compose -f deploy/docker-compose.yml exec -T postgres pg_dumpall -c -U aie > aie_db_$(date +%Y%m%d).sql
+    ```
 
 ### Q4: 重启容器后为什么不需要重新走 `/setup` 向导？
 - 当首次部署在 `/setup` 创建首个管理员后，账号信息已安全写入持久化数据库，且向导通道已永久锁定。重启容器后服务检测到管理员已存在，会自动输出 `系统认证: 已就绪 (已存在管理员)` 并直接提供正常登录通道。
