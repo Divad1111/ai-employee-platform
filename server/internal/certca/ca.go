@@ -24,9 +24,10 @@ import (
 
 // 错误定义。
 var (
-	ErrRevoked     = errors.New("证书已吊销")
-	ErrNotFound    = errors.New("证书不存在")
-	ErrInvalidCSR  = errors.New("无效的 CSR")
+	ErrRevoked         = errors.New("证书已吊销")
+	ErrNotFound        = errors.New("证书不存在")
+	ErrInvalidCSR      = errors.New("无效的 CSR")
+	ErrAlreadyEnrolled = errors.New("该工作节点已存在有效证书，请先吊销旧证书")
 )
 
 // CertificateStore 证书持久化存储接口。
@@ -214,6 +215,15 @@ func (a *Authority) SignServerCertificate(commonName string, hosts []string, val
 
 // SignCSR 使用 CA 签发客户端证书（ENROLL → ACTIVE）。
 func (a *Authority) SignCSR(workstationID string, csrPEM []byte, validDays int) (*Record, error) {
+	a.mu.Lock()
+	if existingFP, ok := a.byWS[workstationID]; ok {
+		if exRec, found := a.byFP[existingFP]; found && exRec.Status == "ACTIVE" && time.Now().Before(exRec.ExpiresAt) {
+			a.mu.Unlock()
+			return nil, ErrAlreadyEnrolled
+		}
+	}
+	a.mu.Unlock()
+
 	block, _ := pem.Decode(csrPEM)
 	if block == nil {
 		return nil, ErrInvalidCSR
@@ -255,6 +265,12 @@ func (a *Authority) SignCSR(workstationID string, csrPEM []byte, validDays int) 
 		ExpiresAt:     tmpl.NotAfter.UTC(),
 	}
 	a.mu.Lock()
+	if existingFP, ok := a.byWS[workstationID]; ok {
+		if exRec, found := a.byFP[existingFP]; found && exRec.Status == "ACTIVE" && time.Now().Before(exRec.ExpiresAt) {
+			a.mu.Unlock()
+			return nil, ErrAlreadyEnrolled
+		}
+	}
 	a.byFP[fp] = rec
 	a.byWS[workstationID] = fp
 	st := a.store

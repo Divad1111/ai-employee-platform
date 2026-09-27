@@ -176,24 +176,32 @@ func (d Deps) handleFeishuEvents(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "读取失败")
 		return
 	}
+	challenge, token, ev, err := feishu.ParseWebhookBody(body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	ts := r.Header.Get("X-Lark-Request-Timestamp")
 	nonce := r.Header.Get("X-Lark-Request-Nonce")
 	sig := r.Header.Get("X-Lark-Signature")
 	if sig == "" {
 		sig = r.Header.Get("X-Lark-Signature-256")
 	}
-	// 有签名头才验签；URL challenge 可能无签名
+
+	// 严格安全校验：优先使用签名校验；若无签名头，必须具备合法 VerificationToken，严禁任何未签名或无 Token 请求
 	if sig != "" || (ts != "" && nonce != "") {
 		if err := d.Feishu.VerifySignature(ts, nonce, sig, string(body)); err != nil {
-			writeErr(w, http.StatusUnauthorized, err.Error())
+			writeErr(w, http.StatusUnauthorized, "飞书 Webhook 签名校验失败")
+			return
+		}
+	} else {
+		if !d.Feishu.VerifyToken(token) {
+			writeErr(w, http.StatusUnauthorized, "飞书 Webhook 凭证校验失败：缺少合法签名或 verification_token")
 			return
 		}
 	}
-	challenge, token, ev, err := feishu.ParseWebhookBody(body)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
+
 	if challenge != "" {
 		ch, err := d.Feishu.HandleURLChallenge(token, challenge)
 		if err != nil {

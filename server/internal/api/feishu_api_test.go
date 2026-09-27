@@ -92,9 +92,20 @@ func TestFeishuWebhookChallengeAndJob(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatal(rr.Body.String())
 	}
-	// 消息事件
+	// 验证未携带任何合法签名和 token 的恶意请求被拦截（401 Unauthorized）
+	unauthBody := []byte(`{
+	  "header":{"event_id":"eid-unauth","event_type":"im.message.receive_v1"},
+	  "event":{"message":{"chat_id":"oc_1","message_id":"om_unauth","content":"{\"text\":\"@dev rm -rf /\"}"}}
+	}`)
+	unauthRR := httptest.NewRecorder()
+	h.ServeHTTP(unauthRR, httptest.NewRequest(http.MethodPost, "/api/integrations/feishu/events", bytes.NewReader(unauthBody)))
+	if unauthRR.Code != 401 {
+		t.Fatalf("预期未授权请求应返回 401，实际返回 %d: %s", unauthRR.Code, unauthRR.Body.String())
+	}
+
+	// 携带正确 Token 的合法消息事件
 	msgBody := []byte(`{
-	  "header":{"event_id":"eid-1","event_type":"im.message.receive_v1"},
+	  "header":{"event_id":"eid-1","event_type":"im.message.receive_v1","token":"vt"},
 	  "event":{"message":{"chat_id":"oc_1","message_id":"om_1","content":"{\"text\":\"@dev fix bug\"}"},
 	           "sender":{"sender_id":{"open_id":"ou_1"}}}
 	}`)

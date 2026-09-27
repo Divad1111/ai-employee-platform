@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"time"
 
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
@@ -35,11 +36,15 @@ func Dial(ctx context.Context, endpoint string, b *identity.Bundle) (*Client, er
 	if !pool.AppendCertsFromPEM(b.CAPEM) {
 		return nil, fmt.Errorf("解析 CA 失败")
 	}
+	host := endpoint
+	if h, _, err := net.SplitHostPort(endpoint); err == nil {
+		host = h
+	}
 	tlsCfg := &tls.Config{
 		MinVersion:   tls.VersionTLS13,
 		Certificates: []tls.Certificate{cert},
 		RootCAs:      pool,
-		ServerName:   "localhost",
+		ServerName:   host,
 	}
 	creds := credentials.NewTLS(tlsCfg)
 	conn, err := grpc.DialContext(ctx, endpoint, grpc.WithTransportCredentials(creds), grpc.WithBlock())

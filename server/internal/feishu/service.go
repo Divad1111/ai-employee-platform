@@ -1239,7 +1239,7 @@ func (s *Service) VerifySignature(timestamp, nonce, signature, body string) erro
 	token := s.cfg.VerificationToken
 	s.mu.RUnlock()
 	if token == "" {
-		return nil
+		return ErrBadSignature
 	}
 	sum := sha256.Sum256([]byte(timestamp + nonce + token + body))
 	expect := hex.EncodeToString(sum[:])
@@ -1247,6 +1247,16 @@ func (s *Service) VerifySignature(timestamp, nonce, signature, body string) erro
 		return ErrBadSignature
 	}
 	return nil
+}
+
+// VerifyToken 校验请求凭据是否与配置的 VerificationToken 匹配
+func (s *Service) VerifyToken(token string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg.VerificationToken == "" {
+		return false
+	}
+	return token != "" && token == s.cfg.VerificationToken
 }
 
 // MemorySender 测试用

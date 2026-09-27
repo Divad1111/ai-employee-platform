@@ -58,8 +58,8 @@ func (s *PostgresWebSessionStore) Get(ctx context.Context, token string) (*auth.
 	}
 	sess.Roles = roles
 	if len(sess.Roles) == 0 {
-		// 兼容历史脏数据：roles 列为空时回退，避免整站 403
-		sess.Roles = []string{"ADMIN"}
+		// 历史脏数据 roles 列为空时回退为最小权限 VIEWER，避免赋予意外的高权限 ADMIN
+		sess.Roles = []string{"VIEWER"}
 	}
 	return &sess, nil
 }

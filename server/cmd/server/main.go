@@ -98,6 +98,9 @@ func main() {
 			time.Sleep(time.Second)
 		}
 		if err != nil {
+			if strings.EqualFold(cfg.Env, "production") {
+				fatal("PostgreSQL 连接失败且处于生产环境，禁止回退到内存存储: %v", err)
+			}
 			fmt.Printf("⚠️ 连接 PostgreSQL 仍失败 (%v)，回退到内存存储\n", err)
 		} else {
 			fmt.Println("✅ 数据库: 已连接 PostgreSQL，启用全量持久化 (Users, Employees, Workspaces, Jobs, Sessions, Workstations, TOTP, Certificates, WorkflowMCP, Automation, Artifacts)")

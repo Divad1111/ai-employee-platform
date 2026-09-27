@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -325,7 +326,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/backups/restore-jobs", d.requirePerm("backup.view", d.handleListRestoreJobs))
 	mux.HandleFunc("GET /api/backups/restore-jobs/{id}", d.requirePerm("backup.view", d.handleGetRestoreJob))
 
-	return mux
+	return securityHeaders(mux)
 }
 
 func (d Deps) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
@@ -658,6 +659,16 @@ func (d Deps) handleGetEmployee(w http.ResponseWriter, r *http.Request, sess *au
 }
 
 func (d Deps) handleUpdateEmployee(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	existing, err := d.Employees.Get(r.Context(), r.PathValue("id"))
+	if err != nil || existing == nil {
+		writeErr(w, http.StatusNotFound, "数字员工不存在")
+		return
+	}
+	if !d.canManageEmployee(r, sess, existing, "employee.write") {
+		writeErr(w, http.StatusForbidden, "无权修改其他用户的数字员工")
+		return
+	}
+
 	var raw map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效请求体")
@@ -700,6 +711,16 @@ func (d Deps) handleUpdateEmployee(w http.ResponseWriter, r *http.Request, sess 
 }
 
 func (d Deps) handleDisableEmployee(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	existing, err := d.Employees.Get(r.Context(), r.PathValue("id"))
+	if err != nil || existing == nil {
+		writeErr(w, http.StatusNotFound, "数字员工不存在")
+		return
+	}
+	if !d.canManageEmployee(r, sess, existing, "employee.write") {
+		writeErr(w, http.StatusForbidden, "无权禁用其他用户的数字员工")
+		return
+	}
+
 	e, err := d.Employees.Disable(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
@@ -709,6 +730,16 @@ func (d Deps) handleDisableEmployee(w http.ResponseWriter, r *http.Request, sess
 }
 
 func (d Deps) handleDeleteEmployee(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	existing, err := d.Employees.Get(r.Context(), r.PathValue("id"))
+	if err != nil || existing == nil {
+		writeErr(w, http.StatusNotFound, "数字员工不存在")
+		return
+	}
+	if !d.canManageEmployee(r, sess, existing, "employee.delete") {
+		writeErr(w, http.StatusForbidden, "无权删除其他用户的数字员工")
+		return
+	}
+
 	if err := d.Employees.Delete(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r)); err != nil {
 		if errors.Is(err, employee.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "数字员工不存在")
@@ -720,9 +751,20 @@ func (d Deps) handleDeleteEmployee(w http.ResponseWriter, r *http.Request, sess 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-func (d Deps) handleListWorkspaces(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListWorkspaces(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	list, _ := d.Workspaces.List(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{"items": list})
+	scope := d.resolveScope(r.Context(), sess, "workspace.read")
+	if scope == authz.ScopeALL {
+		writeJSON(w, http.StatusOK, map[string]any{"items": list})
+		return
+	}
+	out := make([]*workspace.Workspace, 0)
+	for _, ws := range list {
+		if d.canAccessWorkspace(r, sess, ws, "workspace.read") {
+			out = append(out, ws)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
 func (d Deps) handleCreateWorkspace(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
@@ -739,16 +781,29 @@ func (d Deps) handleCreateWorkspace(w http.ResponseWriter, r *http.Request, sess
 	writeJSON(w, http.StatusCreated, ws)
 }
 
-func (d Deps) handleGetWorkspace(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleGetWorkspace(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	ws, err := d.Workspaces.Get(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+	if err != nil || ws == nil {
+		writeErr(w, http.StatusNotFound, "工作区不存在")
+		return
+	}
+	if !d.canAccessWorkspace(r, sess, ws, "workspace.read") {
+		writeErr(w, http.StatusNotFound, "工作区不存在或无权限")
 		return
 	}
 	writeJSON(w, http.StatusOK, ws)
 }
 
 func (d Deps) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	ws, err := d.Workspaces.Get(r.Context(), r.PathValue("id"))
+	if err != nil || ws == nil {
+		writeErr(w, http.StatusNotFound, "工作区不存在")
+		return
+	}
+	if !d.canAccessWorkspace(r, sess, ws, "workspace.write") {
+		writeErr(w, http.StatusForbidden, "无权修改该工作区")
+		return
+	}
 	var body struct {
 		WorkstationID string `json:"workstation_id"`
 		Path          string `json:"path"`
@@ -756,15 +811,24 @@ func (d Deps) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request, sess
 		Branch        string `json:"branch"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	ws, err := d.Workspaces.Update(r.Context(), r.PathValue("id"), body.WorkstationID, body.Path, body.Repository, body.Branch, sess.UserID, clientIP(r))
+	res, err := d.Workspaces.Update(r.Context(), r.PathValue("id"), body.WorkstationID, body.Path, body.Repository, body.Branch, sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, ws)
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (d Deps) handleBindWorkspace(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	ws, err := d.Workspaces.Get(r.Context(), r.PathValue("id"))
+	if err != nil || ws == nil {
+		writeErr(w, http.StatusNotFound, "工作区不存在")
+		return
+	}
+	if !d.canAccessWorkspace(r, sess, ws, "workspace.write") {
+		writeErr(w, http.StatusForbidden, "无权修改该工作区")
+		return
+	}
 	var body struct {
 		EmployeeID string `json:"employee_id"`
 	}
@@ -772,15 +836,24 @@ func (d Deps) handleBindWorkspace(w http.ResponseWriter, r *http.Request, sess *
 		writeErr(w, http.StatusBadRequest, "需要 employee_id")
 		return
 	}
-	ws, err := d.Workspaces.BindEmployee(r.Context(), r.PathValue("id"), body.EmployeeID, sess.UserID, clientIP(r))
+	res, err := d.Workspaces.BindEmployee(r.Context(), r.PathValue("id"), body.EmployeeID, sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, ws)
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (d Deps) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	ws, err := d.Workspaces.Get(r.Context(), r.PathValue("id"))
+	if err != nil || ws == nil {
+		writeErr(w, http.StatusNotFound, "工作区不存在")
+		return
+	}
+	if !d.canAccessWorkspace(r, sess, ws, "workspace.write") {
+		writeErr(w, http.StatusForbidden, "无权删除该工作区")
+		return
+	}
 	if err := d.Workspaces.Delete(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r)); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
@@ -925,16 +998,29 @@ func (d Deps) handleCreateJob(w http.ResponseWriter, r *http.Request, sess *auth
 	writeJSON(w, code, map[string]any{"job": j, "idempotent": dup})
 }
 
-func (d Deps) handleGetJob(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleGetJob(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	j, err := d.Jobs.Get(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+	if err != nil || j == nil {
+		writeErr(w, http.StatusNotFound, "任务不存在")
+		return
+	}
+	if !d.canAccessJob(r, sess, j, "job.read") {
+		writeErr(w, http.StatusNotFound, "任务不存在或无权限")
 		return
 	}
 	writeJSON(w, http.StatusOK, j)
 }
 
-func (d Deps) handleJobTimeline(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleJobTimeline(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	j, err := d.Jobs.Get(r.Context(), r.PathValue("id"))
+	if err != nil || j == nil {
+		writeErr(w, http.StatusNotFound, "任务不存在")
+		return
+	}
+	if !d.canAccessJob(r, sess, j, "job.read") {
+		writeErr(w, http.StatusNotFound, "任务不存在或无权限")
+		return
+	}
 	evs, err := d.Jobs.Timeline(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
@@ -944,6 +1030,15 @@ func (d Deps) handleJobTimeline(w http.ResponseWriter, r *http.Request, _ *auth.
 }
 
 func (d Deps) handleJobTransition(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	existing, err := d.Jobs.Get(r.Context(), r.PathValue("id"))
+	if err != nil || existing == nil {
+		writeErr(w, http.StatusNotFound, "任务不存在")
+		return
+	}
+	if !d.canAccessJob(r, sess, existing, "job.write") {
+		writeErr(w, http.StatusForbidden, "无权推进该任务状态")
+		return
+	}
 	var body struct {
 		Status  string            `json:"status"`
 		Payload map[string]string `json:"payload"`
@@ -970,6 +1065,15 @@ func (d Deps) handleJobTransition(w http.ResponseWriter, r *http.Request, sess *
 }
 
 func (d Deps) handleCancelJob(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	existing, err := d.Jobs.Get(r.Context(), r.PathValue("id"))
+	if err != nil || existing == nil {
+		writeErr(w, http.StatusNotFound, "任务不存在")
+		return
+	}
+	if !d.canAccessJob(r, sess, existing, "job.cancel") {
+		writeErr(w, http.StatusForbidden, "无权取消该任务")
+		return
+	}
 	j, err := d.Jobs.Cancel(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
@@ -1139,15 +1243,34 @@ func (d Deps) auditUser(r *http.Request, sess *auth.Session, action string, meta
 	d.Audit.Log(r.Context(), "USER", sess.UserID, action, "success", clientIP(r), meta)
 }
 
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func clientIP(r *http.Request) string {
+	if ip := strings.TrimSpace(r.Header.Get("X-Real-IP")); ip != "" {
+		return ip
+	}
 	if x := r.Header.Get("X-Forwarded-For"); x != "" {
-		return strings.TrimSpace(strings.Split(x, ",")[0])
+		parts := strings.Split(x, ",")
+		if len(parts) > 0 {
+			ip := strings.TrimSpace(parts[0])
+			if ip != "" {
+				return ip
+			}
+		}
 	}
-	host := r.RemoteAddr
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		return host[:i]
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil && host != "" {
+		return host
 	}
-	return host
+	return r.RemoteAddr
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

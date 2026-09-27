@@ -308,24 +308,33 @@ func (d Deps) handleStepUp(w http.ResponseWriter, r *http.Request, sess *auth.Se
 		Password string `json:"password"`
 		TOTP     string `json:"totp"`
 	}
-	if err := decodeJSON(r, &body); err != nil || body.Password == "" {
+	if err := decodeJSON(r, &body); err != nil || strings.TrimSpace(body.Password) == "" {
 		writeErr(w, http.StatusBadRequest, "需要 password")
 		return
 	}
-	if d.Approvals != nil && d.Approvals.TOTPEnabled(r.Context(), sess.UserID) && body.TOTP == "" {
-		writeErr(w, http.StatusForbidden, approval.ErrTOTPRequired.Error())
-		return
+	// 1. 先校验密码（不提前延长二次认证窗口）
+	if d.Auth != nil {
+		if err := d.Auth.VerifyPassword(r.Context(), sess.Username, body.Password); err != nil {
+			writeErr(w, http.StatusUnauthorized, "密码错误")
+			return
+		}
 	}
-	out, err := d.Auth.StepUp(r.Context(), sess.Token, body.Password, clientIP(r), 10*time.Minute)
-	if err != nil {
-		writeErr(w, http.StatusUnauthorized, err.Error())
-		return
-	}
+	// 2. 若启用了 TOTP，必须通过 2FA 动态口令校验
 	if d.Approvals != nil && d.Approvals.TOTPEnabled(r.Context(), sess.UserID) {
+		if strings.TrimSpace(body.TOTP) == "" {
+			writeErr(w, http.StatusForbidden, approval.ErrTOTPRequired.Error())
+			return
+		}
 		if err := d.Approvals.VerifyUserTOTP(r.Context(), sess.UserID, body.TOTP, clientIP(r)); err != nil {
 			writeErr(w, http.StatusForbidden, err.Error())
 			return
 		}
+	}
+	// 3. 密码及 TOTP 全部校验通过后，才延长 Step-Up 状态
+	out, err := d.Auth.StepUp(r.Context(), sess.Token, body.Password, clientIP(r), 10*time.Minute)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, err.Error())
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"step_up_until": out.StepUpUntil, "ok": true,

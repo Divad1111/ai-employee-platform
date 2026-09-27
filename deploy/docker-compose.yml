@@ -12,7 +12,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aie}
       POSTGRES_DB: ${POSTGRES_DB:-aie}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # 安全强化：默认仅绑定本地 127.0.0.1 回环地址，严禁将数据库端口直接暴露在公网 0.0.0.0
+      - "${POSTGRES_PORT:-127.0.0.1:5432}:5432"
     volumes:
       # 持久化数据库存储映射到本地目录，镜像更新/重新拉取不丢失配置与业务数据
       - ${AIE_PG_DATA_DIR:-./data/postgres}:/var/lib/postgresql/data
@@ -54,6 +55,7 @@ services:
       AIE_HTTP_ADDR: ":8080"
       AIE_GRPC_ADDR: ":9090"
       AIE_DATABASE_URL: postgres://${POSTGRES_USER:-aie}:${POSTGRES_PASSWORD:-aie}@postgres:5432/${POSTGRES_DB:-aie}?sslmode=disable
+      AIE_SECRET_MASTER_KEY: "${AIE_SECRET_MASTER_KEY:-}"
       AIE_SEED_DEMO: "${AIE_SEED_DEMO:-0}"
       AIE_CA_DIR: "/data/ca"
       AIE_SECRET_DIR: "/data/secrets"

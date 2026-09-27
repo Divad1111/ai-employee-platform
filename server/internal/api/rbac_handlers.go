@@ -12,7 +12,9 @@ import (
 	"github.com/ai-employee-platform/server/internal/auth"
 	"github.com/ai-employee-platform/server/internal/authz"
 	"github.com/ai-employee-platform/server/internal/employee"
+	"github.com/ai-employee-platform/server/internal/job"
 	"github.com/ai-employee-platform/server/internal/quota"
+	"github.com/ai-employee-platform/server/internal/workspace"
 	"github.com/ai-employee-platform/server/internal/wsmember"
 )
 
@@ -32,6 +34,22 @@ func scopeLabelCN(scope string) string {
 		}
 		return scope
 	}
+}
+
+func isSuperAdmin(sess *auth.Session) bool {
+	if sess == nil {
+		return false
+	}
+	return containsRole(sess.Roles, "SUPER_ADMIN")
+}
+
+func containsRole(roles []string, target string) bool {
+	for _, r := range roles {
+		if strings.EqualFold(strings.TrimSpace(r), target) {
+			return true
+		}
+	}
+	return false
 }
 
 func toAuthzGrants(gs []auth.PermissionGrant) []authz.Grant {
@@ -87,6 +105,59 @@ func (d Deps) canSeeEmployee(r *http.Request, sess *auth.Session, e *employee.Em
 		return true
 	}
 	return e != nil && e.OwnerUserID == sess.UserID
+}
+
+func (d Deps) canManageEmployee(r *http.Request, sess *auth.Session, e *employee.Employee, permCode string) bool {
+	if e == nil {
+		return false
+	}
+	scope := d.resolveScope(r.Context(), sess, permCode)
+	if scope == authz.ScopeALL {
+		return true
+	}
+	return e.OwnerUserID == sess.UserID
+}
+
+func (d Deps) canAccessWorkspace(r *http.Request, sess *auth.Session, ws *workspace.Workspace, permCode string) bool {
+	if ws == nil {
+		return false
+	}
+	scope := d.resolveScope(r.Context(), sess, permCode)
+	if scope == authz.ScopeALL {
+		return true
+	}
+	if d.WSMembers != nil && ws.WorkstationID != "" {
+		if ok, _ := d.WSMembers.HasAccess(r.Context(), ws.WorkstationID, sess.UserID); ok {
+			return true
+		}
+	}
+	if d.Employees != nil && ws.EmployeeID != "" {
+		if emp, err := d.Employees.Get(r.Context(), ws.EmployeeID); err == nil && emp != nil {
+			if emp.OwnerUserID == sess.UserID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (d Deps) canAccessJob(r *http.Request, sess *auth.Session, j *job.Job, permCode string) bool {
+	if j == nil {
+		return false
+	}
+	scope := d.resolveScope(r.Context(), sess, permCode)
+	if scope == authz.ScopeALL {
+		return true
+	}
+	if j.CreatedBy == sess.UserID {
+		return true
+	}
+	if d.Employees != nil && j.EmployeeID != "" {
+		if emp, err := d.Employees.Get(r.Context(), j.EmployeeID); err == nil && emp != nil {
+			return d.canSeeEmployee(r, sess, emp)
+		}
+	}
+	return false
 }
 
 func (d Deps) filterWorkstationIDs(r *http.Request, sess *auth.Session, ids []string) []string {
@@ -229,6 +300,11 @@ func (d Deps) handleCreateUser(w http.ResponseWriter, r *http.Request, sess *aut
 	if len(roles) == 0 {
 		roles = []string{"VIEWER"}
 	}
+	// 防垂直提权：非超级管理员严禁创建超级管理员账号
+	if containsRole(roles, "SUPER_ADMIN") && !isSuperAdmin(sess) {
+		writeErr(w, http.StatusForbidden, "只有超级管理员可以创建超级管理员账号")
+		return
+	}
 	u := &auth.User{
 		Username: req.Username, PasswordHash: hash, DisplayName: req.DisplayName,
 		Email: req.Email, Status: auth.StatusActive, Roles: roles,
@@ -278,6 +354,12 @@ func (d Deps) handlePatchUser(w http.ResponseWriter, r *http.Request, sess *auth
 		writeErr(w, http.StatusNotFound, "用户不存在")
 		return
 	}
+	// 防垂直提权与账号夺取：
+	// 1. 若目标账号是超级管理员，操作者必须也是超级管理员
+	if containsRole(u.Roles, "SUPER_ADMIN") && !isSuperAdmin(sess) {
+		writeErr(w, http.StatusForbidden, "只有超级管理员可以修改超级管理员账号")
+		return
+	}
 	oldName, oldEmail := u.DisplayName, u.Email
 	oldRoles := append([]string(nil), u.Roles...)
 	var req struct {
@@ -288,6 +370,11 @@ func (d Deps) handlePatchUser(w http.ResponseWriter, r *http.Request, sess *auth
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效请求体")
+		return
+	}
+	// 2. 若要赋予超级管理员角色，操作者自身必须也是超级管理员
+	if req.Roles != nil && containsRole(req.Roles, "SUPER_ADMIN") && !isSuperAdmin(sess) {
+		writeErr(w, http.StatusForbidden, "只有超级管理员可以授予超级管理员角色")
 		return
 	}
 	if req.DisplayName != nil {
@@ -353,6 +440,11 @@ func (d Deps) handleDeleteUser(w http.ResponseWriter, r *http.Request, sess *aut
 		writeErr(w, http.StatusNotFound, "用户不存在")
 		return
 	}
+	// 防垂直越权：只有超级管理员可以删除超级管理员账号
+	if containsRole(u.Roles, "SUPER_ADMIN") && !isSuperAdmin(sess) {
+		writeErr(w, http.StatusForbidden, "只有超级管理员可以删除超级管理员账号")
+		return
+	}
 	if err := d.Auth.Users().SoftDelete(r.Context(), id); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -376,6 +468,11 @@ func (d Deps) setUserStatus(w http.ResponseWriter, r *http.Request, sess *auth.S
 	oldStatus := u.Status
 	if u.ID == sess.UserID && status == auth.StatusDisabled {
 		writeErr(w, http.StatusBadRequest, "不能禁用当前登录用户")
+		return
+	}
+	// 防垂直越权：只有超级管理员可以修改超级管理员账号状态
+	if containsRole(u.Roles, "SUPER_ADMIN") && !isSuperAdmin(sess) {
+		writeErr(w, http.StatusForbidden, "只有超级管理员可以修改超级管理员账号状态")
 		return
 	}
 	u.Status = status

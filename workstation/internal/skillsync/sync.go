@@ -31,6 +31,18 @@ type Result struct {
 	Removed   []string `json:"removed"`
 }
 
+// isSafePkgName 校验包名是否为合法的单层目录名，防止目录遍历攻击（如 ../../etc）
+func isSafePkgName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsAny(name, `/\:`) {
+		return false
+	}
+	cleaned := filepath.Clean(name)
+	return cleaned == name && !filepath.IsAbs(cleaned) && !strings.HasPrefix(cleaned, "..")
+}
+
 // Sync 批量落盘技能包；按 content_hash 跳过未变包；prune 托管文件但保留 workspace/ 与 config.json。
 func Sync(packages []*aiev1.SkillPackage, targetDir string, pruneNames []string) (*Result, error) {
 	if targetDir == "" {
@@ -42,7 +54,7 @@ func Sync(packages []*aiev1.SkillPackage, targetDir string, pruneNames []string)
 	res := &Result{}
 	keep := map[string]bool{}
 	for _, pkg := range packages {
-		if pkg == nil || pkg.CursorName == "" {
+		if pkg == nil || !isSafePkgName(pkg.CursorName) {
 			continue
 		}
 		keep[pkg.CursorName] = true
@@ -68,10 +80,13 @@ func Sync(packages []*aiev1.SkillPackage, targetDir string, pruneNames []string)
 				continue
 			}
 			rel := filepath.Clean(f.Path)
-			if strings.HasPrefix(rel, "..") {
+			if filepath.IsAbs(rel) || strings.HasPrefix(rel, "..") || rel == "." {
 				continue
 			}
 			full := filepath.Join(dir, rel)
+			if !strings.HasPrefix(filepath.Clean(full), filepath.Clean(dir)+string(filepath.Separator)) {
+				continue
+			}
 			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 				return res, err
 			}
@@ -98,7 +113,7 @@ func Sync(packages []*aiev1.SkillPackage, targetDir string, pruneNames []string)
 		}
 	}
 	for _, name := range pruneNames {
-		if keep[name] {
+		if !isSafePkgName(name) || keep[name] {
 			continue
 		}
 		dir := filepath.Join(targetDir, name)
