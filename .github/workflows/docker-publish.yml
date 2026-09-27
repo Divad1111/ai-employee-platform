@@ -1,6 +1,15 @@
-# 中心服务器容器镜像构建与发布工作流
-# 支持 DSM-Docker（群晖 NAS Container Manager）多架构：linux/amd64 与 linux/arm64
-# 发布至 GitHub Container Registry (ghcr.io)
+# 中心服务器容器镜像与工作站多平台发布工作流
+# 
+# 平台兼容性说明：
+# 1. 中心服务器镜像 (Control Plane + Admin Web)：
+#    - 采用 OCI 多架构标准：linux/amd64 与 linux/arm64
+#    - linux/amd64: 原生适配 Linux x86_64、Windows 10/11/Server (Docker Desktop / WSL2)、Intel 架构 macOS (Docker Desktop)
+#    - linux/arm64: 原生适配 Linux aarch64、群晖 NAS (DSM Container Manager)、Apple Silicon macOS (M1/M2/M3/M4 via Docker Desktop / OrbStack)
+#    注：Docker/OCI 规范本身不包含 darwin (macOS) 原生容器架构；Mac 与 Windows 用户均通过 Docker Desktop 运行对应架构的 Linux 容器。
+# 2. 计算工作站客户端 (Workstation aew)：
+#    - 为 macOS、Windows、Linux 分别原生交叉编译二进制可执行程序并在 Release 自动发布。
+#
+# 发布目标：GitHub Container Registry (ghcr.io) 与 GitHub Releases
 
 name: docker-publish
 
@@ -20,12 +29,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
   build-and-push-images:
-    name: Build & Push Multi-Arch Docker Images
+    name: Build & Push Multi-Arch Docker Images (Linux, macOS, Windows via Docker)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -47,6 +56,7 @@ jobs:
 
       # ----------------------------------------------------
       # 1. Control Plane 镜像（中心服务器管控面 + 内置 migrate）
+      #    支持 linux/amd64 (Linux/Windows/Intel Mac) 与 linux/arm64 (ARM64/DSM/Apple Silicon Mac)
       # ----------------------------------------------------
       - name: Extract metadata for Control Plane
         id: meta-server
@@ -63,7 +73,7 @@ jobs:
             type=sha,prefix=sha-,format=short
 
       - name: Build and push Control Plane image (linux/amd64, linux/arm64)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/Dockerfile.server
@@ -76,6 +86,7 @@ jobs:
 
       # ----------------------------------------------------
       # 2. Admin Web 镜像（管理后台前端）
+      #    支持 linux/amd64 与 linux/arm64
       # ----------------------------------------------------
       - name: Extract metadata for Admin Web
         id: meta-admin
@@ -92,7 +103,7 @@ jobs:
             type=sha,prefix=sha-,format=short
 
       - name: Build and push Admin Web image (linux/amd64, linux/arm64)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/Dockerfile.admin
@@ -102,3 +113,43 @@ jobs:
           labels: ${{ steps.meta-admin.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ----------------------------------------------------
+  # 3. 发布原生 Workstation 客户端包 (Windows .exe, macOS, Linux)
+  #    当推送发布标签 (v*.*.*) 时自动附着至 GitHub Release
+  # ----------------------------------------------------
+  release-workstation-binaries:
+    name: Release Workstation Native Binaries (Windows & macOS & Linux)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: false
+
+      - name: Build cross-platform binaries
+        working-directory: workstation
+        run: |
+          mkdir -p dist
+          # Windows
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/aew-windows-amd64.exe ./cmd/aew
+          CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o dist/aew-windows-arm64.exe ./cmd/aew
+          # Linux
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/aew-linux-amd64 ./cmd/aew
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/aew-linux-arm64 ./cmd/aew
+          # macOS (Darwin)
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/aew-darwin-amd64 ./cmd/aew
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/aew-darwin-arm64 ./cmd/aew
+          ls -la dist/
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: workstation/dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

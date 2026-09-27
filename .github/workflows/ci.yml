@@ -21,9 +21,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24.x"
-          cache-dependency-path: |
-            server/go.sum
-            gen/go.sum
+          cache: false
       - name: Install buf + protoc plugins
         run: |
           go install github.com/bufbuild/buf/cmd/buf@v1.47.2
@@ -54,9 +52,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24.x"
-          cache-dependency-path: |
-            workstation/go.sum
-            gen/go.sum
+          cache: false
       - name: Workstation tidy & test
         working-directory: workstation
         run: |
@@ -84,9 +80,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24.x"
-          cache-dependency-path: |
-            workstation/go.sum
-            gen/go.sum
+          cache: false
       - name: Build cross-platform binaries
         working-directory: workstation
         run: |
@@ -118,7 +112,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: admin/package-lock.json
       - run: npm ci
