@@ -17,6 +17,7 @@ import (
 	"time"
 
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
+	"github.com/ai-employee-platform/workstation/internal/acp"
 	"github.com/ai-employee-platform/workstation/internal/artifactlocal"
 	"github.com/ai-employee-platform/workstation/internal/config"
 	"github.com/ai-employee-platform/workstation/internal/controlplane/ack"
@@ -68,6 +69,11 @@ type Daemon struct {
 	modelMu    sync.Mutex
 	modelAt    time.Time
 	modelCache []heartbeat.ModelInfo
+
+	inqMu            sync.Mutex
+	pendingInquiries map[string]chan string
+	activeSessMu     sync.Mutex
+	activeSess       *grpcclient.Session
 }
 
 // New 组装 Daemon。
@@ -134,6 +140,10 @@ func New(opts Options) *Daemon {
 			Queue:    d.Artifacts,
 		}
 	}
+	d.pendingInquiries = make(map[string]chan string)
+	d.Runtime.SetInquiryCallback(func(ctx context.Context, jobID, empID string, inq acp.Inquiry) (string, error) {
+		return d.handleAgentInquiry(ctx, jobID, empID, inq)
+	})
 	return d
 }
 
@@ -259,7 +269,9 @@ func (d *Daemon) maintainControlPlane(ctx context.Context) {
 			return d.handleCommand(cctx, sess, cmd)
 		}
 		d.Backoff.MarkConnected()
+		d.setActiveSession(sess)
 		_ = sess.Run(ctx)
+		d.setActiveSession(nil)
 		_ = cli.Close()
 		d.Backoff.MarkDisconnected()
 		if ctx.Err() != nil {
@@ -423,8 +435,89 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 	case aiev1.CommandType_COMMAND_TYPE_STOP_JOB:
 		d.Runtime.MarkUnknown("", cmd.GetJobId())
 		return nil
+
+	case aiev1.CommandType_COMMAND_TYPE_RESOLVE_INQUIRY:
+		var p struct {
+			InquiryID        string `json:"inquiry_id"`
+			SelectedOptionID string `json:"selected_option_id"`
+		}
+		if pJSON := cmd.GetPayloadJson(); pJSON != "" {
+			_ = json.Unmarshal([]byte(pJSON), &p)
+		}
+		d.resolveInquiry(p.InquiryID, p.SelectedOptionID)
+		return nil
 	}
 	return nil
+}
+
+func (d *Daemon) setActiveSession(sess *grpcclient.Session) {
+	d.activeSessMu.Lock()
+	defer d.activeSessMu.Unlock()
+	d.activeSess = sess
+}
+
+func (d *Daemon) getActiveSession() *grpcclient.Session {
+	d.activeSessMu.Lock()
+	defer d.activeSessMu.Unlock()
+	return d.activeSess
+}
+
+func (d *Daemon) resolveInquiry(inquiryID, optionID string) {
+	d.inqMu.Lock()
+	ch, ok := d.pendingInquiries[inquiryID]
+	if ok {
+		delete(d.pendingInquiries, inquiryID)
+	}
+	d.inqMu.Unlock()
+	if ok && ch != nil {
+		select {
+		case ch <- optionID:
+		default:
+		}
+	}
+}
+
+func (d *Daemon) handleAgentInquiry(ctx context.Context, jobID, empID string, inq acp.Inquiry) (string, error) {
+	sess := d.getActiveSession()
+	if sess == nil {
+		return inq.DefaultOptionID(), nil
+	}
+	inquiryID := fmt.Sprintf("INQ-%s-%d", jobID, time.Now().UnixNano())
+	ch := make(chan string, 1)
+
+	d.inqMu.Lock()
+	d.pendingInquiries[inquiryID] = ch
+	d.inqMu.Unlock()
+
+	defer func() {
+		d.inqMu.Lock()
+		delete(d.pendingInquiries, inquiryID)
+		d.inqMu.Unlock()
+	}()
+
+	payload, _ := json.Marshal(map[string]any{
+		"inquiry_id":  inquiryID,
+		"job_id":      jobID,
+		"employee_id": empID,
+		"message":     inq.Message,
+		"options":     inq.Options,
+	})
+	ev := d.newEvent(jobID, inq.SessionID, empID, aiev1.EventType_EVENT_TYPE_JOB_INQUIRY, string(payload))
+	if err := sess.EnqueueEvent(ev); err != nil {
+		return inq.DefaultOptionID(), nil
+	}
+
+	select {
+	case <-ctx.Done():
+		return inq.DefaultOptionID(), ctx.Err()
+	case <-time.After(15 * time.Minute):
+		return inq.DefaultOptionID(), fmt.Errorf("询问 %s 等待用户超时", inquiryID)
+	case opt := <-ch:
+		if opt == "" {
+			return inq.DefaultOptionID(), nil
+		}
+		return opt, nil
+	}
 }
 
 func (d *Daemon) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {

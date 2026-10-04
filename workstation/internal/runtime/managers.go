@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/ai-employee-platform/workstation/internal/acp"
 	"github.com/ai-employee-platform/workstation/internal/platform"
 	"github.com/ai-employee-platform/workstation/internal/providers"
 )
@@ -77,6 +78,9 @@ type Job struct {
 // EventSink 上报事件（Outbox / 测试）。
 type EventSink func(typ string, payload map[string]string)
 
+// InquiryCallback 询问处理回调
+type InquiryCallback func(ctx context.Context, jobID, employeeID string, inq acp.Inquiry) (string, error)
+
 // Managers 本地运行时门面。
 type Managers struct {
 	Paths    platform.Paths
@@ -84,12 +88,20 @@ type Managers struct {
 	MaxSess  int
 	Sink     EventSink
 
-	mu         sync.Mutex
-	employees  map[string]*Employee
-	workspaces map[string]*Workspace
-	sessions   map[string]*Session
-	jobs       map[string]*Job
-	agentSess  map[string]providers.AgentSession
+	mu              sync.Mutex
+	employees       map[string]*Employee
+	workspaces      map[string]*Workspace
+	sessions        map[string]*Session
+	jobs            map[string]*Job
+	agentSess       map[string]providers.AgentSession
+	inquiryCallback InquiryCallback
+}
+
+// SetInquiryCallback 设置 Agent 询问上报与交互回调
+func (m *Managers) SetInquiryCallback(cb InquiryCallback) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.inquiryCallback = cb
 }
 
 // NewManagers 创建。
@@ -239,6 +251,20 @@ func (m *Managers) RunJob(ctx context.Context, jobID, employeeID, sessionID, pro
 		m.setJob(jobID, JobFailed)
 		return j, "", fmt.Errorf("session 未就绪")
 	}
+
+	m.mu.Lock()
+	cb := m.inquiryCallback
+	m.mu.Unlock()
+
+	if cb != nil {
+		if setter, ok := agent.(interface{ SetInquiryHandler(acp.InquiryHandler) }); ok {
+			setter.SetInquiryHandler(func(ictx context.Context, inq acp.Inquiry) (string, error) {
+				return cb(ictx, jobID, employeeID, inq)
+			})
+			defer setter.SetInquiryHandler(nil)
+		}
+	}
+
 	reply, err := agent.Send(ctx, []byte(prompt))
 	inTok, outTok, agentName, source := int64(0), int64(0), "", ""
 	if u, ok := agent.(interface {

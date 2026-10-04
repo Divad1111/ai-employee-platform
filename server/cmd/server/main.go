@@ -35,6 +35,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/enrollment"
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/feishu"
+	"github.com/ai-employee-platform/server/internal/inquiry"
 	"github.com/ai-employee-platform/server/internal/job"
 	"github.com/ai-employee-platform/server/internal/mcp"
 	"github.com/ai-employee-platform/server/internal/mcpauth"
@@ -240,6 +241,11 @@ func main() {
 		return u.Roles
 	}
 
+	inquirySvc := inquiry.NewService(workerSvc, jobSvc, empSvc, feishuSvc, notifySvc)
+	if feishuSvc != nil {
+		feishuSvc.SetInquiryHandler(inquirySvc)
+	}
+
 	workerSvc.OnEvent = func(wsID string, ev *aiev1.Event) {
 		ctx := context.Background()
 		jobID := ev.GetJobId()
@@ -338,6 +344,10 @@ func main() {
 					_ = notifySvc.OnJobTerminal(ctx, uj)
 					autoSvc.OnJobTerminal(ctx, uj)
 				}
+			}
+		case aiev1.EventType_EVENT_TYPE_JOB_INQUIRY:
+			if inquirySvc != nil {
+				inquirySvc.HandleInquiryEvent(ctx, wsID, ev)
 			}
 		}
 	}

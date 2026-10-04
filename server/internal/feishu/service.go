@@ -133,6 +133,20 @@ type Service struct {
 	lastStatusCheck time.Time
 
 	userNameCache sync.Map // open_id (string) -> user_name (string)
+	Inquiry       InquiryHandler
+}
+
+// InquiryHandler 外部决策请示交互门面
+type InquiryHandler interface {
+	HandleCardAction(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error)
+	CheckChatReply(ctx context.Context, chatID, text, senderOpenID string) (bool, error)
+}
+
+// SetInquiryHandler 设置询问决策处理器
+func (s *Service) SetInquiryHandler(h InquiryHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Inquiry = h
 }
 
 // NewService 创建飞书集成服务
@@ -404,7 +418,13 @@ func (s *Service) rebuildLarkLocked() {
 		OnP2MessageReactionCreatedV1(func(_ context.Context, _ *larkim.P2MessageReactionCreatedV1) error { return nil }).
 		OnP2MessageReactionDeletedV1(func(_ context.Context, _ *larkim.P2MessageReactionDeletedV1) error { return nil }).
 		// 交互回调与自定义事件
-		OnP2CardActionTrigger(func(_ context.Context, _ *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+			s.mu.RLock()
+			inq := s.Inquiry
+			s.mu.RUnlock()
+			if inq != nil {
+				return inq.HandleCardAction(ctx, event)
+			}
 			return &callback.CardActionTriggerResponse{}, nil
 		}).
 		OnP2CardURLPreviewGet(func(_ context.Context, _ *callback.URLPreviewGetEvent) (*callback.URLPreviewGetResponse, error) {
@@ -799,6 +819,8 @@ func (s *Service) UpsertBinding(b Binding) {
 	}
 	if b.FeishuAlias != "" {
 		s.bindings[strings.ToLower(b.FeishuAlias)] = b
+	} else if b.EmployeeID != "" {
+		s.bindings[strings.ToLower(b.EmployeeID)] = b
 	}
 	if b.FeishuOpenID != "" {
 		s.byOpenID[b.FeishuOpenID] = b.EmployeeID
@@ -1131,6 +1153,18 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 	if s.Dedupe(ev.EventID) {
 		return "", true, nil
 	}
+
+	// 优先检查是否为针对待确认决策/安全选项的直接文本回复
+	s.mu.RLock()
+	inq := s.Inquiry
+	s.mu.RUnlock()
+	if inq != nil {
+		handled, inqErr := inq.CheckChatReply(ctx, ev.ChatID, ev.Text, ev.SenderOpenID)
+		if handled {
+			return "", false, inqErr
+		}
+	}
+
 	empID, prompt, err := s.ParseTarget(ev.Text)
 	if err != nil || empID == "" {
 		shouldHint := isP2PChat(ev.ChatType) || looksLikeEmployeeAddress(ev.Text)

@@ -40,10 +40,36 @@ type StdioSession struct {
 	inTok        int64
 	outTok       int64
 	agentModel   string
-	promptText   string
-	mcpServers   []any
-	model        string
+	promptText     string
+	mcpServers     []any
+	model          string
+	inquiryHandler InquiryHandler
 }
+
+// InquiryOption 候选选项
+type InquiryOption struct {
+	OptionID string `json:"optionId"`
+	Name     string `json:"name"`
+}
+
+// Inquiry Agent 发出的安全/决策询问
+type Inquiry struct {
+	SessionID string          `json:"sessionId"`
+	Method    string          `json:"method"`
+	Message   string          `json:"message"`
+	Options   []InquiryOption `json:"options"`
+}
+
+// DefaultOptionID 获取默认选项ID
+func (inq Inquiry) DefaultOptionID() string {
+	if len(inq.Options) > 0 && inq.Options[0].OptionID != "" {
+		return inq.Options[0].OptionID
+	}
+	return "allow-once"
+}
+
+// InquiryHandler 询问处理回调
+type InquiryHandler func(ctx context.Context, inq Inquiry) (selectedOptionID string, err error)
 
 type rpcResult struct {
 	result json.RawMessage
@@ -75,6 +101,13 @@ func (s *StdioSession) SetMCPServers(servers []any) {
 
 // SetModel 设置 session/new 使用的模型。空表示引擎默认。
 func (s *StdioSession) SetModel(model string) { s.model = model }
+
+// SetInquiryHandler 设置 Agent 询问回调处理器。
+func (s *StdioSession) SetInquiryHandler(h InquiryHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inquiryHandler = h
+}
 
 func (s *StdioSession) Start(ctx context.Context) error {
 	s.mu.Lock()
@@ -423,13 +456,125 @@ func (s *StdioSession) readLoop(stdout io.Reader) {
 			case s.events <- Event{Type: msg.Method, Payload: payload}:
 			default:
 			}
-			// 权限请求：默认 allow-once，避免无头工具调用卡死
-			if msg.ID != nil && msg.Method == "session/request_permission" {
-				_ = s.respond(*msg.ID, map[string]any{
-					"outcome": map[string]any{"outcome": "selected", "optionId": "allow-once"},
-				})
+			// 权限/决策选项请求（如 session/request_permission 等）
+			if msg.ID != nil && (msg.Method == "session/request_permission" || msg.Method == "session/ask_user" || msg.Method == "session/user_choice") {
+				reqID := *msg.ID
+				method := msg.Method
+				params := msg.Params
+				go s.handleInquiryRequest(reqID, method, params)
 			}
 		}
+	}
+}
+
+func (s *StdioSession) handleInquiryRequest(reqID int64, method string, rawParams json.RawMessage) {
+	s.mu.Lock()
+	sid := s.acpSessionID
+	if sid == "" {
+		sid = s.id
+	}
+	handler := s.inquiryHandler
+	s.mu.Unlock()
+
+	inq := parseInquiry(sid, method, rawParams)
+
+	var selectedID string
+	var err error
+	if handler != nil {
+		selectedID, err = handler(context.Background(), inq)
+	}
+	if err != nil || selectedID == "" {
+		selectedID = inq.DefaultOptionID()
+	}
+
+	_ = s.respond(reqID, map[string]any{
+		"outcome": map[string]any{
+			"outcome":  "selected",
+			"optionId": selectedID,
+		},
+	})
+}
+
+func parseInquiry(sessionID, method string, params json.RawMessage) Inquiry {
+	var body struct {
+		Message string `json:"message"`
+		Prompt  string `json:"prompt"`
+		Title   string `json:"title"`
+		ToolCall struct {
+			Name string `json:"name"`
+		} `json:"toolCall"`
+		Options []struct {
+			OptionID string `json:"optionId"`
+			ID       string `json:"id"`
+			Name     string `json:"name"`
+			Label    string `json:"label"`
+			Text     string `json:"text"`
+		} `json:"options"`
+		Choices []struct {
+			OptionID string `json:"optionId"`
+			ID       string `json:"id"`
+			Name     string `json:"name"`
+			Label    string `json:"label"`
+			Text     string `json:"text"`
+		} `json:"choices"`
+	}
+	_ = json.Unmarshal(params, &body)
+
+	msg := body.Message
+	if msg == "" {
+		msg = body.Prompt
+	}
+	if msg == "" {
+		msg = body.Title
+	}
+	if msg == "" && body.ToolCall.Name != "" {
+		msg = fmt.Sprintf("AI Agent 请求执行工具调用: %s", body.ToolCall.Name)
+	}
+	if msg == "" {
+		msg = "AI Agent 请求确认操作/执行策略"
+	}
+
+	rawOpts := body.Options
+	if len(rawOpts) == 0 && len(body.Choices) > 0 {
+		rawOpts = body.Choices
+	}
+
+	opts := make([]InquiryOption, 0, len(rawOpts))
+	for _, o := range rawOpts {
+		oid := o.OptionID
+		if oid == "" {
+			oid = o.ID
+		}
+		name := o.Name
+		if name == "" {
+			name = o.Label
+		}
+		if name == "" {
+			name = o.Text
+		}
+		if oid != "" || name != "" {
+			if oid == "" {
+				oid = name
+			}
+			if name == "" {
+				name = oid
+			}
+			opts = append(opts, InquiryOption{OptionID: oid, Name: name})
+		}
+	}
+
+	if len(opts) == 0 {
+		opts = []InquiryOption{
+			{OptionID: "allow-once", Name: "允许本次执行"},
+			{OptionID: "deny", Name: "拒绝执行"},
+		}
+	}
+
+	return Inquiry{
+		SessionID: sessionID,
+		Method:    method,
+		Message:   msg,
+		Options:   opts,
 	}
 }
 

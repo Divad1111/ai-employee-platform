@@ -323,3 +323,119 @@ func BuildTestMessageCard(content string) *Card {
 		"AI Employee 企业员工协同平台",
 	)
 }
+
+// InquiryCardOption 选项配置
+type InquiryCardOption struct {
+	OptionID string `json:"optionId"`
+	Name     string `json:"name"`
+}
+
+// BuildInquiryCard 构建带交互按钮的决策/安全选项确认卡片
+func BuildInquiryCard(jobID, employeeName, inquiryID, message string, options []InquiryCardOption) *Card {
+	card := &Card{
+		Config: CardConfig{
+			WideScreenMode: true,
+			EnableForward:  true,
+		},
+		Header: &CardHeader{
+			Title: CardTitle{
+				Tag:     "plain_text",
+				Content: "🔔 AI 员工决策/安全请示",
+			},
+			Template: string(CardTemplateOrange),
+		},
+		Elements: make([]CardElement, 0, 5),
+	}
+
+	var sb strings.Builder
+	if employeeName != "" {
+		sb.WriteString(fmt.Sprintf("**负责员工**：%s\n", employeeName))
+	}
+	sb.WriteString(fmt.Sprintf("**任务编号**：`%s`\n", jobID))
+	sb.WriteString(fmt.Sprintf("**请示编号**：`%s`\n\n", inquiryID))
+	sb.WriteString("**请示说明：**\n")
+	sb.WriteString(fmt.Sprintf("> %s\n\n", message))
+	sb.WriteString("**候选选项列表：**\n")
+	for i, opt := range options {
+		sb.WriteString(fmt.Sprintf("• **[%d]** %s (`%s`)\n", i+1, opt.Name, opt.OptionID))
+	}
+	sb.WriteString("\n> 💡 **交互说明**：您可以直接点击下方按钮快速选择；也可以在当前会话中直接回复选项数字序号（如 `1`）或选项名称。")
+
+	card.Elements = append(card.Elements, CardElement{
+		"tag": "div",
+		"text": map[string]interface{}{
+			"tag":     "lark_md",
+			"content": sb.String(),
+		},
+	})
+
+	// 按钮操作组件
+	actions := make([]map[string]interface{}, 0, len(options))
+	for _, opt := range options {
+		btnType := "default"
+		lowerID := strings.ToLower(opt.OptionID)
+		if strings.Contains(lowerID, "allow") || strings.Contains(opt.Name, "允许") || strings.Contains(opt.Name, "通过") {
+			btnType = "primary"
+		} else if strings.Contains(lowerID, "deny") || strings.Contains(lowerID, "reject") || strings.Contains(opt.Name, "拒绝") || strings.Contains(opt.Name, "阻断") {
+			btnType = "danger"
+		}
+		actions = append(actions, map[string]interface{}{
+			"tag": "button",
+			"text": map[string]interface{}{
+				"tag":     "plain_text",
+				"content": opt.Name,
+			},
+			"type": btnType,
+			"value": map[string]interface{}{
+				"action":      "resolve_inquiry",
+				"inquiry_id":  inquiryID,
+				"option_id":   opt.OptionID,
+				"option_name": opt.Name,
+				"job_id":      jobID,
+			},
+		})
+	}
+
+	card.Elements = append(card.Elements, CardElement{
+		"tag": "hr",
+	})
+	card.Elements = append(card.Elements, CardElement{
+		"tag":     "action",
+		"actions": actions,
+	})
+
+	card.Elements = append(card.Elements, CardElement{
+		"tag": "note",
+		"elements": []map[string]interface{}{
+			{
+				"tag":     "plain_text",
+				"content": fmt.Sprintf("AI Employee 交互网关 • 请示于 %s", time.Now().Format("15:04:05")),
+			},
+		},
+	})
+
+	return card
+}
+
+// BuildInquiryResolvedCard 构建已选择确认的回执卡片
+func BuildInquiryResolvedCard(jobID, employeeName, inquiryID, chosenName, chosenBy, via string) *Card {
+	var sb strings.Builder
+	if employeeName != "" {
+		sb.WriteString(fmt.Sprintf("**负责员工**：%s\n", employeeName))
+	}
+	sb.WriteString(fmt.Sprintf("**任务编号**：`%s`\n", jobID))
+	sb.WriteString(fmt.Sprintf("**请示编号**：`%s`\n", inquiryID))
+	sb.WriteString(fmt.Sprintf("**选择结果**：【**%s**】\n", chosenName))
+	if chosenBy != "" {
+		sb.WriteString(fmt.Sprintf("**操作人员**：`%s`\n", chosenBy))
+	}
+	sb.WriteString(fmt.Sprintf("**交互方式**：%s\n\n", via))
+	sb.WriteString("✅ 选项已成功回传宿主工作站，AI Agent 正在继续执行中...")
+
+	return NewMarkdownCard(
+		"✅ 决策/权限请示已处理",
+		CardTemplateGreen,
+		sb.String(),
+		fmt.Sprintf("AI Employee 交互网关 • 完成于 %s", time.Now().Format("15:04:05")),
+	)
+}

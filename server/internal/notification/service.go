@@ -37,6 +37,13 @@ func (s *Service) RememberChat(jobID, chatID string) {
 	s.chatByJob[jobID] = chatID
 }
 
+// GetChat 获取 Job 对应的飞书会话。
+func (s *Service) GetChat(jobID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.chatByJob[jobID]
+}
+
 // OnJobTerminal Job 终态回调。
 func (s *Service) OnJobTerminal(ctx context.Context, j *job.Job) error {
 	if j == nil {
