@@ -265,6 +265,16 @@ func (s *Server) PushCommandFull(wsID string, typ aiev1.CommandType, employeeID,
 	return cmd, nil
 }
 
+// Disconnect 主动断开并清理指定工作站的双向流连接。
+func (s *Server) Disconnect(wsID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.streams[wsID]; ok {
+		sess.cancel()
+		delete(s.streams, wsID)
+	}
+}
+
 // StartCommandUnacked 启动命令是否还在等工作站确认。
 func (s *Server) StartCommandUnacked(wsID, jobID string) bool {
 	if s == nil || s.Commands == nil {

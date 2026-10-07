@@ -22,6 +22,7 @@ enum CommandType {
   COMMAND_TYPE_UPDATE_WORKSTATION = 8;
   COMMAND_TYPE_SYNC_SKILLS = 9;
   COMMAND_TYPE_RESOLVE_INQUIRY = 10;
+  COMMAND_TYPE_SHUTDOWN = 11;
 }
 
 // Command Control Plane 下发给 Workstation 的命令。

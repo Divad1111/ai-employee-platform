@@ -356,6 +356,13 @@ func (m *Managers) StopSession(ctx context.Context, sessionID string) error {
 	return ErrNotFound
 }
 
+// StopAll 停止当前全部活跃会话。
+func (m *Managers) StopAll(ctx context.Context) {
+	for _, s := range m.ListSessions() {
+		_ = m.StopSession(ctx, s.ID)
+	}
+}
+
 // Snapshot 状态快照。
 func (m *Managers) Snapshot() (emps, wss, sess, jobs int) {
 	m.mu.Lock()

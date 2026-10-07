@@ -36,6 +36,7 @@ import (
 	"github.com/ai-employee-platform/workstation/internal/runtime"
 	"github.com/ai-employee-platform/workstation/internal/runtime/process"
 	"github.com/ai-employee-platform/workstation/internal/runtime/recovery"
+	"github.com/ai-employee-platform/workstation/internal/service"
 	"github.com/ai-employee-platform/workstation/internal/skillsync"
 )
 
@@ -74,6 +75,8 @@ type Daemon struct {
 	pendingInquiries map[string]chan string
 	activeSessMu     sync.Mutex
 	activeSess       *grpcclient.Session
+	cancelMu         sync.Mutex
+	cancel           context.CancelFunc
 }
 
 // New 组装 Daemon。
@@ -180,6 +183,12 @@ func (d *Daemon) newJobEvent(jobID string, typ aiev1.EventType, payload string) 
 
 // Run 阻塞运行直到 ctx 取消。
 func (d *Daemon) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	d.cancelMu.Lock()
+	d.cancel = cancel
+	d.cancelMu.Unlock()
+
 	paths := d.Opts.Paths
 	_ = os.MkdirAll(paths.DataDir(), 0o755)
 	_ = os.MkdirAll(paths.LogDir(), 0o755)
@@ -445,6 +454,26 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			_ = json.Unmarshal([]byte(pJSON), &p)
 		}
 		d.resolveInquiry(p.InquiryID, p.SelectedOptionID)
+		return nil
+
+	case aiev1.CommandType_COMMAND_TYPE_SHUTDOWN:
+		// 服务端通知本工作站已被删除：通知 aew 自动停止运行并清理本地证书
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			if d.Runtime != nil {
+				d.Runtime.StopAll(context.Background())
+			}
+			_ = identity.Clear(d.Opts.Paths)
+			mgr := service.New()
+			_ = mgr.Stop()
+			d.cancelMu.Lock()
+			if d.cancel != nil {
+				d.cancel()
+			}
+			d.cancelMu.Unlock()
+			time.Sleep(300 * time.Millisecond)
+			os.Exit(0)
+		}()
 		return nil
 	}
 	return nil

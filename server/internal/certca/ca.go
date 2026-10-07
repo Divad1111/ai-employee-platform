@@ -340,18 +340,17 @@ func (a *Authority) FindByWorkstation(id string) *Record {
 // DeleteWorkstation 吊销并删除指定 Workstation 的全部证书记录。
 func (a *Authority) DeleteWorkstation(workstationID string) error {
 	a.mu.Lock()
-	fp, ok := a.byWS[workstationID]
-	if ok {
-		if rec := a.byFP[fp]; rec != nil {
+	defer a.mu.Unlock()
+	delete(a.byWS, workstationID)
+	for _, rec := range a.byFP {
+		if rec != nil && rec.WorkstationID == workstationID {
 			rec.Status = "REVOKED"
 			rec.RevokedAt = time.Now().UTC()
 			if a.store != nil {
 				_ = a.store.SaveRecord(context.Background(), rec)
 			}
 		}
-		delete(a.byWS, workstationID)
 	}
-	a.mu.Unlock()
 	return nil
 }
 

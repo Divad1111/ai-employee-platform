@@ -80,3 +80,43 @@ func TestAgentInstallAndUpdateRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRunUninstall(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("AIE_DATA_DIR", root)
+
+	// 创建模拟身份、配置、数据与日志
+	idDir := filepath.Join(root, "identity")
+	cfgDir := filepath.Join(root, "config")
+	dataDir := filepath.Join(root, "data")
+	logDir := filepath.Join(root, "logs")
+
+	_ = os.MkdirAll(idDir, 0o700)
+	_ = os.MkdirAll(cfgDir, 0o700)
+	_ = os.MkdirAll(dataDir, 0o700)
+	_ = os.MkdirAll(logDir, 0o700)
+
+	_ = os.WriteFile(filepath.Join(idDir, "workstation-id"), []byte("WS-TEST-UNINSTALL"), 0o600)
+	_ = os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte("name: test"), 0o600)
+	_ = os.WriteFile(filepath.Join(dataDir, "data.db"), []byte("sqlite"), 0o600)
+	_ = os.WriteFile(filepath.Join(logDir, "aew.log"), []byte("log"), 0o600)
+
+	// 执行 uninstall 命令
+	if err := app.Run([]string{"uninstall"}); err != nil {
+		t.Fatalf("uninstall 失败: %v", err)
+	}
+
+	// 验证配置、标识、数据、日志已被清理
+	if _, err := os.Stat(filepath.Join(idDir, "workstation-id")); !os.IsNotExist(err) {
+		t.Errorf("workstation-id 文件未被删除")
+	}
+	if _, err := os.Stat(cfgDir); !os.IsNotExist(err) {
+		t.Errorf("config 目录未被删除")
+	}
+	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+		t.Errorf("data 目录未被删除")
+	}
+	if _, err := os.Stat(logDir); !os.IsNotExist(err) {
+		t.Errorf("logs 目录未被删除")
+	}
+}

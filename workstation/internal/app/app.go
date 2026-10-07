@@ -47,6 +47,8 @@ func Run(args []string) error {
 		return runRegister(args[1:])
 	case "unregister":
 		return runUnregister(args[1:])
+	case "uninstall":
+		return runUninstall(args[1:])
 	case "ping":
 		return runPing(args[1:])
 	case "status":
@@ -92,6 +94,7 @@ func printHelp() {
   aew link
   aew register --server https://host:8080 --token <enrollment_token>
   aew unregister
+  aew uninstall [--keep-logs]
   aew ping [--grpc host:9090]
   aew status
   aew doctor [--fix] [--dry-run=false]
@@ -546,6 +549,86 @@ func runUnregister(args []string) error {
 		return err
 	}
 	fmt.Printf("已清理本地身份（原 ID: %s）。\n", b.WorkstationID)
+	return nil
+}
+
+func runUninstall(args []string) error {
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	keepLogs := fs.Bool("keep-logs", false, "保留运行日志文件")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	paths := platform.Detect()
+	mark := termcolor.Green("[✓]")
+	fmt.Println("正在执行 aew 完全卸载与数据清理...")
+
+	// 1. 尝试停止并卸载后台服务 (若已安装系统服务)
+	mgr := service.New()
+	if err := mgr.Stop(); err == nil {
+		fmt.Printf("  %s 已停止后台常驻服务\n", mark)
+	}
+	if err := mgr.Uninstall(); err == nil {
+		fmt.Printf("  %s 已卸载后台常驻服务\n", mark)
+	}
+
+	// 2. 移除全局 PATH 软链接
+	service.RemoveGlobalSymlink()
+	fmt.Printf("  %s 已清理全局 PATH 中的 aew 快捷命令\n", mark)
+
+	// 3. 读取当前身份 ID 用于回显，然后彻底清除身份材料
+	oldID := "未注册/未知"
+	if b, err := identity.Load(paths); err == nil && b != nil {
+		oldID = b.WorkstationID
+	} else if rawID, err := os.ReadFile(filepath.Join(paths.IdentityDir(), "workstation-id")); err == nil && len(rawID) > 0 {
+		oldID = string(rawID)
+	}
+	if err := identity.Clear(paths); err == nil {
+		fmt.Printf("  %s 已清理工作站身份标识与证书材料 (原 ID: %s)\n", mark, oldID)
+	}
+
+	// 4. 清理配置文件与目录
+	cfgDir := paths.ConfigDir()
+	if cfgDir != "" {
+		_ = os.RemoveAll(cfgDir)
+		fmt.Printf("  %s 已删除配置文件与配置目录 (%s)\n", mark, cfgDir)
+	}
+
+	// 5. 清理运行日志 (除非指定 --keep-logs)
+	logDir := paths.LogDir()
+	if !*keepLogs && logDir != "" {
+		_ = os.RemoveAll(logDir)
+		fmt.Printf("  %s 已删除日志目录 (%s)\n", mark, logDir)
+	}
+
+	// 6. 清理运行时数据与本地数据库
+	dataDir := paths.DataDir()
+	if dataDir != "" {
+		_ = os.RemoveAll(dataDir)
+		fmt.Printf("  %s 已删除运行时数据与本地数据库 (%s)\n", mark, dataDir)
+	}
+
+	// 7. 若存在用户级 ~/.aie 根目录或自定义 AIE_DATA_DIR，一并清理
+	if custom := os.Getenv("AIE_DATA_DIR"); custom != "" {
+		_ = os.RemoveAll(custom)
+		fmt.Printf("  %s 已清理数据根目录 (%s)\n", mark, custom)
+	} else if home, err := os.UserHomeDir(); err == nil && home != "" {
+		userAie := filepath.Join(home, ".aie")
+		if _, err := os.Stat(userAie); err == nil {
+			_ = os.RemoveAll(userAie)
+			fmt.Printf("  %s 已清理用户根目录 (%s)\n", mark, userAie)
+		}
+	}
+
+	// 8. 尝试清理可能遗留的空父级工作站目录 (例如 ProgramData/AIEmployee)
+	if parent := filepath.Dir(paths.ConfigDir()); parent != "" && parent != "/" && parent != "." {
+		entries, err := os.ReadDir(parent)
+		if err == nil && len(entries) == 0 {
+			_ = os.Remove(parent)
+		}
+	}
+
+	fmt.Println("卸载完成！工作站全部相关配置、标识与本地状态信息已安全清除。")
 	return nil
 }
 

@@ -267,6 +267,26 @@ func TestDeleteWorkstation_API(t *testing.T) {
 	if rr2.Code != http.StatusOK {
 		t.Fatalf("step-up 后应成功删除: %d %s", rr2.Code, rr2.Body.String())
 	}
+
+	// 4. 删除后列表不应再包含该工作站
+	listReq := httptest.NewRequest(http.MethodGet, "/api/workstations", nil)
+	listReq.Header.Set("Authorization", "Bearer "+tok)
+	listRR := httptest.NewRecorder()
+	h.ServeHTTP(listRR, listReq)
+	if listRR.Code != http.StatusOK {
+		t.Fatalf("查询工作站列表失败: %d", listRR.Code)
+	}
+	var resp struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	jsonUnmarshal(listRR.Body.Bytes(), &resp)
+	for _, it := range resp.Items {
+		if it.ID == "WS-del-1" {
+			t.Fatalf("工作站 WS-del-1 仍存在于列表中，删除未生效")
+		}
+	}
 }
 
 func jsonUnmarshal(b []byte, v any) {

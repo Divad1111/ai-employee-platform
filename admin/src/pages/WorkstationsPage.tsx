@@ -111,17 +111,19 @@ export function WorkstationsPage() {
 
   async function confirmDelete() {
     if (!deleteTarget) return
+    if (!adminPassword.trim()) {
+      setModalError('请输入管理员密码以进行二次身份核验确认')
+      return
+    }
     setDeleting(true)
     setModalError('')
     try {
-      if (adminPassword.trim()) {
-        await apiPost('/auth/step-up', {
-          password: adminPassword.trim(),
-          totp: totpCode.trim() || undefined,
-        })
-      }
+      await apiPost('/auth/step-up', {
+        password: adminPassword.trim(),
+        totp: totpCode.trim() || undefined,
+      })
       await apiDelete(`/workstations/${deleteTarget.id}`)
-      setMsg(`工作站计算节点 [${deleteTarget.name}] (${deleteTarget.id}) 已安全移除，数字证书已自动吊销`)
+      setMsg(`工作站计算节点 [${deleteTarget.name}] (${deleteTarget.id}) 已安全移除，已通知节点停机并吊销证书`)
       setDeleteTarget(null)
       await load()
     } catch (err: unknown) {
@@ -652,7 +654,7 @@ aew service status`
                 }}
               />
               <span style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
-                若最近 10 分钟内已完成过二次认证提权，可直接点击确定删除。
+                删除计算节点将通知该节点自行停机并吊销证书，请输入管理员密码确认。
               </span>
             </div>
 

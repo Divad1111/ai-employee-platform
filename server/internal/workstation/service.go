@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
 	"github.com/ai-employee-platform/server/internal/certca"
 	"github.com/ai-employee-platform/server/internal/reliability"
 )
@@ -42,11 +43,18 @@ type MetaStore interface {
 	Delete(ctx context.Context, id string) error
 }
 
+// WorkerCommander 接口支持向工作站下发指令并管理长连接生命周期。
+type WorkerCommander interface {
+	PushCommand(wsID string, typ aiev1.CommandType, employeeID, jobID, payloadJSON string) (*aiev1.Command, error)
+	Disconnect(wsID string)
+}
+
 // Service Workstation 只读 + 吊销。
 type Service struct {
-	CA       *certca.Authority
-	Presence *reliability.Presence
-	Meta     MetaStore
+	CA        *certca.Authority
+	Presence  *reliability.Presence
+	Meta      MetaStore
+	Commander WorkerCommander
 }
 
 // NewService 创建。
@@ -55,6 +63,11 @@ func NewService(ca *certca.Authority, presence *reliability.Presence, meta MetaS
 		meta = NewMemoryMeta()
 	}
 	return &Service{CA: ca, Presence: presence, Meta: meta}
+}
+
+// SetCommander 绑定命令与连接管理器。
+func (s *Service) SetCommander(c WorkerCommander) {
+	s.Commander = c
 }
 
 // EnsureRegistered Enrollment 后登记。
@@ -72,7 +85,9 @@ func (s *Service) List(ctx context.Context) []View {
 		ids[id] = struct{}{}
 	}
 	for _, rec := range s.CA.ListRecords() {
-		ids[rec.WorkstationID] = struct{}{}
+		if rec.Status != "REVOKED" {
+			ids[rec.WorkstationID] = struct{}{}
+		}
 	}
 	out := make([]View, 0, len(ids))
 	for id := range ids {
@@ -125,13 +140,21 @@ func (s *Service) Revoke(fingerprint string) error {
 	return s.CA.Revoke(fingerprint)
 }
 
-// Delete 删除工作站：吊销并清理证书、移除心跳跟踪、从元数据及数据库中删除。
+// Delete 删除工作站：
+// 1. 若工作站当前在线，向 aew 下发 SHUTDOWN 命令通知其主动停机并清理本地身份；
+// 2. 主动断开 gRPC 链路，避免其上报心跳复活；
+// 3. 吊销并清理证书、移除心跳跟踪、从元数据及数据库中删除。
 func (s *Service) Delete(ctx context.Context, id string) error {
-	if s.CA != nil {
-		_ = s.CA.DeleteWorkstation(id)
+	if s.Commander != nil {
+		_, _ = s.Commander.PushCommand(id, aiev1.CommandType_COMMAND_TYPE_SHUTDOWN, "", "", "")
+		time.Sleep(200 * time.Millisecond)
+		s.Commander.Disconnect(id)
 	}
 	if s.Presence != nil {
 		s.Presence.Remove(id)
+	}
+	if s.CA != nil {
+		_ = s.CA.DeleteWorkstation(id)
 	}
 	if s.Meta != nil {
 		if err := s.Meta.Delete(ctx, id); err != nil {

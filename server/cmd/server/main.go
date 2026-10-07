@@ -218,6 +218,7 @@ func main() {
 		fatal("启动 gRPC 失败: %v", err)
 	}
 	defer gs.GracefulStop()
+	wsNodeSvc.SetCommander(workerSvc)
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
 	defer sweepCancel()
 	workerSvc.StartPresenceSweeper(sweepCtx, time.Second)
