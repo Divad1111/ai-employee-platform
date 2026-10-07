@@ -1,9 +1,10 @@
-// Package config 负责 Control Plane 配置加载。
-// 采用「默认配置 + 环境覆盖」策略，禁止直接改默认文件。
-// 设计依据：设计文档 §80。
 package config
 
-import "os"
+import (
+	"fmt"
+	"net/url"
+	"os"
+)
 
 // Version 为 Control Plane 构建版本号（后续可由 ldflags 注入）。
 const Version = "0.0.1-dev"
@@ -26,9 +27,33 @@ func Load() (*Config, error) {
 		Env:         getenv("AIE_ENV", "development"),
 		HTTPAddr:    getenv("AIE_HTTP_ADDR", ":8080"),
 		GRPCAddr:    getenv("AIE_GRPC_ADDR", ":9090"),
-		DatabaseURL: getenv("AIE_DATABASE_URL", "postgres://aie:aie@localhost:5432/aie?sslmode=disable"),
+		DatabaseURL: LoadDatabaseDSN(),
 	}
 	return cfg, nil
+}
+
+// LoadDatabaseDSN 加载 PostgreSQL DSN。
+// 优先使用 AIE_DATABASE_URL；若未设置，则根据 POSTGRES_* 环境变量进行安全 URL 编码组装，
+// 避免密码中包含 /、@、:、?、# 等特殊字符导致解析失败。
+func LoadDatabaseDSN() string {
+	if raw := os.Getenv("AIE_DATABASE_URL"); raw != "" {
+		return raw
+	}
+	user := getenv("POSTGRES_USER", "aie")
+	pass := getenv("POSTGRES_PASSWORD", "aie")
+	host := getenv("POSTGRES_HOST", "localhost")
+	port := getenv("POSTGRES_PORT", "5432")
+	dbName := getenv("POSTGRES_DB", "aie")
+	sslMode := getenv("POSTGRES_SSLMODE", "disable")
+
+	u := &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, pass),
+		Host:     fmt.Sprintf("%s:%s", host, port),
+		Path:     "/" + dbName,
+		RawQuery: "sslmode=" + sslMode,
+	}
+	return u.String()
 }
 
 // getenv 读取环境变量，空则返回默认值。
@@ -38,3 +63,4 @@ func getenv(key, def string) string {
 	}
 	return def
 }
+

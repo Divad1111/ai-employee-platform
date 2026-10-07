@@ -13,13 +13,15 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+
+	"github.com/ai-employee-platform/server/internal/config"
 )
 
 func main() {
 	defaultDir := defaultMigrationsDir()
 	var (
 		dir = flag.String("dir", defaultDir, "migrations 目录")
-		dsn = flag.String("dsn", getenv("AIE_DATABASE_URL", "postgres://aie:aie@localhost:5432/aie?sslmode=disable"), "PostgreSQL DSN")
+		dsn = flag.String("dsn", config.LoadDatabaseDSN(), "PostgreSQL DSN")
 	)
 	flag.Parse()
 
