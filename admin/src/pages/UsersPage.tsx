@@ -6,7 +6,7 @@ import { Link } from 'react-router-dom'
 import { apiDelete, apiGet, apiPost } from '../api/client'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { IconPlus, IconRefresh, IconUsers } from '../components/Icons'
-import { SearchableSelect, type SearchOption } from '../components/SearchableSelect'
+import { type SearchOption } from '../components/SearchableSelect'
 import { roleDisplayName } from '../lib/rbacLabels'
 import { usePerm } from '../stores/permissions'
 
@@ -38,17 +38,19 @@ export function UsersPage() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [displayName, setDisplayName] = useState('')
-  const [role, setRole] = useState('VIEWER')
+  const [role, setRole] = useState('USER')
   const [search, setSearch] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<UserRow | null>(null)
   const [deleting, setDeleting] = useState(false)
 
   const roleOptions: SearchOption[] = useMemo(() => {
     const fallback: RoleItem[] = [
+      { name: 'USER', description: '普通用户' },
       { name: 'VIEWER', description: '只读' },
       { name: 'OPERATOR', description: '操作员' },
       { name: 'ADMIN', description: '管理员' },
     ]
+
     const src = roles.length > 0 ? roles : fallback
     return src
       .filter((r) => r.name !== 'SUPER_ADMIN')
@@ -100,18 +102,20 @@ export function UsersPage() {
   const onCreate = async (e: FormEvent) => {
     e.preventDefault()
     setErr('')
+    const targetRole = (role || 'USER').trim() || 'USER'
     try {
       await apiPost('/users', {
-        username,
+        username: username.trim(),
         password,
-        display_name: displayName || username,
-        roles: [role],
+        display_name: (displayName || username).trim(),
+        roles: [targetRole],
       })
       setShowCreate(false)
       setUsername('')
       setPassword('')
       setDisplayName('')
-      setRole('VIEWER')
+      setRole('USER')
+
       await load()
     } catch (ex: unknown) {
       setErr(ex instanceof Error ? ex.message : String(ex))
@@ -189,15 +193,21 @@ export function UsersPage() {
             </label>
             <label>
               <span className="field-caption">初始角色</span>
-              <SearchableSelect
+              <select
+                className="select"
                 value={role}
-                onChange={setRole}
-                options={roleOptions}
-                placeholder="点击选择角色（可输入筛选）"
+                onChange={(e) => setRole(e.target.value)}
                 required
-              />
+                style={{ width: '100%', padding: '0.5rem 0.75rem' }}
+              >
+                {roleOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label} ({opt.value})
+                  </option>
+                ))}
+              </select>
               <p className="muted" style={{ margin: '0.25rem 0 0', fontSize: '0.78rem' }}>
-                可选：只读 / 操作员 / 管理员
+                默认：普通用户（全量基础权限，作用域为仅本人）。可在创建后详情页随时调整。
               </p>
             </label>
             <div className="form-actions">

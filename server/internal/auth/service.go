@@ -92,8 +92,10 @@ var BuiltInRoles = map[string]struct{}{
 	"SUPER_ADMIN": {},
 	"ADMIN":       {},
 	"OPERATOR":    {},
+	"USER":        {},
 	"VIEWER":      {},
 }
+
 
 // IsBuiltInRole 是否内置角色。
 func IsBuiltInRole(name string) bool {
@@ -480,6 +482,7 @@ func defaultRoleGrants() map[string][]PermissionGrant {
 			"workflow.read", "workflow.grant",
 			"automation.read", "quota.read",
 		)),
+		"USER": own(adminCodes...),
 		"VIEWER": own(
 			"employee.read", "workstation.read", "workspace.read",
 			"session.read", "job.read", "message.read",
@@ -499,10 +502,12 @@ func NewMemoryUserStore() *MemoryUserStore {
 			"SUPER_ADMIN": "超级管理员",
 			"ADMIN":       "管理员",
 			"OPERATOR":    "操作员",
+			"USER":        "普通用户",
 			"VIEWER":      "只读",
 		},
 	}
 }
+
 
 // SeedAdmin 写入初始管理员。
 func (m *MemoryUserStore) SeedAdmin(username, password, display string) error {
@@ -581,12 +586,24 @@ func (m *MemoryUserStore) Create(_ context.Context, u *User) error {
 	if u.ID == "" {
 		u.ID = newUUID()
 	}
+	cleanRoles := make([]string, 0, len(u.Roles))
+	for _, r := range u.Roles {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			cleanRoles = append(cleanRoles, r)
+		}
+	}
+	if len(cleanRoles) == 0 {
+		cleanRoles = []string{"USER"}
+	}
+	u.Roles = cleanRoles
 	cp := *u
-	cp.Roles = append([]string{}, u.Roles...)
+	cp.Roles = cleanRoles
 	m.users[u.Username] = &cp
 	m.byID[u.ID] = u.Username
 	return nil
 }
+
 
 // Update 更新用户。
 func (m *MemoryUserStore) Update(_ context.Context, u *User) error {
@@ -622,7 +639,17 @@ func (m *MemoryUserStore) SetRoles(_ context.Context, userID string, roles []str
 		return errors.New("用户不存在")
 	}
 	u := m.users[uname]
-	u.Roles = append([]string{}, roles...)
+	cleanRoles := make([]string, 0, len(roles))
+	for _, r := range roles {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			cleanRoles = append(cleanRoles, r)
+		}
+	}
+	if len(cleanRoles) == 0 {
+		cleanRoles = []string{"USER"}
+	}
+	u.Roles = cleanRoles
 	return nil
 }
 
@@ -704,7 +731,7 @@ func (m *MemoryUserStore) ListRoles(_ context.Context) ([]RoleInfo, error) {
 	for n := range m.grants {
 		names = append(names, n)
 	}
-	order := map[string]int{"SUPER_ADMIN": 0, "ADMIN": 1, "OPERATOR": 2, "VIEWER": 3}
+	order := map[string]int{"SUPER_ADMIN": 0, "ADMIN": 1, "OPERATOR": 2, "USER": 3, "VIEWER": 4}
 	sort.Slice(names, func(i, j int) bool {
 		oi, oki := order[names[i]]
 		oj, okj := order[names[j]]

@@ -296,10 +296,18 @@ func (d Deps) handleCreateUser(w http.ResponseWriter, r *http.Request, sess *aut
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	roles := req.Roles
-	if len(roles) == 0 {
-		roles = []string{"VIEWER"}
+	cleanRoles := make([]string, 0, len(req.Roles))
+	for _, r := range req.Roles {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			cleanRoles = append(cleanRoles, r)
+		}
 	}
+	if len(cleanRoles) == 0 {
+		cleanRoles = []string{"USER"}
+	}
+	roles := cleanRoles
+
 	// 防垂直提权：非超级管理员严禁创建超级管理员账号
 	if containsRole(roles, "SUPER_ADMIN") && !isSuperAdmin(sess) {
 		writeErr(w, http.StatusForbidden, "只有超级管理员可以创建超级管理员账号")
@@ -400,8 +408,18 @@ func (d Deps) handlePatchUser(w http.ResponseWriter, r *http.Request, sess *auth
 		return
 	}
 	if req.Roles != nil {
-		_ = d.Auth.Users().SetRoles(r.Context(), u.ID, req.Roles)
-		u.Roles = req.Roles
+		cleanRoles := make([]string, 0, len(req.Roles))
+		for _, r := range req.Roles {
+			r = strings.TrimSpace(r)
+			if r != "" {
+				cleanRoles = append(cleanRoles, r)
+			}
+		}
+		if len(cleanRoles) == 0 {
+			cleanRoles = []string{"USER"}
+		}
+		_ = d.Auth.Users().SetRoles(r.Context(), u.ID, cleanRoles)
+		u.Roles = cleanRoles
 	}
 	if d.Audit != nil {
 		parts := []string{

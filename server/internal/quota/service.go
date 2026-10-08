@@ -112,6 +112,10 @@ func NewMemoryStore() *MemoryStore {
 		TokenLimit: 1_000_000, Enabled: true,
 	})
 	_ = m.UpsertPolicy(context.Background(), &Policy{
+		ResourceType: TypeRole, ResourceID: "USER", PeriodType: PeriodMonthly,
+		TokenLimit: 5_000_000, Enabled: true,
+	})
+	_ = m.UpsertPolicy(context.Background(), &Policy{
 		ResourceType: TypeRole, ResourceID: "OPERATOR", PeriodType: PeriodMonthly,
 		TokenLimit: 5_000_000, Enabled: true,
 	})
@@ -121,6 +125,7 @@ func NewMemoryStore() *MemoryStore {
 	})
 	return m
 }
+
 
 func polKey(t, id, period string) string { return t + "|" + id + "|" + period }
 func wuKey(ws, user, period string) string {

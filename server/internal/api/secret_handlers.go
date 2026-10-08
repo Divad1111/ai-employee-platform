@@ -24,8 +24,10 @@ func roleLabelCN(roles []string) string {
 		"SUPER_ADMIN": "超级管理员",
 		"ADMIN":       "管理员",
 		"OPERATOR":    "操作员",
+		"USER":        "普通用户",
 		"VIEWER":      "只读",
 	}
+
 	out := make([]string, 0, len(roles))
 	for _, r := range roles {
 		if cn, ok := labels[strings.ToUpper(r)]; ok {

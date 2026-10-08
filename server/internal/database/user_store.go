@@ -67,19 +67,25 @@ func (s *PostgresUserStore) loadRoles(ctx context.Context, u *auth.User) {
 		JOIN user_roles ur ON ur.role_id = r.id
 		WHERE ur.user_id = $1::uuid`, u.ID)
 	if err != nil {
+		if len(u.Roles) == 0 {
+			u.Roles = []string{"USER"}
+		}
 		return
 	}
 	defer rows.Close()
+	var loaded []string
 	for rows.Next() {
 		var r string
-		if err := rows.Scan(&r); err == nil {
-			u.Roles = append(u.Roles, r)
+		if err := rows.Scan(&r); err == nil && r != "" {
+			loaded = append(loaded, r)
 		}
 	}
-	if len(u.Roles) == 0 {
-		u.Roles = []string{"VIEWER"}
+	if len(loaded) == 0 {
+		loaded = []string{"USER"}
 	}
+	u.Roles = loaded
 }
+
 
 func (s *PostgresUserStore) FindByUsername(ctx context.Context, username string) (*auth.User, error) {
 	row := s.db.SQL.QueryRowContext(ctx, `
@@ -194,11 +200,18 @@ func (s *PostgresUserStore) Create(ctx context.Context, u *auth.User) error {
 	if returnedID != "" {
 		u.ID = returnedID
 	}
-	roles := u.Roles
-	if len(roles) == 0 {
-		roles = []string{"VIEWER"}
+	cleanRoles := make([]string, 0, len(u.Roles))
+	for _, r := range u.Roles {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			cleanRoles = append(cleanRoles, r)
+		}
 	}
-	return s.SetRoles(ctx, u.ID, roles)
+	if len(cleanRoles) == 0 {
+		cleanRoles = []string{"USER"}
+	}
+	u.Roles = cleanRoles
+	return s.SetRoles(ctx, u.ID, cleanRoles)
 }
 
 func (s *PostgresUserStore) createLegacy(ctx context.Context, u *auth.User) error {
@@ -247,10 +260,29 @@ func (s *PostgresUserStore) SetRoles(ctx context.Context, userID string, roles [
 		return err
 	}
 	for _, role := range roles {
-		_, _ = s.db.SQL.ExecContext(ctx, `
+		role = strings.TrimSpace(role)
+		if role == "" {
+			continue
+		}
+		res, err := s.db.SQL.ExecContext(ctx, `
 			INSERT INTO user_roles (user_id, role_id)
-			SELECT $1::uuid, id FROM roles WHERE name = $2
+			SELECT $1::uuid, id FROM roles
+			WHERE UPPER(name) = UPPER($2) OR description = $2
 			ON CONFLICT DO NOTHING`, userID, role)
+		if err == nil {
+			n, _ := res.RowsAffected()
+			if n == 0 && (strings.EqualFold(role, "USER") || role == "普通用户") {
+				// 自愈：如果 roles 表由于旧库未运行最新迁移而缺少 USER 角色，自愈补齐并关联
+				_, _ = s.db.SQL.ExecContext(ctx, `
+					INSERT INTO roles (id, name, description)
+					VALUES ('00000000-0000-0000-0000-000000000005', 'USER', '普通用户')
+					ON CONFLICT (name) DO NOTHING`)
+				_, _ = s.db.SQL.ExecContext(ctx, `
+					INSERT INTO user_roles (user_id, role_id)
+					SELECT $1::uuid, id FROM roles WHERE name = 'USER'
+					ON CONFLICT DO NOTHING`, userID)
+			}
+		}
 	}
 	return nil
 }
@@ -350,7 +382,17 @@ func (s *PostgresUserStore) ListPermissions(ctx context.Context, roles []string)
 }
 
 func (s *PostgresUserStore) ListRoles(ctx context.Context) ([]auth.RoleInfo, error) {
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT name, description FROM roles ORDER BY name`)
+	rows, err := s.db.SQL.QueryContext(ctx, `
+		SELECT name, description FROM roles
+		ORDER BY CASE name
+			WHEN 'SUPER_ADMIN' THEN 1
+			WHEN 'ADMIN' THEN 2
+			WHEN 'OPERATOR' THEN 3
+			WHEN 'USER' THEN 4
+			WHEN 'VIEWER' THEN 5
+			ELSE 100
+		END, name`)
+
 	if err != nil {
 		return nil, err
 	}
@@ -539,6 +581,25 @@ func fallbackPermissions(roles []string) []string {
 			"workflow.read", "workflow.grant",
 			"automation.read", "quota.read",
 		},
+		"USER": {
+			"employee.read", "employee.write", "employee.delete",
+			"workstation.read", "workstation.write",
+			"workspace.read", "workspace.write",
+			"session.read", "session.write",
+			"job.read", "job.write", "job.cancel",
+			"message.read", "message.write",
+			"audit.read",
+			"approval.read", "approval.approve",
+			"secret.read", "secret.write",
+			"system.read", "system.write",
+			"enrollment.write",
+			"workflow.read", "workflow.write", "workflow.delete", "workflow.grant",
+			"automation.read", "automation.write",
+			"backup.view", "backup.create", "backup.manage", "backup.destination", "backup.verify", "backup.delete", "backup.restore",
+			"user.read", "user.create", "user.update", "user.disable", "user.delete",
+			"role.read", "role.create", "role.update", "role.delete",
+			"quota.read", "quota.update",
+		},
 		"VIEWER": {
 			"employee.read", "workstation.read", "workspace.read",
 			"session.read", "job.read", "message.read",
@@ -546,6 +607,7 @@ func fallbackPermissions(roles []string) []string {
 			"workflow.read",
 			"automation.read",
 		},
+
 	}
 	seen := map[string]struct{}{}
 	var out []string

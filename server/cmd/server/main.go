@@ -476,8 +476,10 @@ func main() {
 	}()
 
 	httpHandler := api.NewRouter(api.Deps{
+		Config:          cfg,
 		Auth:            authSvc,
 		Enrollment:      enrollSvc,
+
 		CA:              ca,
 		Employees:       empSvc,
 		Workspaces:      wsSvc,

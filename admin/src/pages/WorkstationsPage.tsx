@@ -25,6 +25,9 @@ type TokenResult = {
   id: string
   expires_at: string
   label: string
+  server_port?: string
+  server_host?: string
+  server_url?: string
 }
 
 export function WorkstationsPage() {
@@ -59,7 +62,23 @@ export function WorkstationsPage() {
   const [label, setLabel] = useState('开发计算节点')
   const [ttlHours, setTtlHours] = useState(24)
   const [serverHost, setServerHost] = useState(window.location.hostname || '127.0.0.1')
-  const [serverPort, setServerPort] = useState('8080')
+  const [serverPort, setServerPort] = useState('')
+
+  // 自动从服务端加载外部真实监听端口（基于 .env 中配置的 AIE_HTTP_PORT，非写死 8080）
+  useEffect(() => {
+    void apiGet<{ server_port?: string; server_host?: string; server_url?: string }>('/enrollment/endpoint')
+      .then((ep) => {
+        if (ep.server_port) {
+          setServerPort(ep.server_port)
+        }
+        if (ep.server_host && (!serverHost || serverHost === '127.0.0.1' || serverHost === 'localhost')) {
+          setServerHost(ep.server_host)
+        }
+      })
+      .catch(() => {
+        // 请求失败时保留默认值
+      })
+  }, [])
   const [tokenResult, setTokenResult] = useState<TokenResult | null>(null)
   const [generating, setGenerating] = useState(false)
   const [tokenErr, setTokenErr] = useState('')
@@ -158,6 +177,12 @@ export function WorkstationsPage() {
         ttl_hours: Number(ttlHours) || 24,
       })
       setTokenResult(res)
+      if (res.server_port && (!serverPort || serverPort === '8080')) {
+        setServerPort(res.server_port)
+      }
+      if (res.server_host && (!serverHost || serverHost === '127.0.0.1' || serverHost === 'localhost')) {
+        setServerHost(res.server_host)
+      }
     } catch (err: unknown) {
       setTokenErr(err instanceof Error ? err.message : '生成接入令牌失败')
     } finally {
@@ -165,7 +190,9 @@ export function WorkstationsPage() {
     }
   }
 
-  const serverUrl = `http://${serverHost.trim() || '127.0.0.1'}:${serverPort.trim() || '8080'}`
+  const effectivePort = serverPort.trim() || '8080'
+  const effectiveHost = serverHost.trim() || '127.0.0.1'
+  const serverUrl = `http://${effectiveHost}:${effectivePort}`
 
   const unixCommand = tokenResult
     ? `export AIE_DATA_DIR="$HOME/.aie"
@@ -306,7 +333,8 @@ aew service status`
                   type="text"
                   value={serverPort}
                   onChange={(e) => setServerPort(e.target.value)}
-                  style={{ width: '80px', padding: '0.45rem 0.65rem' }}
+                  placeholder={serverPort || '8080'}
+                  style={{ width: '90px', padding: '0.45rem 0.65rem' }}
                   required
                 />
               </div>

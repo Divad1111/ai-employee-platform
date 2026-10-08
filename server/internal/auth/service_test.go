@@ -90,3 +90,56 @@ func TestInitAdmin(t *testing.T) {
 	}
 }
 
+func TestDefaultRoleUSER(t *testing.T) {
+	ctx := context.Background()
+	users := auth.NewMemoryUserStore()
+
+	// 1. 验证 USER 是内置角色，不可删除
+	if !auth.IsBuiltInRole("USER") {
+		t.Fatal("USER 应当是内置角色")
+	}
+	if err := users.DeleteRole(ctx, "USER"); err == nil {
+		t.Fatal("删除内置角色 USER 应当失败")
+	}
+
+	// 2. 验证 ListRoles 包含 USER，且所有权限的 Scope 均为 OWN
+	roles, err := users.ListRoles(ctx)
+	if err != nil {
+		t.Fatalf("ListRoles 失败: %v", err)
+	}
+	var userRole *auth.RoleInfo
+	for i := range roles {
+		if roles[i].Name == "USER" {
+			userRole = &roles[i]
+			break
+		}
+	}
+	if userRole == nil {
+		t.Fatal("ListRoles 中未找到 USER 角色")
+	}
+	if len(userRole.Grants) == 0 {
+		t.Fatal("USER 角色的权限列表不应为空")
+	}
+	for _, g := range userRole.Grants {
+		if g.Scope != "OWN" {
+			t.Fatalf("USER 角色的权限 %s 的 Scope 期望为 OWN，实际为 %s", g.Code, g.Scope)
+		}
+	}
+
+	// 3. 验证新建用户不填角色时默认赋 USER 角色
+	hash, _ := auth.HashPassword("pwd123456")
+	u := &auth.User{
+		Username:     "regular_user",
+		PasswordHash: hash,
+		DisplayName:  "Regular",
+		Status:       auth.StatusActive,
+	}
+	if err := users.Create(ctx, u); err != nil {
+		t.Fatalf("Create 用户失败: %v", err)
+	}
+	if len(u.Roles) != 1 || u.Roles[0] != "USER" {
+		t.Fatalf("用户默认角色期望为 USER，实际为 %v", u.Roles)
+	}
+}
+
+

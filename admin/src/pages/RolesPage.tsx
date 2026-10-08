@@ -10,7 +10,8 @@ import { SearchableSelect } from '../components/SearchableSelect'
 import { permLabel, roleDisplayName, SCOPE_LABEL, SCOPE_OPTIONS } from '../lib/rbacLabels'
 import { usePerm } from '../stores/permissions'
 
-const BUILTIN_ROLES = new Set(['SUPER_ADMIN', 'ADMIN', 'OPERATOR', 'VIEWER'])
+const BUILTIN_ROLES = new Set(['SUPER_ADMIN', 'ADMIN', 'OPERATOR', 'USER', 'VIEWER'])
+
 
 type Grant = { code?: string; Code?: string; scope?: string; Scope?: string }
 type Role = { name: string; description: string; grants: Grant[] }

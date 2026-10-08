@@ -22,7 +22,9 @@ import (
 	"github.com/ai-employee-platform/server/internal/automation"
 	"github.com/ai-employee-platform/server/internal/backup"
 	"github.com/ai-employee-platform/server/internal/certca"
+	"github.com/ai-employee-platform/server/internal/config"
 	"github.com/ai-employee-platform/server/internal/employee"
+
 	"github.com/ai-employee-platform/server/internal/enrollment"
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/feishu"
@@ -46,7 +48,9 @@ import (
 
 // Deps HTTP API 依赖。
 type Deps struct {
+	Config          *config.Config
 	Auth            *auth.Service
+
 	Enrollment      *enrollment.Service
 	CA              *certca.Authority
 	Employees       *employee.Service
@@ -122,8 +126,10 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("PUT /api/quotas", d.requirePerm("quota.update", d.handleUpsertQuota))
 	mux.HandleFunc("DELETE /api/quotas", d.requirePerm("quota.update", d.handleDeleteQuota))
 
+	mux.HandleFunc("GET /api/enrollment/endpoint", d.handleEnrollmentEndpoint)
 	mux.HandleFunc("POST /api/enrollment/tokens", d.requirePerm("enrollment.write", d.handleCreateToken))
 	mux.HandleFunc("POST /api/enrollment/enroll", d.handleEnroll)
+
 	mux.HandleFunc("POST /api/workstations/certificates/revoke", d.requirePermStepUp("workstation.write", d.handleRevoke))
 	mux.HandleFunc("GET /api/system/ca", d.requirePerm("system.read", d.handleGetCA))
 
@@ -485,6 +491,51 @@ type createTokenReq struct {
 	TTLHours int    `json:"ttl_hours"`
 }
 
+func (d Deps) resolveEnrollmentEndpoint(r *http.Request) (port, host, urlStr, grpcPort string) {
+	port = "8080"
+	if d.Config != nil && d.Config.PublicHTTPPort != "" {
+		port = d.Config.PublicHTTPPort
+	}
+	grpcPort = "9090"
+	if d.Config != nil && d.Config.PublicGRPCPort != "" {
+		grpcPort = d.Config.PublicGRPCPort
+	}
+	urlStr = ""
+	if d.Config != nil {
+		urlStr = d.Config.PublicServerURL
+	}
+	host = detectHost(r)
+	if urlStr == "" && port != "" {
+		urlStr = fmt.Sprintf("http://%s:%s", host, port)
+	}
+	return
+}
+
+func detectHost(r *http.Request) string {
+	h := r.Header.Get("X-Forwarded-Host")
+	if h == "" {
+		h = r.Host
+	}
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host
+	}
+	h = strings.TrimSpace(h)
+	if h == "" || h == "localhost" || h == "127.0.0.1" || h == "control-plane" {
+		return "127.0.0.1"
+	}
+	return h
+}
+
+func (d Deps) handleEnrollmentEndpoint(w http.ResponseWriter, r *http.Request) {
+	serverPort, serverHost, serverURL, grpcPort := d.resolveEnrollmentEndpoint(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"server_port": serverPort,
+		"server_host": serverHost,
+		"server_url":  serverURL,
+		"grpc_port":   grpcPort,
+	})
+}
+
 func (d Deps) handleCreateToken(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var req createTokenReq
 	_ = json.NewDecoder(r.Body).Decode(&req)
@@ -497,10 +548,18 @@ func (d Deps) handleCreateToken(w http.ResponseWriter, r *http.Request, sess *au
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	serverPort, serverHost, serverURL, _ := d.resolveEnrollmentEndpoint(r)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"token": plain, "id": meta.ID, "expires_at": meta.ExpiresAt, "label": meta.Label,
+		"token":       plain,
+		"id":          meta.ID,
+		"expires_at":  meta.ExpiresAt,
+		"label":       meta.Label,
+		"server_port": serverPort,
+		"server_host": serverHost,
+		"server_url":  serverURL,
 	})
 }
+
 
 type enrollReq struct {
 	Token         string `json:"token"`

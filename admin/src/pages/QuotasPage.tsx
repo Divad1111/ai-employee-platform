@@ -28,9 +28,11 @@ type RoleItem = { name: string; description: string }
 
 const PRESET_HINTS: Record<string, string> = {
   VIEWER: '只读角色默认月度 Token',
+  USER: '普通用户角色默认月度 Token',
   OPERATOR: '操作员角色默认月度 Token',
   ADMIN: '管理员角色默认月度 Token',
 }
+
 
 export function QuotasPage() {
   const { can } = usePerm()
@@ -81,10 +83,12 @@ export function QuotasPage() {
       const src = roles.length
         ? roles
         : [
+            { name: 'USER', description: '普通用户' },
             { name: 'VIEWER', description: '只读' },
             { name: 'OPERATOR', description: '操作员' },
             { name: 'ADMIN', description: '管理员' },
           ]
+
       return src
         .filter((r) => r.name !== 'SUPER_ADMIN')
         .map((r) => ({

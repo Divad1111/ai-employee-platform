@@ -38,9 +38,11 @@ export function roleDisplayName(name: string, description?: string) {
     SUPER_ADMIN: '超级管理员',
     ADMIN: '管理员',
     OPERATOR: '操作员',
+    USER: '普通用户',
     VIEWER: '只读',
   }
   return map[name] || name
+
 }
 
 const PERM_DESCRIPTIONS: Record<string, string> = {

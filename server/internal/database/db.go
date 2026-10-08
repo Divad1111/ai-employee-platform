@@ -49,7 +49,7 @@ func (db *DB) Close() error {
 	return db.SQL.Close()
 }
 
-// ensureHelperTables 保证 Web 会话持久化表等辅助表结构存在。
+// ensureHelperTables 保证 Web 会话持久化表等辅助表结构存在，并在存在 roles 表时自愈补全默认角色。
 func (db *DB) ensureHelperTables() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS admin_web_sessions (
@@ -61,8 +61,31 @@ func (db *DB) ensureHelperTables() error {
 		step_up_until TIMESTAMPTZ
 	);
 	`
-	_, err := db.SQL.Exec(schema)
-	return err
+	if _, err := db.SQL.Exec(schema); err != nil {
+		return err
+	}
+
+	// 自愈保护：若 roles 表存在，确保内置角色（尤其是默认 USER 角色）就绪
+	_, _ = db.SQL.Exec(`
+		INSERT INTO roles (id, name, description) VALUES
+			('00000000-0000-0000-0000-000000000001', 'SUPER_ADMIN', '超级管理员'),
+			('00000000-0000-0000-0000-000000000002', 'ADMIN', '管理员'),
+			('00000000-0000-0000-0000-000000000003', 'OPERATOR', '操作员'),
+			('00000000-0000-0000-0000-000000000004', 'VIEWER', '只读'),
+			('00000000-0000-0000-0000-000000000005', 'USER', '普通用户')
+		ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description;
+	`)
+
+	// 确保 USER 角色赋权全量 permissions 且 Scope 为 OWN
+	_, _ = db.SQL.Exec(`
+		INSERT INTO role_permissions (role_id, permission_id, scope)
+		SELECT r.id, p.id, 'OWN'
+		FROM roles r
+		CROSS JOIN permissions p
+		WHERE r.name = 'USER'
+		ON CONFLICT (role_id, permission_id) DO UPDATE SET scope = 'OWN';
+	`)
+	return nil
 }
 
 func (db *DB) NewUserStore() auth.UserStore {

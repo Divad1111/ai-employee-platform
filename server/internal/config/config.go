@@ -2,9 +2,12 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
+	"strings"
 )
+
 
 // Version 为 Control Plane 构建版本号（后续可由 ldflags 注入）。
 const Version = "0.0.1-dev"
@@ -19,6 +22,12 @@ type Config struct {
 	GRPCAddr string
 	// DatabaseURL PostgreSQL 连接串（Secret 勿写入仓库）
 	DatabaseURL string
+	// PublicHTTPPort 宿主机/外部访问的 HTTP 端口（优先取 AIE_HTTP_PORT，缺省从 HTTPAddr 提取）
+	PublicHTTPPort string
+	// PublicGRPCPort 宿主机/外部访问的 gRPC 端口（优先取 AIE_GRPC_PORT）
+	PublicGRPCPort string
+	// PublicServerURL 外部完整访问地址（如 http://192.168.1.100:9080，可选）
+	PublicServerURL string
 }
 
 // Load 从环境变量加载配置，缺省使用开发默认值。
@@ -29,8 +38,20 @@ func Load() (*Config, error) {
 		GRPCAddr:    getenv("AIE_GRPC_ADDR", ":9090"),
 		DatabaseURL: LoadDatabaseDSN(),
 	}
+	httpPort := getenv("AIE_HTTP_PORT", "")
+	if httpPort == "" {
+		if _, p, err := net.SplitHostPort(cfg.HTTPAddr); err == nil {
+			httpPort = p
+		} else {
+			httpPort = strings.TrimPrefix(cfg.HTTPAddr, ":")
+		}
+	}
+	cfg.PublicHTTPPort = httpPort
+	cfg.PublicGRPCPort = getenv("AIE_GRPC_PORT", "9090")
+	cfg.PublicServerURL = getenv("AIE_PUBLIC_SERVER_URL", "")
 	return cfg, nil
 }
+
 
 // LoadDatabaseDSN 加载 PostgreSQL DSN。
 // 优先使用 AIE_DATABASE_URL；若未设置，则根据 POSTGRES_* 环境变量进行安全 URL 编码组装，
