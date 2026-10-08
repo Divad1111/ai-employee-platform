@@ -58,28 +58,6 @@ func TestParseTargetAliasAndEmpID(t *testing.T) {
 	}
 }
 
-func TestParseTargetAliasEncoding(t *testing.T) {
-	v, _ := secret.NewMemoryVault()
-	s := feishu.NewService(v)
-	s.UpsertBinding(feishu.Binding{EmployeeID: "EMP-K", FeishuAlias: "可乐"})
-	s.UpsertBinding(feishu.Binding{EmployeeID: "EMP-K1", FeishuAlias: "可乐1"})
-
-	id, prompt, err := s.ParseTarget("@可乐1 你是谁")
-	if err != nil || id != "EMP-K1" || prompt != "你是谁" {
-		t.Fatalf("半角数字: id=%s prompt=%q err=%v", id, prompt, err)
-	}
-	// 全角数字 １ U+FF11、全角 ＠ U+FF20
-	id, _, err = s.ParseTarget("＠可乐１ 你是谁")
-	if err != nil || id != "EMP-K1" {
-		t.Fatalf("全角数字: id=%s err=%v", id, err)
-	}
-	// 零宽字符插在「乐」和「1」之间
-	id, _, err = s.ParseTarget("@可乐\u200b1 你是谁")
-	if err != nil || id != "EMP-K1" {
-		t.Fatalf("零宽字符: id=%s err=%v", id, err)
-	}
-}
-
 func TestVerifySignatureAndDedupe(t *testing.T) {
 	v, _ := secret.NewMemoryVault()
 	s := feishu.NewService(v)

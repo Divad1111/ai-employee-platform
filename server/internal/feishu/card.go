@@ -207,8 +207,7 @@ func BuildMentionRequiredCard(aliases []string) *Card {
 	sb.WriteString("请 **@对应员工** 后再发送任务，否则无法派单执行。\n\n")
 	sb.WriteString("**派发格式示例：**\n")
 	if len(aliases) > 0 {
-		// 全角 ＠ 避免飞书把 @别名 渲染成提及后吞掉尾部数字。
-		sb.WriteString(fmt.Sprintf("• `＠%s 任务需求`\n", aliases[0]))
+		sb.WriteString(fmt.Sprintf("• `@%s 任务需求`\n", aliases[0]))
 		sb.WriteString(fmt.Sprintf("• `/emp %s 任务需求`\n", aliases[0]))
 	} else {
 		sb.WriteString("• `@数字员工别名 任务需求`\n")
@@ -216,13 +215,12 @@ func BuildMentionRequiredCard(aliases []string) *Card {
 	}
 	sb.WriteString("• `EMP-xxxx 任务需求`\n\n")
 	if len(aliases) > 0 {
-		sb.WriteString("**当前可呼叫的员工别名：** ")
+		sb.WriteString("**当前可 @ 的员工别名：** ")
 		for i, a := range aliases {
 			if i > 0 {
 				sb.WriteString("、")
 			}
-			// 不用 @别名：飞书卡片会把 @可乐1 当成提及，数字会被吃掉，看起来只剩 @可乐。
-			sb.WriteString("「" + a + "」")
+			sb.WriteString("`@" + a + "`")
 		}
 		sb.WriteString("\n\n")
 	}

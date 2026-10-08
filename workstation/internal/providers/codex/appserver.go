@@ -111,7 +111,6 @@ func (s *appServerSession) Start(ctx context.Context) error {
 		return err
 	}
 	cmd.Stderr = io.Discard
-	applyCodexEnv(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动 Codex app-server 失败: %w", err)
 	}

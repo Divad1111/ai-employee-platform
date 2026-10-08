@@ -444,9 +444,6 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			}
 			if rerr != nil {
 				msg := rerr.Error()
-				if strings.Contains(msg, "401") && strings.Contains(msg, "api.openai.com") {
-					msg += "。Codex 未登录：aew 以 Windows 服务账户运行，看不到你桌面用户里的 codex login。请在运行该服务的同一账户执行 `codex login`，或把服务登录账户改成已经登录过 Codex 的用户后重启服务。"
-				}
 				usage["error"] = msg
 				pl, _ := json.Marshal(usage)
 				_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_FAILED, string(pl)))
