@@ -69,9 +69,19 @@ func (d Deps) handlePutSecret(w http.ResponseWriter, r *http.Request, sess *auth
 	writeJSON(w, http.StatusCreated, map[string]any{"id": ref.ID, "name": ref.Name, "masked": "***"})
 }
 
-func (d Deps) handleListSecrets(w http.ResponseWriter, _ *http.Request, _ *auth.Session) {
+func (d Deps) handleListSecrets(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.SecretMgr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"items": d.SecretMgr.ListMeta()})
+		items := d.SecretMgr.ListMeta()
+		if !d.scopeAll(r, sess, "secret.read") {
+			out := items[:0]
+			for _, item := range items {
+				if sess != nil && item.CreatedBy == sess.UserID {
+					out = append(out, item)
+				}
+			}
+			items = out
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 		return
 	}
 	items := d.Secrets.List()
@@ -82,7 +92,7 @@ func (d Deps) handleListSecrets(w http.ResponseWriter, _ *http.Request, _ *auth.
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
-func (d Deps) handleGetSecret(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleGetSecret(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.SecretMgr == nil {
 		writeErr(w, http.StatusServiceUnavailable, "secret manager 未启用")
 		return
@@ -92,12 +102,25 @@ func (d Deps) handleGetSecret(w http.ResponseWriter, r *http.Request, _ *auth.Se
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
+	if !d.scopeAll(r, sess, "secret.read") && (sess == nil || meta.CreatedBy != sess.UserID) {
+		writeErr(w, http.StatusNotFound, "secret 不存在")
+		return
+	}
 	writeJSON(w, http.StatusOK, meta)
 }
 
 func (d Deps) handleDeleteSecret(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.SecretMgr == nil {
 		writeErr(w, http.StatusServiceUnavailable, "secret manager 未启用")
+		return
+	}
+	meta, err := d.SecretMgr.GetMeta(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !d.scopeAll(r, sess, "secret.write") && meta.CreatedBy != sess.UserID {
+		writeErr(w, http.StatusForbidden, "无权删除该密钥")
 		return
 	}
 	if err := d.SecretMgr.Delete(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r)); err != nil {
@@ -121,6 +144,13 @@ func (d Deps) handleBindSecret(w http.ResponseWriter, r *http.Request, sess *aut
 		writeErr(w, http.StatusBadRequest, "需要 employee_id/secret_id")
 		return
 	}
+	if !d.scopeAll(r, sess, "secret.write") {
+		meta, err := d.SecretMgr.GetMeta(body.SecretID)
+		if err != nil || meta.CreatedBy != sess.UserID || !d.employeeOwnedBy(r, sess, body.EmployeeID, "secret.write") {
+			writeErr(w, http.StatusForbidden, "只能把自己的密钥绑定到自己的数字员工")
+			return
+		}
+	}
 	b, err := d.SecretMgr.Bind(r.Context(), body.EmployeeID, body.SecretID, body.Purpose, sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -135,6 +165,10 @@ func (d Deps) handleResolveSecrets(w http.ResponseWriter, r *http.Request, sess 
 		return
 	}
 	empID := r.PathValue("employee_id")
+	if !d.employeeOwnedBy(r, sess, empID, "secret.read") {
+		writeErr(w, http.StatusForbidden, "无权解析该数字员工的密钥")
+		return
+	}
 	resolved, err := d.SecretMgr.ResolveForEmployee(r.Context(), empID, "USER", sess.UserID, clientIP(r))
 	if err != nil {
 		// 不回显 Secret
@@ -163,6 +197,13 @@ func (d Deps) handleRotateSecret(w http.ResponseWriter, r *http.Request, sess *a
 		return
 	}
 	sid := r.PathValue("id")
+	if meta, err := d.SecretMgr.GetMeta(sid); err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	} else if !d.scopeAll(r, sess, "secret.write") && meta.CreatedBy != sess.UserID {
+		writeErr(w, http.StatusForbidden, "无权轮换该密钥")
+		return
+	}
 	// CRITICAL：credential.rotate — 无 TOTP 配置则 DENY
 	dcs, ar, err := d.Approvals.EvaluateAndMaybeCreate(r.Context(), permission.Request{
 		ActorType: "USER", ActorID: sess.UserID, Action: permission.ActionCredentialRot,
@@ -187,13 +228,17 @@ func (d Deps) handleRotateSecret(w http.ResponseWriter, r *http.Request, sess *a
 	writeJSON(w, http.StatusOK, meta)
 }
 
-func (d Deps) handleAuditExport(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleAuditExport(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 {
 		limit = 500
 	}
+	actor := r.URL.Query().Get("actor")
+	if !d.scopeAll(r, sess, "audit.read") && sess != nil {
+		actor = sess.UserID
+	}
 	b, err := d.Audit.ExportJSON(audit.Filter{
-		Actor:        r.URL.Query().Get("actor"),
+		Actor:        actor,
 		Action:       r.URL.Query().Get("action"),
 		ActionPrefix: r.URL.Query().Get("prefix"),
 		TargetType:   r.URL.Query().Get("target_type"),

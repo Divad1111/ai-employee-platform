@@ -63,19 +63,32 @@ func (d Deps) handleEvaluatePermission(w http.ResponseWriter, r *http.Request, s
 	writeJSON(w, http.StatusOK, map[string]any{"decision": d.Permission.Decide(r.Context(), req)})
 }
 
-func (d Deps) handleListApprovals(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListApprovals(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	list, err := d.Approvals.List(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if !d.scopeAll(r, sess, "approval.read") {
+		out := list[:0]
+		for _, ar := range list {
+			if d.canSeeApproval(r, sess, ar, "approval.read") {
+				out = append(out, ar)
+			}
+		}
+		list = out
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": list})
 }
 
-func (d Deps) handleGetApproval(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleGetApproval(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	ar, err := d.Approvals.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !d.canSeeApproval(r, sess, ar, "approval.read") {
+		writeErr(w, http.StatusNotFound, "approval 不存在")
 		return
 	}
 	writeJSON(w, http.StatusOK, ar)
@@ -86,6 +99,15 @@ func (d Deps) handleApprove(w http.ResponseWriter, r *http.Request, sess *auth.S
 		TOTP string `json:"totp"`
 	}
 	_ = decodeJSON(r, &body)
+	cur, err := d.Approvals.Get(r.Context(), r.PathValue("id"))
+	if err != nil || cur == nil {
+		writeErr(w, http.StatusNotFound, "approval 不存在")
+		return
+	}
+	if !d.canSeeApproval(r, sess, cur, "approval.approve") {
+		writeErr(w, http.StatusForbidden, "无权审批该请求")
+		return
+	}
 	ar, err := d.Approvals.Approve(r.Context(), r.PathValue("id"), sess.UserID, body.TOTP, clientIP(r))
 	if err != nil {
 		code := http.StatusBadRequest
@@ -99,6 +121,15 @@ func (d Deps) handleApprove(w http.ResponseWriter, r *http.Request, sess *auth.S
 }
 
 func (d Deps) handleRejectApproval(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	cur, err := d.Approvals.Get(r.Context(), r.PathValue("id"))
+	if err != nil || cur == nil {
+		writeErr(w, http.StatusNotFound, "approval 不存在")
+		return
+	}
+	if !d.canSeeApproval(r, sess, cur, "approval.approve") {
+		writeErr(w, http.StatusForbidden, "无权审批该请求")
+		return
+	}
 	ar, err := d.Approvals.Reject(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())

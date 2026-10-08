@@ -35,8 +35,8 @@ const PRESET_HINTS: Record<string, string> = {
 
 
 export function QuotasPage() {
-  const { can } = usePerm()
-  const canUpdate = can('quota.update')
+  const { canAll } = usePerm()
+  const canUpdate = canAll('quota.update')
   const [items, setItems] = useState<Policy[]>([])
   const [err, setErr] = useState('')
   const [msg, setMsg] = useState('')

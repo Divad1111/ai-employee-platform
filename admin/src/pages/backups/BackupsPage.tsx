@@ -65,13 +65,13 @@ function formatDuration(ms: number): string {
 }
 
 export function BackupsPage() {
-  const { can } = usePerm()
-  const canManage = can('backup.manage')
-  const canCreate = can('backup.create')
-  const canDest = can('backup.destination')
-  const canVerify = can('backup.verify')
-  const canDelete = can('backup.delete')
-  const canRestore = can('backup.restore')
+  const { canAll } = usePerm()
+  const canManage = canAll('backup.manage')
+  const canCreate = canAll('backup.create')
+  const canDest = canAll('backup.destination')
+  const canVerify = canAll('backup.verify')
+  const canDelete = canAll('backup.delete')
+  const canRestore = canAll('backup.restore')
 
   const [tab, setTab] = useState<Tab>('overview')
   const [loading, setLoading] = useState(false)

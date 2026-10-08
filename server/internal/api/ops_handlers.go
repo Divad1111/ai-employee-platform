@@ -19,7 +19,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/registry"
 )
 
-func (d Deps) handleListArtifacts(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListArtifacts(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.Artifacts == nil {
 		writeErr(w, http.StatusServiceUnavailable, "artifacts 未启用")
 		return
@@ -36,6 +36,15 @@ func (d Deps) handleListArtifacts(w http.ResponseWriter, r *http.Request, _ *aut
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if !d.scopeAll(r, sess, "job.read") {
+		out := list[:0]
+		for _, a := range list {
+			if d.artifactVisible(r, sess, a, "job.read") {
+				out = append(out, a)
+			}
+		}
+		list = out
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": list})
 }
 
@@ -51,6 +60,13 @@ func (d Deps) handleUploadArtifact(w http.ResponseWriter, r *http.Request, sess 
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if !d.scopeAll(r, sess, "job.write") {
+		j, jerr := d.Jobs.Get(r.Context(), jobID)
+		if jerr != nil || j == nil || !d.canAccessJob(r, sess, j, "job.write") {
+			writeErr(w, http.StatusForbidden, "无权为该任务上传制品")
+			return
+		}
 	}
 	a, dedup, err := d.Artifacts.PutSecure(r.Context(), artifact.PutInput{
 		JobID: jobID, Name: name, Type: typ, Body: body,
@@ -159,10 +175,15 @@ func (d Deps) handleWorkstationUploadArtifact(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusCreated, map[string]any{"artifact": a, "deduplicated": dedup})
 }
 
-func (d Deps) handleDownloadArtifact(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleDownloadArtifact(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	rc, a, err := d.Artifacts.Open(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !d.artifactVisible(r, sess, a, "job.read") {
+		rc.Close()
+		writeErr(w, http.StatusNotFound, "制品不存在")
 		return
 	}
 	defer rc.Close()

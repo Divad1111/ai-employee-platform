@@ -12,7 +12,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/automation"
 )
 
-func (d Deps) handleListAutomations(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListAutomations(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.Automation == nil {
 		writeErr(w, http.StatusServiceUnavailable, "automation 未启用")
 		return
@@ -22,6 +22,15 @@ func (d Deps) handleListAutomations(w http.ResponseWriter, r *http.Request, _ *a
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if !d.scopeAll(r, sess, "automation.read") {
+		out := list[:0]
+		for _, a := range list {
+			if a != nil && sess != nil && a.CreatedBy == sess.UserID {
+				out = append(out, a)
+			}
+		}
+		list = out
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": list})
 }
@@ -52,7 +61,7 @@ func (d Deps) handleCreateAutomation(w http.ResponseWriter, r *http.Request, ses
 	writeJSON(w, http.StatusCreated, out)
 }
 
-func (d Deps) handleGetAutomation(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleGetAutomation(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.Automation == nil {
 		writeErr(w, http.StatusServiceUnavailable, "automation 未启用")
 		return
@@ -60,6 +69,10 @@ func (d Deps) handleGetAutomation(w http.ResponseWriter, r *http.Request, _ *aut
 	a, err := d.Automation.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !d.scopeAll(r, sess, "automation.read") && (sess == nil || a.CreatedBy != sess.UserID) {
+		writeErr(w, http.StatusNotFound, "automation 不存在")
 		return
 	}
 	writeJSON(w, http.StatusOK, a)
@@ -73,6 +86,15 @@ func (d Deps) handleUpdateAutomation(w http.ResponseWriter, r *http.Request, ses
 	var in automation.UpdateInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效 JSON")
+		return
+	}
+	cur, err := d.Automation.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !d.scopeAll(r, sess, "automation.write") && cur.CreatedBy != sess.UserID {
+		writeErr(w, http.StatusForbidden, "无权修改该自动化")
 		return
 	}
 	a, err := d.Automation.Update(r.Context(), r.PathValue("id"), in, sess.UserID)
@@ -96,6 +118,15 @@ func (d Deps) handleDeleteAutomation(w http.ResponseWriter, r *http.Request, ses
 		writeErr(w, http.StatusServiceUnavailable, "automation 未启用")
 		return
 	}
+	cur, err := d.Automation.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !d.scopeAll(r, sess, "automation.write") && cur.CreatedBy != sess.UserID {
+		writeErr(w, http.StatusForbidden, "无权删除该自动化")
+		return
+	}
 	if err := d.Automation.Delete(r.Context(), r.PathValue("id"), sess.UserID); err != nil {
 		if errors.Is(err, automation.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, err.Error())
@@ -107,9 +138,12 @@ func (d Deps) handleDeleteAutomation(w http.ResponseWriter, r *http.Request, ses
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-func (d Deps) handleListCalendarItems(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListCalendarItems(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.Automation == nil {
 		writeErr(w, http.StatusServiceUnavailable, "automation 未启用")
+		return
+	}
+	if !d.allowAutomation(w, r, sess, r.PathValue("id"), "automation.read") {
 		return
 	}
 	runDate := r.URL.Query().Get("date")
@@ -124,6 +158,9 @@ func (d Deps) handleListCalendarItems(w http.ResponseWriter, r *http.Request, _ 
 func (d Deps) handlePutCalendarItems(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.Automation == nil {
 		writeErr(w, http.StatusServiceUnavailable, "automation 未启用")
+		return
+	}
+	if !d.allowAutomation(w, r, sess, r.PathValue("id"), "automation.write") {
 		return
 	}
 	var body struct {
@@ -152,9 +189,12 @@ func (d Deps) handlePutCalendarItems(w http.ResponseWriter, r *http.Request, ses
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-func (d Deps) handleListAutomationRuns(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListAutomationRuns(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.Automation == nil {
 		writeErr(w, http.StatusServiceUnavailable, "automation 未启用")
+		return
+	}
+	if !d.allowAutomation(w, r, sess, r.PathValue("id"), "automation.read") {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -221,4 +261,17 @@ func (d Deps) handleAutomationWebhook(w http.ResponseWriter, r *http.Request) {
 		out["job_id"] = j.ID
 	}
 	writeJSON(w, http.StatusAccepted, out)
+}
+
+func (d Deps) allowAutomation(w http.ResponseWriter, r *http.Request, sess *auth.Session, id, perm string) bool {
+	a, err := d.Automation.Get(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "automation 不存在")
+		return false
+	}
+	if !d.scopeAll(r, sess, perm) && (sess == nil || a.CreatedBy != sess.UserID) {
+		writeErr(w, http.StatusForbidden, "无权访问该自动化")
+		return false
+	}
+	return true
 }

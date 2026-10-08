@@ -7,6 +7,7 @@ import { PageFeatureGuide } from '../../components/PageFeatureGuide'
 import { EntityName } from '../../components/EntityName'
 import { IconBook, IconPackage, IconZap } from '../../components/Icons'
 import { CodeEditor } from '../../components/CodeEditor'
+import { usePerm } from '../../stores/permissions'
 import {
   deleteKnowledge,
   deleteSkill,
@@ -91,6 +92,9 @@ function hitToDoc(h: SearchHit): KnowledgeDoc {
 }
 
 export function WorkflowMcpPage() {
+  const { canAll } = usePerm()
+  const catalogWrite = canAll('workflow.write')
+  const catalogDelete = canAll('workflow.delete')
   const [tab, setTab] = useState<Tab>('workflows')
   const [q, setQ] = useState('')
   const [err, setErr] = useState('')
@@ -564,6 +568,7 @@ export function WorkflowMcpPage() {
                             <button type="button" className="btn-ghost btn-sm" onClick={() => void openWorkflow(w.id)}>
                               编辑
                             </button>
+                            {catalogDelete ? (
                             <button
                               type="button"
                               className="btn-danger btn-sm"
@@ -571,6 +576,7 @@ export function WorkflowMcpPage() {
                             >
                               删除
                             </button>
+                            ) : null}
                           </div>
                         </td>
                       </tr>
@@ -588,6 +594,7 @@ export function WorkflowMcpPage() {
                             <button type="button" className="btn-ghost btn-sm" onClick={() => void openSkill(s.id)}>
                               编辑
                             </button>
+                            {catalogDelete ? (
                             <button
                               type="button"
                               className="btn-danger btn-sm"
@@ -595,6 +602,7 @@ export function WorkflowMcpPage() {
                             >
                               删除
                             </button>
+                            ) : null}
                           </div>
                         </td>
                       </tr>
@@ -612,6 +620,7 @@ export function WorkflowMcpPage() {
                             <button type="button" className="btn-ghost btn-sm" onClick={() => void openDoc(d.id)}>
                               编辑
                             </button>
+                            {catalogDelete ? (
                             <button
                               type="button"
                               className="btn-danger btn-sm"
@@ -619,6 +628,7 @@ export function WorkflowMcpPage() {
                             >
                               删除
                             </button>
+                            ) : null}
                           </div>
                         </td>
                       </tr>
@@ -667,9 +677,11 @@ export function WorkflowMcpPage() {
                 </span>
               </div>
               <div className="table-actions" style={{ display: 'flex', gap: '0.5rem' }}>
+                {catalogWrite ? (
                 <button type="submit" className="btn-sm">
                   保存
                 </button>
+                ) : null}
                 <button
                   type="button"
                   className="btn-ghost btn-sm"

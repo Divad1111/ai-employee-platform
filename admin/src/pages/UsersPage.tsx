@@ -26,10 +26,10 @@ type UserRow = {
 type RoleItem = { name: string; description: string }
 
 export function UsersPage() {
-  const { can } = usePerm()
-  const canCreate = can('user.create')
-  const canDisable = can('user.disable')
-  const canDelete = can('user.delete')
+  const { canAll } = usePerm()
+  const canCreate = canAll('user.create')
+  const canDisable = canAll('user.disable')
+  const canDelete = canAll('user.delete')
   const [items, setItems] = useState<UserRow[]>([])
   const [roles, setRoles] = useState<RoleItem[]>([])
   const [err, setErr] = useState('')

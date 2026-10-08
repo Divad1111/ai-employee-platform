@@ -25,9 +25,9 @@ function grantScope(g: Grant) {
 }
 
 export function RolesPage() {
-  const { can } = usePerm()
-  const canCreate = can('role.create') || can('role.update')
-  const canDelete = can('role.delete')
+  const { canAll } = usePerm()
+  const canCreate = canAll('role.create') || canAll('role.update')
+  const canDelete = canAll('role.delete')
   const [roles, setRoles] = useState<Role[]>([])
   const [permMap, setPermMap] = useState<Record<string, string>>({})
   const [err, setErr] = useState('')

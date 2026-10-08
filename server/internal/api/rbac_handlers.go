@@ -303,7 +303,7 @@ func (d Deps) handleMeEnhanced(w http.ResponseWriter, r *http.Request, sess *aut
 	})
 }
 
-func (d Deps) handleListUsers(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListUsers(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	list, err := d.Auth.Users().List(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -311,6 +311,9 @@ func (d Deps) handleListUsers(w http.ResponseWriter, r *http.Request, _ *auth.Se
 	}
 	items := make([]map[string]any, 0, len(list))
 	for _, u := range list {
+		if !d.scopeAll(r, sess, "user.read") && (sess == nil || u.ID != sess.UserID) {
+			continue
+		}
 		wsCount, empCount := 0, 0
 		if d.WSMembers != nil {
 			ms, _ := d.WSMembers.ListByUser(r.Context(), u.ID)
@@ -389,9 +392,13 @@ func (d Deps) handleCreateUser(w http.ResponseWriter, r *http.Request, sess *aut
 	})
 }
 
-func (d Deps) handleGetUser(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleGetUser(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	u, err := d.Auth.Users().FindByID(r.Context(), r.PathValue("id"))
 	if err != nil || u == nil {
+		writeErr(w, http.StatusNotFound, "用户不存在")
+		return
+	}
+	if !d.scopeAll(r, sess, "user.read") && (sess == nil || u.ID != sess.UserID) {
 		writeErr(w, http.StatusNotFound, "用户不存在")
 		return
 	}
@@ -459,6 +466,10 @@ func (d Deps) handlePatchUser(w http.ResponseWriter, r *http.Request, sess *auth
 	// 1. 若目标账号是超级管理员，操作者必须也是超级管理员
 	if containsRole(u.Roles, "SUPER_ADMIN") && !isSuperAdmin(sess) {
 		writeErr(w, http.StatusForbidden, "只有超级管理员可以修改超级管理员账号")
+		return
+	}
+	if !d.scopeAll(r, sess, "user.update") && u.ID != sess.UserID {
+		writeErr(w, http.StatusForbidden, "无权修改其他用户")
 		return
 	}
 	oldName, oldEmail := u.DisplayName, u.Email
@@ -566,6 +577,10 @@ func (d Deps) handleDeleteUser(w http.ResponseWriter, r *http.Request, sess *aut
 		writeErr(w, http.StatusForbidden, "只有超级管理员可以删除超级管理员账号")
 		return
 	}
+	if !d.scopeAll(r, sess, "user.delete") && u.ID != sess.UserID {
+		writeErr(w, http.StatusForbidden, "无权删除其他用户")
+		return
+	}
 	if err := d.Auth.Users().SoftDelete(r.Context(), id); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -587,6 +602,10 @@ func (d Deps) setUserStatus(w http.ResponseWriter, r *http.Request, sess *auth.S
 		return
 	}
 	oldStatus := u.Status
+	if !d.scopeAll(r, sess, "user.disable") && u.ID != sess.UserID {
+		writeErr(w, http.StatusForbidden, "无权变更其他用户状态")
+		return
+	}
 	if u.ID == sess.UserID && status == auth.StatusDisabled {
 		writeErr(w, http.StatusBadRequest, "不能禁用当前登录用户")
 		return
@@ -614,11 +633,24 @@ func (d Deps) setUserStatus(w http.ResponseWriter, r *http.Request, sess *auth.S
 	writeJSON(w, http.StatusOK, map[string]any{"id": u.ID, "status": u.Status})
 }
 
-func (d Deps) handleListRoles(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListRoles(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	roles, err := d.Auth.Users().ListRoles(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if !d.scopeAll(r, sess, "role.read") && sess != nil {
+		mine := map[string]struct{}{}
+		for _, name := range sess.Roles {
+			mine[name] = struct{}{}
+		}
+		filtered := roles[:0]
+		for _, role := range roles {
+			if _, ok := mine[role.Name]; ok {
+				filtered = append(filtered, role)
+			}
+		}
+		roles = filtered
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": roles})
 }
@@ -1001,7 +1033,7 @@ func (d Deps) handleRemoveWSMember(w http.ResponseWriter, r *http.Request, sess 
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
-func (d Deps) handleListQuotas(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListQuotas(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.Quota == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
 		return
@@ -1010,6 +1042,15 @@ func (d Deps) handleListQuotas(w http.ResponseWriter, r *http.Request, _ *auth.S
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if !d.scopeAll(r, sess, "quota.read") {
+		visible := items[:0]
+		for _, p := range items {
+			if p != nil && d.quotaVisible(r, sess, "quota.read", p.ResourceType, p.ResourceID) {
+				visible = append(visible, p)
+			}
+		}
+		items = visible
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -1107,6 +1148,10 @@ func (d Deps) handleUpsertQuota(w http.ResponseWriter, r *http.Request, sess *au
 	if p.ResourceType == quota.TypeRole {
 		p.ResourceID = strings.ToUpper(strings.TrimSpace(p.ResourceID))
 	}
+	if !d.quotaVisible(r, sess, "quota.update", p.ResourceType, p.ResourceID) {
+		writeErr(w, http.StatusForbidden, "无权修改该配额")
+		return
+	}
 	p.Enabled = true
 	beforeLimit := "（未设置）"
 	if old, err := d.Quota.Store().GetPolicy(r.Context(), p.ResourceType, p.ResourceID, quota.PeriodMonthly); err == nil && old != nil {
@@ -1151,6 +1196,10 @@ func (d Deps) handleDeleteQuota(w http.ResponseWriter, r *http.Request, sess *au
 	case quota.TypeUser, quota.TypeUserBonus, quota.TypeWorkstation, quota.TypeEmployee:
 	default:
 		writeErr(w, http.StatusBadRequest, "resource_type 无效")
+		return
+	}
+	if !d.quotaVisible(r, sess, "quota.update", resourceType, resourceID) {
+		writeErr(w, http.StatusForbidden, "无权删除该配额")
 		return
 	}
 	detail := fmt.Sprintf("删除 %s %s 的 %s 配额策略", resourceType, resourceID, period)

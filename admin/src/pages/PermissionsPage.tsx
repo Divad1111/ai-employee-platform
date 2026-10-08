@@ -35,8 +35,8 @@ type Rule = {
 }
 
 export function PermissionsPage() {
-  const { ready, can } = usePerm()
-  const canWrite = can('system.write')
+  const { ready, canAll } = usePerm()
+  const canWrite = canAll('system.write')
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [rules, setRules] = useState<Rule[]>([])
   const [selected, setSelected] = useState('')

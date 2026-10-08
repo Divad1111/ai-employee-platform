@@ -51,7 +51,8 @@ export function FeishuPage() {
   const [searchParams] = useSearchParams()
   const presetEmployee = searchParams.get('employee') || ''
   const presetApplied = useRef(false)
-  const canConfig = can('system.write')
+  // 进页面看绑定即可；开放平台凭证仍只有超级管理员能改
+  const canEnter = can('system.write') || can('employee.write')
   const canCredentials = roles.includes('SUPER_ADMIN')
   const [cfg, setCfg] = useState<FeishuConfig | null>(null)
   const [bindings, setBindings] = useState<Binding[]>([])
@@ -132,16 +133,16 @@ export function FeishuPage() {
   }, [bindings, testTargetType, employees])
 
   useEffect(() => {
-    if (!ready || !canConfig) return
+    if (!ready || !canEnter) return
     void load().catch((e) => setError(e instanceof Error ? e.message : '加载飞书配置失败'))
-  }, [ready, canConfig, presetEmployee])
+  }, [ready, canEnter, presetEmployee])
 
   useEffect(() => {
     if (!presetEmployee) return
     document.getElementById('feishu-bindings')?.scrollIntoView({ block: 'start' })
   }, [presetEmployee, employees])
 
-  if (ready && !canConfig) {
+  if (ready && !canEnter) {
     return <Navigate to="/" replace />
   }
 

@@ -104,7 +104,7 @@ func (d Deps) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request, sess
 
 // ---------- Credentials API ----------
 
-func (d Deps) handleListCredentials(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListCredentials(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.MCP == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
 		return
@@ -116,10 +116,19 @@ func (d Deps) handleListCredentials(w http.ResponseWriter, r *http.Request, _ *a
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if !d.scopeAll(r, sess, "workflow.read") {
+		out := items[:0]
+		for _, c := range items {
+			if credentialOwnedBy(c, sess.UserID) {
+				out = append(out, c)
+			}
+		}
+		items = out
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-func (d Deps) handleGetCredential(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleGetCredential(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.MCP == nil {
 		writeErr(w, http.StatusNotFound, "MCP 服务未就绪")
 		return
@@ -127,6 +136,10 @@ func (d Deps) handleGetCredential(w http.ResponseWriter, r *http.Request, _ *aut
 	c, err := d.MCP.GetCredential(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !d.scopeAll(r, sess, "workflow.read") && !credentialOwnedBy(c, sess.UserID) {
+		writeErr(w, http.StatusNotFound, "凭证不存在")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"credential": c})
@@ -143,7 +156,10 @@ func (d Deps) handleCreateCredential(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 	in.CreatedBy = sess.UserID
-	if in.OwnerID == "" && strings.EqualFold(in.OwnerType, mcp.OwnerTypeUser) {
+	if !d.scopeAll(r, sess, "workflow.write") {
+		in.OwnerType = mcp.OwnerTypeUser
+		in.OwnerID = sess.UserID
+	} else if in.OwnerID == "" && strings.EqualFold(in.OwnerType, mcp.OwnerTypeUser) {
 		in.OwnerID = sess.UserID
 	}
 	c, err := d.MCP.CreateCredential(r.Context(), in)
@@ -165,6 +181,15 @@ func (d Deps) handleUpdateCredential(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 	id := r.PathValue("id")
+	cur, err := d.MCP.GetCredential(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !d.scopeAll(r, sess, "workflow.write") && !credentialOwnedBy(cur, sess.UserID) {
+		writeErr(w, http.StatusForbidden, "无权修改该凭证")
+		return
+	}
 	var in mcp.CreateCredentialInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效 JSON 数据")
@@ -190,6 +215,15 @@ func (d Deps) handleDeleteCredential(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 	id := r.PathValue("id")
+	cur, err := d.MCP.GetCredential(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !d.scopeAll(r, sess, "workflow.delete") && !credentialOwnedBy(cur, sess.UserID) {
+		writeErr(w, http.StatusForbidden, "无权删除该凭证")
+		return
+	}
 	if err := d.MCP.DeleteCredential(r.Context(), id); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -204,12 +238,15 @@ func (d Deps) handleDeleteCredential(w http.ResponseWriter, r *http.Request, ses
 
 // ---------- Employee MCP Bindings API ----------
 
-func (d Deps) handleListEmployeeMCPBindings(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListEmployeeMCPBindings(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.MCP == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
 		return
 	}
 	empID := r.PathValue("id")
+	if d.denyUnlessEmployee(w, r, sess, "workflow.read", empID) {
+		return
+	}
 	items, err := d.MCP.ListBindingsByEmployee(r.Context(), empID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -224,6 +261,9 @@ func (d Deps) handleCreateEmployeeMCPBinding(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	empID := r.PathValue("id")
+	if d.denyUnlessEmployee(w, r, sess, "workflow.grant", empID) {
+		return
+	}
 	var in mcp.BindEmployeeInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效 JSON 数据")
@@ -245,6 +285,9 @@ func (d Deps) handleCreateEmployeeMCPBinding(w http.ResponseWriter, r *http.Requ
 func (d Deps) handleUpdateEmployeeMCPBinding(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.MCP == nil {
 		writeErr(w, http.StatusInternalServerError, "MCP 服务未就绪")
+		return
+	}
+	if d.denyUnlessEmployee(w, r, sess, "workflow.grant", r.PathValue("id")) {
 		return
 	}
 	bindingID := r.PathValue("bindingId")
@@ -269,6 +312,9 @@ func (d Deps) handleUpdateEmployeeMCPBinding(w http.ResponseWriter, r *http.Requ
 func (d Deps) handleDeleteEmployeeMCPBinding(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.MCP == nil {
 		writeErr(w, http.StatusInternalServerError, "MCP 服务未就绪")
+		return
+	}
+	if d.denyUnlessEmployee(w, r, sess, "workflow.grant", r.PathValue("id")) {
 		return
 	}
 	bindingID := r.PathValue("bindingId")

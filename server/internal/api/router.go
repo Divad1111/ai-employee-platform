@@ -112,16 +112,16 @@ func NewRouter(d Deps) http.Handler {
 
 	// 用户 / 角色 / 配额（§35）
 	mux.HandleFunc("GET /api/users", d.requirePerm("user.read", d.handleListUsers))
-	mux.HandleFunc("POST /api/users", d.requirePerm("user.create", d.handleCreateUser))
+	mux.HandleFunc("POST /api/users", d.requirePerm("user.create", d.onlyAll("user.create", d.handleCreateUser)))
 	mux.HandleFunc("GET /api/users/{id}", d.requirePerm("user.read", d.handleGetUser))
 	mux.HandleFunc("PATCH /api/users/{id}", d.requirePerm("user.update", d.handlePatchUser))
 	mux.HandleFunc("DELETE /api/users/{id}", d.requirePerm("user.delete", d.handleDeleteUser))
 	mux.HandleFunc("POST /api/users/{id}/disable", d.requirePerm("user.disable", d.handleDisableUser))
 	mux.HandleFunc("POST /api/users/{id}/enable", d.requirePerm("user.disable", d.handleEnableUser))
 	mux.HandleFunc("GET /api/roles", d.requirePerm("role.read", d.handleListRoles))
-	mux.HandleFunc("POST /api/roles", d.requirePerm("role.create", d.handleCreateRole))
-	mux.HandleFunc("DELETE /api/roles/{name}", d.requirePerm("role.delete", d.handleDeleteRole))
-	mux.HandleFunc("PATCH /api/roles/{name}/permissions", d.requirePerm("role.update", d.handlePatchRolePerms))
+	mux.HandleFunc("POST /api/roles", d.requirePerm("role.create", d.onlyAll("role.create", d.handleCreateRole)))
+	mux.HandleFunc("DELETE /api/roles/{name}", d.requirePerm("role.delete", d.onlyAll("role.delete", d.handleDeleteRole)))
+	mux.HandleFunc("PATCH /api/roles/{name}/permissions", d.requirePerm("role.update", d.onlyAll("role.update", d.handlePatchRolePerms)))
 	mux.HandleFunc("GET /api/permissions", d.requirePerm("role.read", d.handleListPermissionsCatalog))
 	mux.HandleFunc("GET /api/quotas", d.requirePerm("quota.read", d.handleListQuotas))
 	mux.HandleFunc("GET /api/quotas/me", d.requireAuth(d.handleMyQuota))
@@ -199,7 +199,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/integrations/feishu/config", d.requirePerm("system.write", d.requireSuperAdmin(d.handleFeishuGetConfig)))
 	mux.HandleFunc("PUT /api/integrations/feishu/config", d.requirePermStepUp("system.write", d.requireSuperAdmin(d.handleFeishuPutConfig)))
 	mux.HandleFunc("GET /api/integrations/feishu/status", d.requireAuth(d.handleFeishuStatus))
-	mux.HandleFunc("POST /api/integrations/feishu/test-message", d.requirePerm("system.write", d.handleFeishuTestMessage))
+	mux.HandleFunc("POST /api/integrations/feishu/test-message", d.requirePerm("system.write", d.onlyAll("system.write", d.handleFeishuTestMessage)))
 	mux.HandleFunc("GET /api/integrations/feishu/bindings", d.requirePerm("employee.read", d.handleListFeishuBindings))
 	mux.HandleFunc("POST /api/integrations/feishu/bindings", d.requirePerm("employee.write", d.handleFeishuBinding))
 	mux.HandleFunc("PUT /api/integrations/feishu/bindings", d.requirePerm("employee.write", d.handleFeishuBinding))
@@ -208,28 +208,28 @@ func NewRouter(d Deps) http.Handler {
 
 	// 工作流MCP
 	mux.HandleFunc("GET /api/workflow-mcp/workflows", d.requirePerm("workflow.read", d.handleListWorkflows))
-	mux.HandleFunc("POST /api/workflow-mcp/workflows", d.requirePerm("workflow.write", d.handleUpsertWorkflow))
+	mux.HandleFunc("POST /api/workflow-mcp/workflows", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleUpsertWorkflow)))
 	mux.HandleFunc("GET /api/workflow-mcp/workflows/{id}", d.requirePerm("workflow.read", d.handleGetWorkflow))
-	mux.HandleFunc("PUT /api/workflow-mcp/workflows/{id}", d.requirePerm("workflow.write", d.handleUpsertWorkflow))
-	mux.HandleFunc("DELETE /api/workflow-mcp/workflows/{id}", d.requirePerm("workflow.delete", d.handleDeleteWorkflow))
+	mux.HandleFunc("PUT /api/workflow-mcp/workflows/{id}", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleUpsertWorkflow)))
+	mux.HandleFunc("DELETE /api/workflow-mcp/workflows/{id}", d.requirePerm("workflow.delete", d.onlyAll("workflow.delete", d.handleDeleteWorkflow)))
 
 	mux.HandleFunc("GET /api/workflow-mcp/skills", d.requirePerm("workflow.read", d.handleListSkillPackages))
-	mux.HandleFunc("POST /api/workflow-mcp/skills", d.requirePerm("workflow.write", d.handleUpsertSkillPackage))
-	mux.HandleFunc("POST /api/workflow-mcp/skills/sync", d.requirePerm("workflow.write", d.handleSyncSkillsToWorkstation))
+	mux.HandleFunc("POST /api/workflow-mcp/skills", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleUpsertSkillPackage)))
+	mux.HandleFunc("POST /api/workflow-mcp/skills/sync", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleSyncSkillsToWorkstation)))
 	mux.HandleFunc("GET /api/workflow-mcp/skills/{id}", d.requirePerm("workflow.read", d.handleGetSkillPackage))
-	mux.HandleFunc("PUT /api/workflow-mcp/skills/{id}", d.requirePerm("workflow.write", d.handleUpsertSkillPackage))
-	mux.HandleFunc("DELETE /api/workflow-mcp/skills/{id}", d.requirePerm("workflow.delete", d.handleDeleteSkillPackage))
+	mux.HandleFunc("PUT /api/workflow-mcp/skills/{id}", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleUpsertSkillPackage)))
+	mux.HandleFunc("DELETE /api/workflow-mcp/skills/{id}", d.requirePerm("workflow.delete", d.onlyAll("workflow.delete", d.handleDeleteSkillPackage)))
 	mux.HandleFunc("GET /api/workflow-mcp/skills/{id}/export", d.requirePerm("workflow.read", d.handleExportSkillPackage))
 
 	mux.HandleFunc("GET /api/workflow-mcp/knowledge", d.requirePerm("workflow.read", d.handleListKnowledgeDocs))
-	mux.HandleFunc("POST /api/workflow-mcp/knowledge", d.requirePerm("workflow.write", d.handleUpsertKnowledgeDoc))
+	mux.HandleFunc("POST /api/workflow-mcp/knowledge", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleUpsertKnowledgeDoc)))
 	mux.HandleFunc("GET /api/workflow-mcp/knowledge/search", d.requirePerm("workflow.read", d.handleSearchKnowledgeDocs))
-	mux.HandleFunc("POST /api/workflow-mcp/knowledge/reindex", d.requirePerm("workflow.write", d.handleReindexKnowledge))
+	mux.HandleFunc("POST /api/workflow-mcp/knowledge/reindex", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleReindexKnowledge)))
 	mux.HandleFunc("GET /api/workflow-mcp/knowledge/{id...}", d.requirePerm("workflow.read", d.handleGetKnowledgeDoc))
-	mux.HandleFunc("PUT /api/workflow-mcp/knowledge/{id...}", d.requirePerm("workflow.write", d.handleUpsertKnowledgeDoc))
-	mux.HandleFunc("DELETE /api/workflow-mcp/knowledge/{id...}", d.requirePerm("workflow.delete", d.handleDeleteKnowledgeDoc))
+	mux.HandleFunc("PUT /api/workflow-mcp/knowledge/{id...}", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleUpsertKnowledgeDoc)))
+	mux.HandleFunc("DELETE /api/workflow-mcp/knowledge/{id...}", d.requirePerm("workflow.delete", d.onlyAll("workflow.delete", d.handleDeleteKnowledgeDoc)))
 	mux.HandleFunc("GET /api/workflow-mcp/search", d.requirePerm("workflow.read", d.handleUnifiedSearch))
-	mux.HandleFunc("POST /api/workflow-mcp/import", d.requirePerm("workflow.write", d.handleImportWorkflowMCP))
+	mux.HandleFunc("POST /api/workflow-mcp/import", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleImportWorkflowMCP)))
 
 	mux.HandleFunc("GET /api/employees/{id}/workflows", d.requirePerm("workflow.grant", d.handleListEmployeeWorkflows))
 	mux.HandleFunc("POST /api/employees/{id}/workflows", d.requirePerm("workflow.grant", d.handleGrantEmployeeWorkflow))
@@ -240,10 +240,10 @@ func NewRouter(d Deps) http.Handler {
 
 	// 多用户 MCP Server、凭证库与员工绑定管理 (§5, §6, §7)
 	mux.HandleFunc("GET /api/mcp-servers", d.requirePerm("workflow.read", d.handleListMCPServers))
-	mux.HandleFunc("POST /api/mcp-servers", d.requirePerm("workflow.write", d.handleCreateMCPServer))
+	mux.HandleFunc("POST /api/mcp-servers", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleCreateMCPServer)))
 	mux.HandleFunc("GET /api/mcp-servers/{id}", d.requirePerm("workflow.read", d.handleGetMCPServer))
-	mux.HandleFunc("PUT /api/mcp-servers/{id}", d.requirePerm("workflow.write", d.handleUpdateMCPServer))
-	mux.HandleFunc("DELETE /api/mcp-servers/{id}", d.requirePerm("workflow.delete", d.handleDeleteMCPServer))
+	mux.HandleFunc("PUT /api/mcp-servers/{id}", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleUpdateMCPServer)))
+	mux.HandleFunc("DELETE /api/mcp-servers/{id}", d.requirePerm("workflow.delete", d.onlyAll("workflow.delete", d.handleDeleteMCPServer)))
 
 	mux.HandleFunc("GET /api/credentials", d.requirePerm("workflow.read", d.handleListCredentials))
 	mux.HandleFunc("POST /api/credentials", d.requirePerm("workflow.write", d.handleCreateCredential))
@@ -256,8 +256,8 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("PUT /api/employees/{id}/mcp-bindings/{bindingId}", d.requirePerm("workflow.grant", d.handleUpdateEmployeeMCPBinding))
 	mux.HandleFunc("DELETE /api/employees/{id}/mcp-bindings/{bindingId}", d.requirePerm("workflow.grant", d.handleDeleteEmployeeMCPBinding))
 
-	mux.HandleFunc("PUT /api/permission/profiles", d.requirePerm("system.write", d.handleUpsertPermissionProfile))
-	mux.HandleFunc("PUT /api/permission/rules", d.requirePerm("system.write", d.handleUpsertPermissionRule))
+	mux.HandleFunc("PUT /api/permission/profiles", d.requirePerm("system.write", d.onlyAll("system.write", d.handleUpsertPermissionProfile)))
+	mux.HandleFunc("PUT /api/permission/rules", d.requirePerm("system.write", d.onlyAll("system.write", d.handleUpsertPermissionRule)))
 
 	mux.HandleFunc("POST /api/secrets", d.requirePerm("secret.write", d.handlePutSecret))
 	mux.HandleFunc("GET /api/secrets", d.requirePerm("secret.read", d.handleListSecrets))
@@ -266,7 +266,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/secrets/{id}/rotate", d.requirePermStepUp("secret.write", d.handleRotateSecret))
 	mux.HandleFunc("POST /api/secrets/bindings", d.requirePerm("secret.write", d.handleBindSecret))
 	mux.HandleFunc("POST /api/employees/{employee_id}/secrets/resolve", d.requirePerm("secret.read", d.handleResolveSecrets))
-	mux.HandleFunc("POST /api/scheduler/tick", d.requirePerm("job.write", d.handleSchedulerTick))
+	mux.HandleFunc("POST /api/scheduler/tick", d.requirePerm("job.write", d.onlyAll("job.write", d.handleSchedulerTick)))
 
 	// Automation（周期 / 日历 / Webhook）
 	mux.HandleFunc("GET /api/automations", d.requirePerm("automation.read", d.handleListAutomations))
@@ -278,7 +278,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("PUT /api/automations/{id}/calendar-items", d.requirePerm("automation.write", d.handlePutCalendarItems))
 	mux.HandleFunc("GET /api/automations/{id}/runs", d.requirePerm("automation.read", d.handleListAutomationRuns))
 	mux.HandleFunc("POST /api/automations/{id}/rotate-secrets", d.requirePermStepUp("automation.write", d.handleRotateAutomationSecrets))
-	mux.HandleFunc("POST /api/automations/tick", d.requirePerm("automation.write", d.handleAutomationTick))
+	mux.HandleFunc("POST /api/automations/tick", d.requirePerm("automation.write", d.onlyAll("automation.write", d.handleAutomationTick)))
 	mux.HandleFunc("POST /api/integrations/automation/hooks/{path_token}", d.handleAutomationWebhook)
 
 	// Permission / Approval / TOTP / Step-up（M7）
@@ -303,8 +303,8 @@ func NewRouter(d Deps) http.Handler {
 	// 工作站出站上传（证书+签名+Job 绑定），禁止匿名
 	mux.HandleFunc("POST /api/integrations/workstation/artifacts", d.handleWorkstationUploadArtifact)
 	mux.HandleFunc("GET /api/providers", d.requirePerm("system.read", d.handleListProviders))
-	mux.HandleFunc("PUT /api/providers/{id}", d.requirePerm("system.write", d.handlePutProvider))
-	mux.HandleFunc("POST /api/providers/versions", d.requirePerm("system.write", d.handleAddProviderVersion))
+	mux.HandleFunc("PUT /api/providers/{id}", d.requirePerm("system.write", d.onlyAll("system.write", d.handlePutProvider)))
+	mux.HandleFunc("POST /api/providers/versions", d.requirePerm("system.write", d.onlyAll("system.write", d.handleAddProviderVersion)))
 	mux.HandleFunc("GET /api/providers/versions", d.requirePerm("system.read", d.handleQueryProviderVersions))
 	mux.HandleFunc("GET /api/providers/signing-key", d.handleSigningKey)
 	mux.HandleFunc("GET /api/scheduler/status", d.requirePerm("job.read", d.handleSchedulerStatus))
@@ -313,32 +313,32 @@ func NewRouter(d Deps) http.Handler {
 	}
 
 	// 备份与容灾恢复 (Center Server Backup System)
-	mux.HandleFunc("GET /api/backups/overview", d.requirePerm("backup.view", d.handleBackupOverview))
-	mux.HandleFunc("GET /api/backups/destinations", d.requirePerm("backup.view", d.handleListBackupDestinations))
-	mux.HandleFunc("POST /api/backups/destinations", d.requirePerm("backup.destination", d.handleCreateBackupDestination))
-	mux.HandleFunc("GET /api/backups/destinations/{id}", d.requirePerm("backup.view", d.handleGetBackupDestination))
-	mux.HandleFunc("PUT /api/backups/destinations/{id}", d.requirePerm("backup.destination", d.handleUpdateBackupDestination))
-	mux.HandleFunc("DELETE /api/backups/destinations/{id}", d.requirePerm("backup.destination", d.handleDeleteBackupDestination))
-	mux.HandleFunc("POST /api/backups/destinations/{id}/test", d.requirePerm("backup.destination", d.handleTestBackupDestination))
+	mux.HandleFunc("GET /api/backups/overview", d.requirePerm("backup.view", d.onlyAll("backup.view", d.handleBackupOverview)))
+	mux.HandleFunc("GET /api/backups/destinations", d.requirePerm("backup.view", d.onlyAll("backup.view", d.handleListBackupDestinations)))
+	mux.HandleFunc("POST /api/backups/destinations", d.requirePerm("backup.destination", d.onlyAll("backup.destination", d.handleCreateBackupDestination)))
+	mux.HandleFunc("GET /api/backups/destinations/{id}", d.requirePerm("backup.view", d.onlyAll("backup.view", d.handleGetBackupDestination)))
+	mux.HandleFunc("PUT /api/backups/destinations/{id}", d.requirePerm("backup.destination", d.onlyAll("backup.destination", d.handleUpdateBackupDestination)))
+	mux.HandleFunc("DELETE /api/backups/destinations/{id}", d.requirePerm("backup.destination", d.onlyAll("backup.destination", d.handleDeleteBackupDestination)))
+	mux.HandleFunc("POST /api/backups/destinations/{id}/test", d.requirePerm("backup.destination", d.onlyAll("backup.destination", d.handleTestBackupDestination)))
 
-	mux.HandleFunc("GET /api/backups/policies", d.requirePerm("backup.view", d.handleListBackupPolicies))
-	mux.HandleFunc("POST /api/backups/policies", d.requirePerm("backup.manage", d.handleCreateBackupPolicy))
-	mux.HandleFunc("GET /api/backups/policies/{id}", d.requirePerm("backup.view", d.handleGetBackupPolicy))
-	mux.HandleFunc("PUT /api/backups/policies/{id}", d.requirePerm("backup.manage", d.handleUpdateBackupPolicy))
-	mux.HandleFunc("DELETE /api/backups/policies/{id}", d.requirePerm("backup.manage", d.handleDeleteBackupPolicy))
-	mux.HandleFunc("POST /api/backups/policies/{id}/run", d.requirePerm("backup.create", d.handleRunBackupPolicy))
-	mux.HandleFunc("POST /api/backups/policies/{id}/enable", d.requirePerm("backup.manage", d.handleEnableBackupPolicy))
-	mux.HandleFunc("POST /api/backups/policies/{id}/disable", d.requirePerm("backup.manage", d.handleDisableBackupPolicy))
-	mux.HandleFunc("POST /api/backups/manual", d.requirePerm("backup.create", d.handleRunBackupManual))
+	mux.HandleFunc("GET /api/backups/policies", d.requirePerm("backup.view", d.onlyAll("backup.view", d.handleListBackupPolicies)))
+	mux.HandleFunc("POST /api/backups/policies", d.requirePerm("backup.manage", d.onlyAll("backup.manage", d.handleCreateBackupPolicy)))
+	mux.HandleFunc("GET /api/backups/policies/{id}", d.requirePerm("backup.view", d.onlyAll("backup.view", d.handleGetBackupPolicy)))
+	mux.HandleFunc("PUT /api/backups/policies/{id}", d.requirePerm("backup.manage", d.onlyAll("backup.manage", d.handleUpdateBackupPolicy)))
+	mux.HandleFunc("DELETE /api/backups/policies/{id}", d.requirePerm("backup.manage", d.onlyAll("backup.manage", d.handleDeleteBackupPolicy)))
+	mux.HandleFunc("POST /api/backups/policies/{id}/run", d.requirePerm("backup.create", d.onlyAll("backup.create", d.handleRunBackupPolicy)))
+	mux.HandleFunc("POST /api/backups/policies/{id}/enable", d.requirePerm("backup.manage", d.onlyAll("backup.manage", d.handleEnableBackupPolicy)))
+	mux.HandleFunc("POST /api/backups/policies/{id}/disable", d.requirePerm("backup.manage", d.onlyAll("backup.manage", d.handleDisableBackupPolicy)))
+	mux.HandleFunc("POST /api/backups/manual", d.requirePerm("backup.create", d.onlyAll("backup.create", d.handleRunBackupManual)))
 
-	mux.HandleFunc("GET /api/backups/runs", d.requirePerm("backup.view", d.handleListBackupRuns))
-	mux.HandleFunc("GET /api/backups/runs/{id}", d.requirePerm("backup.view", d.handleGetBackupRun))
-	mux.HandleFunc("POST /api/backups/runs/{id}/verify", d.requirePerm("backup.verify", d.handleVerifyBackupRun))
-	mux.HandleFunc("DELETE /api/backups/runs/{id}", d.requirePerm("backup.delete", d.handleDeleteBackupRun))
+	mux.HandleFunc("GET /api/backups/runs", d.requirePerm("backup.view", d.onlyAll("backup.view", d.handleListBackupRuns)))
+	mux.HandleFunc("GET /api/backups/runs/{id}", d.requirePerm("backup.view", d.onlyAll("backup.view", d.handleGetBackupRun)))
+	mux.HandleFunc("POST /api/backups/runs/{id}/verify", d.requirePerm("backup.verify", d.onlyAll("backup.verify", d.handleVerifyBackupRun)))
+	mux.HandleFunc("DELETE /api/backups/runs/{id}", d.requirePerm("backup.delete", d.onlyAll("backup.delete", d.handleDeleteBackupRun)))
 
-	mux.HandleFunc("POST /api/backups/runs/{id}/restore", d.requirePermStepUp("backup.restore", d.handleRestoreBackupRun))
-	mux.HandleFunc("GET /api/backups/restore-jobs", d.requirePerm("backup.view", d.handleListRestoreJobs))
-	mux.HandleFunc("GET /api/backups/restore-jobs/{id}", d.requirePerm("backup.view", d.handleGetRestoreJob))
+	mux.HandleFunc("POST /api/backups/runs/{id}/restore", d.requirePermStepUp("backup.restore", d.onlyAll("backup.restore", d.handleRestoreBackupRun)))
+	mux.HandleFunc("GET /api/backups/restore-jobs", d.requirePerm("backup.view", d.onlyAll("backup.view", d.handleListRestoreJobs)))
+	mux.HandleFunc("GET /api/backups/restore-jobs/{id}", d.requirePerm("backup.view", d.onlyAll("backup.view", d.handleGetRestoreJob)))
 
 	return securityHeaders(mux)
 }
@@ -713,6 +713,19 @@ func (d Deps) handleRevoke(w http.ResponseWriter, r *http.Request, sess *auth.Se
 		writeErr(w, http.StatusBadRequest, "需要 fingerprint")
 		return
 	}
+	if d.CA != nil && !d.scopeAll(r, sess, "workstation.write") {
+		wsID := ""
+		for _, rec := range d.CA.ListRecords() {
+			if rec.Fingerprint == req.Fingerprint {
+				wsID = rec.WorkstationID
+				break
+			}
+		}
+		if !d.canWriteWorkstation(r, sess, wsID) {
+			writeErr(w, http.StatusForbidden, "无权吊销该工作站证书")
+			return
+		}
+	}
 	if err := d.CA.Revoke(req.Fingerprint); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
@@ -902,18 +915,19 @@ func (d Deps) handleDeleteEmployee(w http.ResponseWriter, r *http.Request, sess 
 
 func (d Deps) handleListWorkspaces(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	list, _ := d.Workspaces.List(r.Context())
-	scope := d.resolveScope(r.Context(), sess, "workspace.read")
-	if scope == authz.ScopeALL {
-		writeJSON(w, http.StatusOK, map[string]any{"items": list})
-		return
-	}
-	out := make([]*workspace.Workspace, 0)
+	items := make([]workspaceListItem, 0, len(list))
 	for _, ws := range list {
-		if d.canAccessWorkspace(r, sess, ws, "workspace.read") {
-			out = append(out, ws)
+		if !d.canAccessWorkspace(r, sess, ws, "workspace.read") {
+			continue
 		}
+		items = append(items, workspaceListItem{Workspace: ws, CanWrite: d.canWriteWorkspace(r, sess, ws)})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+type workspaceListItem struct {
+	*workspace.Workspace
+	CanWrite bool `json:"can_write"`
 }
 
 func (d Deps) handleCreateWorkspace(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
@@ -921,6 +935,12 @@ func (d Deps) handleCreateWorkspace(w http.ResponseWriter, r *http.Request, sess
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效请求体")
 		return
+	}
+	if !d.scopeAll(r, sess, "workspace.write") {
+		if in.WorkstationID == "" || !d.userIDMayUseWorkstation(r.Context(), sess.UserID, in.WorkstationID, sess.Roles) {
+			writeErr(w, http.StatusForbidden, "无权在该工作站创建工作区")
+			return
+		}
 	}
 	ws, err := d.Workspaces.Create(r.Context(), in, sess.UserID, clientIP(r))
 	if err != nil {
@@ -949,7 +969,7 @@ func (d Deps) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request, sess
 		writeErr(w, http.StatusNotFound, "工作区不存在")
 		return
 	}
-	if !d.canAccessWorkspace(r, sess, ws, "workspace.write") {
+	if !d.canWriteWorkspace(r, sess, ws) {
 		writeErr(w, http.StatusForbidden, "无权修改该工作区")
 		return
 	}
@@ -974,7 +994,7 @@ func (d Deps) handleBindWorkspace(w http.ResponseWriter, r *http.Request, sess *
 		writeErr(w, http.StatusNotFound, "工作区不存在")
 		return
 	}
-	if !d.canAccessWorkspace(r, sess, ws, "workspace.write") {
+	if !d.canWriteWorkspace(r, sess, ws) {
 		writeErr(w, http.StatusForbidden, "无权修改该工作区")
 		return
 	}
@@ -1004,7 +1024,7 @@ func (d Deps) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request, sess
 		writeErr(w, http.StatusNotFound, "工作区不存在")
 		return
 	}
-	if !d.canAccessWorkspace(r, sess, ws, "workspace.write") {
+	if !d.canWriteWorkspace(r, sess, ws) {
 		writeErr(w, http.StatusForbidden, "无权删除该工作区")
 		return
 	}
@@ -1112,6 +1132,16 @@ func (d Deps) handleCreateSession(w http.ResponseWriter, r *http.Request, sess *
 		writeErr(w, http.StatusBadRequest, "无效请求体")
 		return
 	}
+	if !d.scopeAll(r, sess, "session.write") {
+		if in.EmployeeID != "" && !d.employeeOwnedBy(r, sess, in.EmployeeID, "session.write") {
+			writeErr(w, http.StatusForbidden, "无权为该数字员工创建会话")
+			return
+		}
+		if in.EmployeeID == "" && (in.WorkstationID == "" || !d.userIDMayUseWorkstation(r.Context(), sess.UserID, in.WorkstationID, sess.Roles)) {
+			writeErr(w, http.StatusForbidden, "无权在该工作站创建会话")
+			return
+		}
+	}
 	s, err := d.Sessions.Create(r.Context(), in, sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
@@ -1205,8 +1235,18 @@ func (d Deps) handleCreateJob(w http.ResponseWriter, r *http.Request, sess *auth
 		writeErr(w, http.StatusBadRequest, "无效请求体")
 		return
 	}
-	if in.CreatedBy == "" {
+	if in.CreatedBy == "" || !d.scopeAll(r, sess, "job.write") {
 		in.CreatedBy = sess.UserID
+	}
+	if !d.scopeAll(r, sess, "job.write") {
+		if in.EmployeeID != "" && !d.employeeOwnedBy(r, sess, in.EmployeeID, "job.write") {
+			writeErr(w, http.StatusForbidden, "无权为该数字员工创建任务")
+			return
+		}
+		if in.EmployeeID == "" && (in.WorkstationID == "" || !d.userIDMayUseWorkstation(r.Context(), sess.UserID, in.WorkstationID, sess.Roles)) {
+			writeErr(w, http.StatusForbidden, "无权在该工作站创建任务")
+			return
+		}
 	}
 	if in.Source == "" {
 		in.Source = job.SourceWeb
@@ -1319,9 +1359,18 @@ func (d Deps) handleCancelJob(w http.ResponseWriter, r *http.Request, sess *auth
 	writeJSON(w, http.StatusOK, j)
 }
 
-func (d Deps) handleListMessages(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListMessages(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	list, _ := d.Messages.List(r.Context(), limit)
+	if !d.scopeAll(r, sess, "message.read") {
+		out := list[:0]
+		for _, msg := range list {
+			if d.canSeeMessage(r, sess, msg) {
+				out = append(out, msg)
+			}
+		}
+		list = out
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": list})
 }
 
@@ -1330,6 +1379,14 @@ func (d Deps) handleSendMessage(w http.ResponseWriter, r *http.Request, sess *au
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效请求体")
 		return
+	}
+	if !d.scopeAll(r, sess, "message.write") {
+		in.SenderType = message.TypeUser
+		in.SenderID = sess.UserID
+		if in.ReceiverType == message.TypeEmployee && !d.employeeOwnedBy(r, sess, in.ReceiverID, "message.write") {
+			writeErr(w, http.StatusForbidden, "无权向该数字员工发消息")
+			return
+		}
 	}
 	msg, err := d.Messages.Send(r.Context(), in, sess.UserID, clientIP(r))
 	if err != nil {

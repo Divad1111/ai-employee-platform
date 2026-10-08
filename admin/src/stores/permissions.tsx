@@ -14,6 +14,8 @@ type PermContextValue = {
   can: (...codes: string[]) => boolean
   /** 任一码命中即可 */
   canAny: (...codes: string[]) => boolean
+  /** 该权限码的范围是全部资源（超级管理员视为 ALL） */
+  canAll: (code: string) => boolean
 }
 
 const PermContext = createContext<PermContextValue>({
@@ -22,9 +24,10 @@ const PermContext = createContext<PermContextValue>({
   perms: new Set(),
   can: () => false,
   canAny: () => false,
+  canAll: () => false,
 })
 
-function buildPermSet(permissions: Array<{ name: string }> | undefined, roles: string[]) {
+function buildPermSet(permissions: Array<{ name: string; scope?: string }> | undefined, roles: string[]) {
   const s = new Set<string>()
   for (const p of permissions || []) {
     if (p?.name) s.add(p.name)
@@ -39,15 +42,21 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false)
   const [roles, setRoles] = useState<string[]>(() => getUser()?.roles || [])
   const [perms, setPerms] = useState<Set<string>>(() => new Set())
+  const [scopes, setScopes] = useState<Record<string, string>>({})
 
   useEffect(() => {
     let cancelled = false
-    apiGet<{ permissions?: Array<{ name: string }>; roles?: string[] }>('/auth/me')
+    apiGet<{ permissions?: Array<{ name: string; scope?: string }>; roles?: string[] }>('/auth/me')
       .then((me) => {
         if (cancelled) return
         const r = me.roles || getUser()?.roles || []
         setRoles(r)
         setPerms(buildPermSet(me.permissions, r))
+        const next: Record<string, string> = {}
+        for (const p of me.permissions || []) {
+          if (p?.name) next[p.name] = (p.scope || '').toUpperCase()
+        }
+        setScopes(next)
         setReady(true)
       })
       .catch(() => {
@@ -73,8 +82,13 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
       if (perms.has('*')) return true
       return codes.some((c) => perms.has(c))
     }
-    return { ready, roles, perms, can, canAny }
-  }, [ready, roles, perms])
+    const canAll = (code: string) => {
+      if (!ready) return false
+      if (perms.has('*')) return true
+      return scopes[code] === 'ALL'
+    }
+    return { ready, roles, perms, can, canAny, canAll }
+  }, [ready, roles, perms, scopes])
 
   return <PermContext.Provider value={value}>{children}</PermContext.Provider>
 }

@@ -35,6 +35,8 @@ type NavItem = {
   end?: boolean
   /** 查看该页所需权限码；无则登录即可 */
   perm?: string
+  /** 为 true 时要求该权限范围为全部资源 */
+  allScope?: boolean
 }
 
 type NavSection = {
@@ -80,7 +82,7 @@ const navSections: NavSection[] = [
     title: '用户与权限',
     items: [
       { to: '/users', label: '用户管理', icon: IconUsers, perm: 'user.read' },
-      { to: '/roles', label: '角色与权限', icon: IconShield, perm: 'role.read' },
+      { to: '/roles', label: '角色与权限', icon: IconShield, perm: 'role.read', allScope: true },
       { to: '/quotas', label: 'Token / 配额', icon: IconPackage, perm: 'quota.read' },
     ],
   },
@@ -88,11 +90,11 @@ const navSections: NavSection[] = [
     title: '安全治理与系统',
     items: [
       // 策略引擎 / 系统配置属于运维写操作，需 system.write（VIEWER 仅有 system.read 不应进入）
-      { to: '/permissions', label: '权限策略引擎', icon: IconShield, perm: 'system.write' },
+      { to: '/permissions', label: '权限策略引擎', icon: IconShield, perm: 'system.write', allScope: true },
       { to: '/secrets', label: '机密凭证保管箱', icon: IconKey, perm: 'secret.read' },
-      { to: '/backups', label: '备份与容灾恢复', icon: IconServer, perm: 'backup.view' },
+      { to: '/backups', label: '备份与容灾恢复', icon: IconServer, perm: 'backup.view', allScope: true },
       { to: '/audit', label: '操作审计日志', icon: IconFileText, perm: 'audit.read' },
-      { to: '/settings', label: '系统架构配置', icon: IconSettings, perm: 'system.write' },
+      { to: '/settings', label: '系统架构配置', icon: IconSettings, perm: 'system.write', allScope: true },
     ],
   },
 ]
@@ -118,14 +120,15 @@ export function AppShell() {
   const nav = useNavigate()
   const location = useLocation()
   const user = getUser()
-  const { ready, can: canPerm } = usePerm()
+  const { ready, can: canPerm, canAll } = usePerm()
   const [feishuStatus, setFeishuStatus] = useState<FeishuStatus | null>(null)
   /** 飞书配置页需 system.write；VIEWER 仅可看状态不可跳转 */
   const canFeishuConfig = ready && canPerm('system.write')
 
-  const can = (perm?: string) => {
+  const can = (perm?: string, allScope?: boolean) => {
     if (!perm) return true
     if (!ready) return false
+    if (allScope) return canAll(perm)
     return canPerm(perm)
   }
 
@@ -135,7 +138,7 @@ export function AppShell() {
   const visibleSections = navSections
     .map((sec) => ({
       ...sec,
-      items: sec.items.filter((it) => can(it.perm)),
+      items: sec.items.filter((it) => can(it.perm, it.allScope)),
     }))
     .filter((sec) => sec.items.length > 0)
 

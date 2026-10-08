@@ -134,6 +134,14 @@ func (s *Service) Validate(ctx context.Context, raw string) (*Token, error) {
 	return t, nil
 }
 
+// Get 按 ID 读取 Token 元数据。
+func (s *Service) Get(ctx context.Context, id string) (*Token, error) {
+	if s == nil || s.store == nil {
+		return nil, ErrNotFound
+	}
+	return s.store.GetByID(ctx, id)
+}
+
 // Revoke 吊销 Token。
 func (s *Service) Revoke(ctx context.Context, id string) error {
 	t, err := s.store.GetByID(ctx, id)

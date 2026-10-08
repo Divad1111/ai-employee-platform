@@ -244,3 +244,45 @@ func TestSuperAdminChangesOtherUserRole(t *testing.T) {
 		t.Fatalf("不能改超级管理员角色: %d %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestUserOwnScopeBlocksOthersAndGlobals(t *testing.T) {
+	users := auth.NewMemoryUserStore()
+	if err := users.SeedAdmin("admin", "admin12345", "Admin"); err != nil {
+		t.Fatal(err)
+	}
+	h := api.NewRouter(api.Deps{Auth: auth.NewService(users, auth.NewMemorySessionStore(), audit.NewMemory())})
+	login := func(user, pass string) string {
+		t.Helper()
+		code, resp := doJSON(t, h, http.MethodPost, "/api/auth/login", "", map[string]string{"username": user, "password": pass})
+		if code != http.StatusOK {
+			t.Fatalf("login %s: %d %v", user, code, resp)
+		}
+		return resp["token"].(string)
+	}
+	adminTok := login("admin", "admin12345")
+	code, created := doJSON(t, h, http.MethodPost, "/api/users", adminTok, map[string]any{
+		"username": "zhangwei", "password": "zhangwei12", "roles": []string{"USER"},
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %v", code, created)
+	}
+	userTok := login("zhangwei", "zhangwei12")
+	code, listed := doJSON(t, h, http.MethodGet, "/api/users", userTok, nil)
+	if code != http.StatusOK {
+		t.Fatalf("list users: %d %v", code, listed)
+	}
+	items := listed["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["username"] != "zhangwei" {
+		t.Fatalf("仅本人应只看到自己: %+v", items)
+	}
+	admin, _ := users.FindByUsername(t.Context(), "admin")
+	if code, body := doJSON(t, h, http.MethodPatch, "/api/users/"+admin.ID, userTok, map[string]string{"display_name": "hacked"}); code != http.StatusForbidden {
+		t.Fatalf("不能改别人: %d %v", code, body)
+	}
+	if code, body := doJSON(t, h, http.MethodPost, "/api/roles", userTok, map[string]any{"name": "TEMP", "description": "x"}); code != http.StatusForbidden {
+		t.Fatalf("不能改全局角色: %d %v", code, body)
+	}
+	if code, body := doJSON(t, h, http.MethodDelete, "/api/roles/VIEWER", userTok, nil); code != http.StatusForbidden {
+		t.Fatalf("不能删除角色: %d %v", code, body)
+	}
+}

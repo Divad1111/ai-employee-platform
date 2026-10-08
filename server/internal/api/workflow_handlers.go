@@ -42,8 +42,8 @@ func (d Deps) handleGetWorkflow(w http.ResponseWriter, r *http.Request, _ *auth.
 
 func (d Deps) handleUpsertWorkflow(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var body struct {
-		YAML   string `json:"yaml"`
-		Bump   string `json:"bump"`
+		YAML    string `json:"yaml"`
+		Bump    string `json:"bump"`
 		Content string `json:"content"` // 兼容
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -113,10 +113,10 @@ func (d Deps) handleExportSkillPackage(w http.ResponseWriter, r *http.Request, _
 
 func (d Deps) handleUpsertSkillPackage(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var body struct {
-		SkillMD string                   `json:"skill_md"`
-		Content string                   `json:"content"`
-		Files   []workflowmcp.SkillFile  `json:"files"`
-		Bump    string                   `json:"bump"`
+		SkillMD string                  `json:"skill_md"`
+		Content string                  `json:"content"`
+		Files   []workflowmcp.SkillFile `json:"files"`
+		Bump    string                  `json:"bump"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效 JSON")
@@ -240,8 +240,11 @@ func (d Deps) handleUnifiedSearch(w http.ResponseWriter, r *http.Request, _ *aut
 
 // ---------- Employee grants & MCP tokens ----------
 
-func (d Deps) handleListEmployeeWorkflows(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListEmployeeWorkflows(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	id := r.PathValue("id")
+	if d.denyUnlessEmployee(w, r, sess, "workflow.grant", id) {
+		return
+	}
 	items, err := d.WorkflowMCP.ListEmployeeWorkflows(r.Context(), id)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -264,6 +267,9 @@ func (d Deps) handleGrantEmployeeWorkflow(w http.ResponseWriter, r *http.Request
 		grantedBy = sess.UserID
 	}
 	empID := r.PathValue("id")
+	if d.denyUnlessEmployee(w, r, sess, "workflow.grant", empID) {
+		return
+	}
 	if err := d.WorkflowMCP.GrantWorkflow(r.Context(), empID, body.WorkflowID, grantedBy); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -279,6 +285,9 @@ func (d Deps) handleRevokeEmployeeWorkflow(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	empID := r.PathValue("id")
+	if d.denyUnlessEmployee(w, r, sess, "workflow.grant", empID) {
+		return
+	}
 	if err := d.WorkflowMCP.RevokeWorkflow(r.Context(), empID, wfID); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
@@ -287,9 +296,12 @@ func (d Deps) handleRevokeEmployeeWorkflow(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (d Deps) handleListEmployeeMCPTokens(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleListEmployeeMCPTokens(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.MCPAuth == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
+		return
+	}
+	if d.denyUnlessEmployee(w, r, sess, "workflow.grant", r.PathValue("id")) {
 		return
 	}
 	items, err := d.MCPAuth.ListBySubject(r.Context(), mcpauth.SubjectEmployee, r.PathValue("id"))
@@ -310,6 +322,9 @@ func (d Deps) handleIssueEmployeeMCPToken(w http.ResponseWriter, r *http.Request
 		ExpiresIn int64  `json:"expires_in_sec"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	if d.denyUnlessEmployee(w, r, sess, "workflow.grant", r.PathValue("id")) {
+		return
+	}
 	createdBy := ""
 	if sess != nil {
 		createdBy = sess.UserID
@@ -342,6 +357,21 @@ func (d Deps) handleIssueEmployeeMCPToken(w http.ResponseWriter, r *http.Request
 
 func (d Deps) handleRevokeMCPToken(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	id := r.PathValue("id")
+	tok, err := d.MCPAuth.Get(r.Context(), id)
+	if err != nil || tok == nil {
+		writeErr(w, http.StatusNotFound, "token 不存在")
+		return
+	}
+	if !d.scopeAll(r, sess, "workflow.grant") {
+		owned := tok.CreatedBy == sess.UserID
+		if tok.SubjectType == mcpauth.SubjectEmployee {
+			owned = d.employeeOwnedBy(r, sess, tok.SubjectID, "workflow.grant")
+		}
+		if !owned {
+			writeErr(w, http.StatusForbidden, "无权吊销该 Token")
+			return
+		}
+	}
 	if err := d.MCPAuth.Revoke(r.Context(), id); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return

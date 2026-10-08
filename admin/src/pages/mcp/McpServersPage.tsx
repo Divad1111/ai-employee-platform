@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet } from '../../api/client'
 import { getUser } from '../../stores/session'
+import { usePerm } from '../../stores/permissions'
 import {
   createCredential,
   createMCPServer,
@@ -35,6 +36,9 @@ type SimpleUser = {
 }
 
 export function McpServersPage() {
+  const { canAll } = usePerm()
+  const canWriteServer = canAll('workflow.write')
+  const canDeleteServer = canAll('workflow.delete')
   const [tab, setTab] = useState<Tab>('servers')
   const [servers, setServers] = useState<MCPServer[]>([])
   const [credentials, setCredentials] = useState<Credential[]>([])
@@ -263,10 +267,12 @@ export function McpServersPage() {
             <span>刷新</span>
           </button>
           {tab === 'servers' ? (
+            canWriteServer ? (
             <button type="button" className="btn-primary" onClick={openCreateServer}>
               <IconPlus size={15} />
               <span>添加 MCP 服务</span>
             </button>
+            ) : null
           ) : (
             <button type="button" className="btn-primary" onClick={openCreateCred}>
               <IconPlus size={15} />
@@ -432,8 +438,9 @@ export function McpServersPage() {
                               <IconSettings size={14} />
                               <span style={{ whiteSpace: 'nowrap' }}>进入配置与详情</span>
                             </Link>
-                          ) : (
+                          ) : canWriteServer || canDeleteServer ? (
                             <>
+                              {canWriteServer ? (
                               <button
                                 type="button"
                                 className="btn-ghost btn-sm"
@@ -442,6 +449,8 @@ export function McpServersPage() {
                               >
                                 编辑
                               </button>
+                              ) : null}
+                              {canDeleteServer ? (
                               <button
                                 type="button"
                                 className="btn-ghost btn-sm"
@@ -451,8 +460,9 @@ export function McpServersPage() {
                               >
                                 <IconTrash size={14} />
                               </button>
+                              ) : null}
                             </>
-                          )}
+                          ) : null}
                         </div>
                       </td>
                     </tr>

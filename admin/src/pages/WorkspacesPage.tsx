@@ -21,6 +21,7 @@ type Workspace = {
   branch: string
   created_at: string
   updated_at: string
+  can_write?: boolean
 }
 
 type Employee = {
@@ -381,6 +382,7 @@ export function WorkspacesPage() {
                           to={`/employees/${w.employee_id}`}
                           icon={<IconUsers size={14} style={{ color: 'var(--brand-600)' }} />}
                         />
+                        {w.can_write ? (
                         <button
                           type="button"
                           className="btn-ghost btn-sm"
@@ -390,8 +392,9 @@ export function WorkspacesPage() {
                         >
                           解绑
                         </button>
+                        ) : null}
                       </div>
-                    ) : (
+                    ) : w.can_write ? (
                       <SearchableSelect
                         value=""
                         onChange={(v) => {
@@ -401,13 +404,15 @@ export function WorkspacesPage() {
                         placeholder="分配员工…"
                         style={{ minWidth: 160 }}
                       />
+                    ) : (
+                      <span style={{ color: 'var(--text-muted)' }}>—</span>
                     )}
                   </td>
                   <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
                     {w.created_at ? formatDateTime(w.created_at) : '—'}
                   </td>
                   <td>
-                    {canWrite ? (
+                    {w.can_write ? (
                     <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
                       <button type="button" className="btn-ghost btn-sm" onClick={() => startEdit(w)}>
                         编辑
