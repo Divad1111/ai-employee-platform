@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/ai-employee-platform/server/internal/auth"
 	"github.com/ai-employee-platform/server/internal/feishu"
@@ -133,6 +134,10 @@ func (d Deps) handleFeishuBinding(w http.ResponseWriter, r *http.Request, sess *
 		writeErr(w, http.StatusBadRequest, "需要 feishu_bot_alias")
 		return
 	}
+	if code, msg := d.ensureOwnEmployeeBinding(r, sess, b.EmployeeID); code != 0 {
+		writeErr(w, code, msg)
+		return
+	}
 	d.Feishu.UpsertBinding(b)
 	d.auditUser(r, sess, "feishu.binding.upsert", map[string]string{
 		"employee_id": b.EmployeeID, "alias": b.FeishuAlias,
@@ -155,6 +160,22 @@ func (d Deps) handleDeleteFeishuBinding(w http.ResponseWriter, r *http.Request, 
 		writeErr(w, http.StatusBadRequest, "需要 employee_id 或 feishu_bot_alias")
 		return
 	}
+	targets := []string{}
+	if empID != "" {
+		targets = append(targets, empID)
+	} else {
+		for _, b := range d.Feishu.ListBindings() {
+			if strings.EqualFold(b.FeishuAlias, alias) {
+				targets = append(targets, b.EmployeeID)
+			}
+		}
+	}
+	for _, id := range targets {
+		if code, msg := d.ensureOwnEmployeeBinding(r, sess, id); code != 0 {
+			writeErr(w, code, msg)
+			return
+		}
+	}
 	if !d.Feishu.DeleteBinding(empID, alias) {
 		writeErr(w, http.StatusNotFound, "绑定不存在")
 		return
@@ -164,6 +185,21 @@ func (d Deps) handleDeleteFeishuBinding(w http.ResponseWriter, r *http.Request, 
 		"summary": fmt.Sprintf("删除员工 %s 的别名绑定 @%s", empID, alias),
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// ensureOwnEmployeeBinding 全局权限可改任意员工；其余只能改自己名下的员工。
+func (d Deps) ensureOwnEmployeeBinding(r *http.Request, sess *auth.Session, employeeID string) (int, string) {
+	if d.Employees == nil || employeeID == "" {
+		return http.StatusNotFound, "数字员工不存在"
+	}
+	e, err := d.Employees.Get(r.Context(), employeeID)
+	if err != nil || e == nil {
+		return http.StatusNotFound, "数字员工不存在"
+	}
+	if !d.canManageEmployee(r, sess, e, "employee.write") {
+		return http.StatusForbidden, "只能调整自己名下数字员工的飞书绑定"
+	}
+	return 0, ""
 }
 
 func (d Deps) handleFeishuEvents(w http.ResponseWriter, r *http.Request) {

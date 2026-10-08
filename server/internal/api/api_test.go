@@ -26,8 +26,8 @@ import (
 	"github.com/ai-employee-platform/server/internal/session"
 	"github.com/ai-employee-platform/server/internal/tokenusage"
 	"github.com/ai-employee-platform/server/internal/workflowmcp"
-	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/workspace"
+	"github.com/ai-employee-platform/server/internal/workstation"
 )
 
 func setupAPI(t *testing.T) (http.Handler, string) {
@@ -265,6 +265,46 @@ func TestAPISSEReceivesJobEvent(t *testing.T) {
 	cancel()
 	<-done
 	t.Fatalf("SSE 未收到 job.status: %s", rr.Body.String())
+}
+
+func TestWorkspaceUnbindAndDeleteStepUp(t *testing.T) {
+	h, tok := setupAPI(t)
+	code, emp := doJSON(t, h, http.MethodPost, "/api/employees", tok, map[string]string{"name": "绑定员工"})
+	if code != http.StatusCreated {
+		t.Fatal(emp)
+	}
+	empID := emp["id"].(string)
+	code, ws := doJSON(t, h, http.MethodPost, "/api/workspaces", tok, map[string]string{
+		"workstation_id": "WSN-1", "path": "/repo",
+	})
+	if code != http.StatusCreated {
+		t.Fatal(ws)
+	}
+	wsID := ws["id"].(string)
+	code, bound := doJSON(t, h, http.MethodPost, "/api/workspaces/"+wsID+"/bind", tok, map[string]string{"employee_id": empID})
+	if code != http.StatusOK || bound["employee_id"] != empID {
+		t.Fatalf("绑定失败: %d %v", code, bound)
+	}
+	code, unbound := doJSON(t, h, http.MethodPost, "/api/workspaces/"+wsID+"/bind", tok, map[string]string{"employee_id": ""})
+	if code != http.StatusOK || unbound["employee_id"] != "" {
+		t.Fatalf("解绑应清空员工: %d %v", code, unbound)
+	}
+	code, got := doJSON(t, h, http.MethodGet, "/api/employees/"+empID, tok, nil)
+	if wsLeft, _ := got["workspace_id"].(string); code != http.StatusOK || wsLeft != "" {
+		t.Fatalf("员工侧工作区应一并解除: %d %v", code, got)
+	}
+	code, denied := doJSON(t, h, http.MethodDelete, "/api/workspaces/"+wsID, tok, nil)
+	if code != http.StatusForbidden {
+		t.Fatalf("未二次认证不能删除工作区: %d %v", code, denied)
+	}
+	code, su := doJSON(t, h, http.MethodPost, "/api/auth/step-up", tok, map[string]string{"password": "admin123"})
+	if code != http.StatusOK {
+		t.Fatalf("step-up: %d %v", code, su)
+	}
+	code, del := doJSON(t, h, http.MethodDelete, "/api/workspaces/"+wsID, tok, nil)
+	if code != http.StatusOK {
+		t.Fatalf("二次认证后应能删除: %d %v", code, del)
+	}
 }
 
 func TestAPIUnauthorizedCannotWrite(t *testing.T) {

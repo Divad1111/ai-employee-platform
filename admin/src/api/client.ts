@@ -31,9 +31,6 @@ export async function apiRequest<T>(
     body = JSON.stringify(opts.json)
   }
   const res = await fetch(`/api${path}`, { ...opts, headers, body })
-  if (res.status === 401) {
-    setToken(null)
-  }
   if (!res.ok) {
     let msg = `${res.status}`
     try {
@@ -41,6 +38,11 @@ export async function apiRequest<T>(
       if (err.error) msg = err.error
     } catch {
       /* ignore */
+    }
+    // 二次认证密码错误不能清掉当前登录会话。
+    const wrongPassword = msg.includes('密码错误')
+    if (res.status === 401 && !wrongPassword) {
+      setToken(null)
     }
     throw new Error(msg)
   }

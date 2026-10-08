@@ -16,6 +16,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/quota"
 	"github.com/ai-employee-platform/server/internal/session"
 	"github.com/ai-employee-platform/server/internal/workspace"
+	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/wsmember"
 )
 
@@ -158,10 +159,8 @@ func (d Deps) canAccessWorkspace(r *http.Request, sess *auth.Session, ws *worksp
 	if scope == authz.ScopeALL {
 		return true
 	}
-	if d.WSMembers != nil && ws.WorkstationID != "" {
-		if ok, _ := d.WSMembers.HasAccess(r.Context(), ws.WorkstationID, sess.UserID); ok {
-			return true
-		}
+	if ws.WorkstationID != "" && d.userIDMayUseWorkstation(r.Context(), sess.UserID, ws.WorkstationID, sess.Roles) {
+		return true
 	}
 	if d.Employees != nil && ws.EmployeeID != "" {
 		if emp, err := d.Employees.Get(r.Context(), ws.EmployeeID); err == nil && emp != nil {
@@ -197,13 +196,20 @@ func (d Deps) filterWorkstationIDs(r *http.Request, sess *auth.Session, ids []st
 	if scope == authz.ScopeALL {
 		return ids
 	}
-	if d.WSMembers == nil {
-		return nil
-	}
 	allowed := map[string]struct{}{}
-	mems, _ := d.WSMembers.ListByUser(r.Context(), sess.UserID)
-	for _, m := range mems {
-		allowed[m.WorkstationID] = struct{}{}
+	if d.WSMembers != nil {
+		mems, _ := d.WSMembers.ListByUser(r.Context(), sess.UserID)
+		for _, m := range mems {
+			allowed[m.WorkstationID] = struct{}{}
+		}
+	}
+	if d.WSShare != nil {
+		pubs, _ := d.WSShare.ListPublic(r.Context())
+		for _, sh := range pubs {
+			if sh.CreatedBy == sess.UserID || workstation.RoleGranted(sess.Roles, sh.Roles) {
+				allowed[sh.WorkstationID] = struct{}{}
+			}
+		}
 	}
 	var out []string
 	for _, id := range ids {
@@ -214,16 +220,45 @@ func (d Deps) filterWorkstationIDs(r *http.Request, sess *auth.Session, ids []st
 	return out
 }
 
+func (d Deps) userIDMayUseWorkstation(ctx context.Context, userID, wsID string, roles []string) bool {
+	if userID == "" || wsID == "" {
+		return false
+	}
+	if d.WSMembers != nil {
+		if ok, _ := d.WSMembers.HasAccess(ctx, wsID, userID); ok {
+			return true
+		}
+	}
+	if d.WSShare == nil {
+		return false
+	}
+	share, err := d.WSShare.Get(ctx, wsID)
+	if err != nil {
+		return false
+	}
+	if share.CreatedBy != "" && share.CreatedBy == userID {
+		return true
+	}
+	if !share.IsPublic {
+		return false
+	}
+	if len(roles) == 0 && d.Auth != nil {
+		if u, err := d.Auth.Users().FindByID(ctx, userID); err == nil && u != nil {
+			roles = u.Roles
+		}
+	}
+	return workstation.RoleGranted(roles, share.Roles)
+}
+
 func (d Deps) canAccessWorkstation(r *http.Request, sess *auth.Session, wsID string) bool {
 	scope := d.resolveScope(r.Context(), sess, "workstation.read")
 	if scope == authz.ScopeALL {
 		return true
 	}
-	if d.WSMembers == nil || wsID == "" {
+	if wsID == "" {
 		return false
 	}
-	ok, _ := d.WSMembers.HasAccess(r.Context(), wsID, sess.UserID)
-	return ok
+	return d.userIDMayUseWorkstation(r.Context(), sess.UserID, wsID, sess.Roles)
 }
 
 func (d Deps) ensureWSAccessForEmployee(ctx context.Context, sess *auth.Session, wsID, ownerID string) error {
@@ -237,14 +272,7 @@ func (d Deps) ensureWSAccessForEmployee(ctx context.Context, sess *auth.Session,
 	if uid == "" {
 		uid = sess.UserID
 	}
-	if d.WSMembers == nil {
-		return employee.ErrWSAccessDenied
-	}
-	ok, err := d.WSMembers.HasAccess(ctx, wsID, uid)
-	if err != nil {
-		return err
-	}
-	if !ok {
+	if !d.userIDMayUseWorkstation(ctx, uid, wsID, nil) {
 		return employee.ErrWSAccessDenied
 	}
 	return nil
@@ -367,9 +395,42 @@ func (d Deps) handleGetUser(w http.ResponseWriter, r *http.Request, _ *auth.Sess
 		writeErr(w, http.StatusNotFound, "用户不存在")
 		return
 	}
-	var members []*wsmember.Membership
+	type wsGrant struct {
+		WorkstationID string `json:"workstation_id"`
+		Name          string `json:"name"`
+		Role          string `json:"role"`
+	}
+	var members []wsGrant
 	if d.WSMembers != nil {
-		members, _ = d.WSMembers.ListByUser(r.Context(), u.ID)
+		rows, _ := d.WSMembers.ListByUser(r.Context(), u.ID)
+		for _, m := range rows {
+			name := m.WorkstationID
+			if d.Workstations != nil && d.Workstations.Meta != nil {
+				if n := d.Workstations.Meta.GetName(r.Context(), m.WorkstationID); n != "" {
+					name = n
+				}
+			}
+			members = append(members, wsGrant{WorkstationID: m.WorkstationID, Name: name, Role: m.Role})
+		}
+	}
+	if d.WSShare != nil {
+		seen := map[string]struct{}{}
+		for _, m := range members {
+			seen[m.WorkstationID] = struct{}{}
+		}
+		pubs, _ := d.WSShare.ListPublic(r.Context())
+		for _, sh := range pubs {
+			if _, ok := seen[sh.WorkstationID]; ok || !workstation.RoleGranted(u.Roles, sh.Roles) {
+				continue
+			}
+			name := sh.WorkstationID
+			if d.Workstations != nil && d.Workstations.Meta != nil {
+				if n := d.Workstations.Meta.GetName(r.Context(), sh.WorkstationID); n != "" {
+					name = n
+				}
+			}
+			members = append(members, wsGrant{WorkstationID: sh.WorkstationID, Name: name, Role: "角色授权"})
+		}
 	}
 	var emps []*employee.Employee
 	if d.Employees != nil {
@@ -412,10 +473,20 @@ func (d Deps) handlePatchUser(w http.ResponseWriter, r *http.Request, sess *auth
 		writeErr(w, http.StatusBadRequest, "无效请求体")
 		return
 	}
-	// 2. 若要赋予超级管理员角色，操作者自身必须也是超级管理员
-	if req.Roles != nil && containsRole(req.Roles, "SUPER_ADMIN") && !isSuperAdmin(sess) {
-		writeErr(w, http.StatusForbidden, "只有超级管理员可以授予超级管理员角色")
-		return
+	// 2. 角色只允许超级管理员改；超级管理员自己的角色不能改。
+	if req.Roles != nil {
+		if !isSuperAdmin(sess) {
+			writeErr(w, http.StatusForbidden, "只有超级管理员可以修改用户角色")
+			return
+		}
+		if containsRole(u.Roles, "SUPER_ADMIN") {
+			writeErr(w, http.StatusForbidden, "不能修改超级管理员的角色")
+			return
+		}
+		if containsRole(req.Roles, "SUPER_ADMIN") {
+			writeErr(w, http.StatusForbidden, "不能通过此接口授予超级管理员角色")
+			return
+		}
 	}
 	if req.DisplayName != nil {
 		u.DisplayName = *req.DisplayName
@@ -676,6 +747,185 @@ func (d Deps) handlePatchRolePerms(w http.ResponseWriter, r *http.Request, sess 
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
+func cleanGrantRoles(roles []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, role := range roles {
+		role = strings.TrimSpace(role)
+		if role == "" {
+			continue
+		}
+		key := strings.ToUpper(role)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, role)
+	}
+	return out
+}
+
+func (d Deps) workstationCreatedBy(ctx context.Context, wsID string) string {
+	if d.WSShare == nil || wsID == "" {
+		return ""
+	}
+	share, err := d.WSShare.Get(ctx, wsID)
+	if err != nil {
+		return ""
+	}
+	return share.CreatedBy
+}
+
+func (d Deps) canManageWorkstationShare(ctx context.Context, sess *auth.Session, wsID string) bool {
+	createdBy := d.workstationCreatedBy(ctx, wsID)
+	return createdBy != "" && sess != nil && createdBy == sess.UserID
+}
+
+// canWriteWorkstation 按 workstation.write 的范围判断。ALL 可写全部；OWN 只能写自己创建的。
+func (d Deps) canWriteWorkstation(r *http.Request, sess *auth.Session, wsID string) bool {
+	switch d.resolveScope(r.Context(), sess, "workstation.write") {
+	case authz.ScopeALL:
+		return true
+	case authz.ScopeOWN, authz.ScopeASSIGNED:
+		createdBy := d.workstationCreatedBy(r.Context(), wsID)
+		return createdBy != "" && sess != nil && createdBy == sess.UserID
+	default:
+		return false
+	}
+}
+
+func (d Deps) handleGetWSSharing(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	wsID := r.PathValue("id")
+	if !d.canAccessWorkstation(r, sess, wsID) && !d.canManageWorkstationShare(r.Context(), sess, wsID) {
+		writeErr(w, http.StatusNotFound, "工作站不存在或无权限")
+		return
+	}
+	share := workstation.Share{WorkstationID: wsID}
+	if d.WSShare != nil {
+		if got, err := d.WSShare.Get(r.Context(), wsID); err == nil {
+			share = got
+		}
+	}
+	canManage := d.canManageWorkstationShare(r.Context(), sess, wsID)
+	type memberView struct {
+		UserID      string `json:"user_id"`
+		DisplayName string `json:"display_name"`
+		Username    string `json:"username"`
+		Role        string `json:"role"`
+	}
+	var members []memberView
+	if d.WSMembers != nil {
+		rows, _ := d.WSMembers.ListByWorkstation(r.Context(), wsID)
+		for _, m := range rows {
+			item := memberView{UserID: m.UserID, Role: m.Role}
+			if d.Auth != nil {
+				if u, err := d.Auth.Users().FindByID(r.Context(), m.UserID); err == nil && u != nil {
+					item.DisplayName = u.DisplayName
+					item.Username = u.Username
+				}
+			}
+			members = append(members, item)
+		}
+	}
+	var users []map[string]string
+	if canManage && d.Auth != nil {
+		list, _ := d.Auth.Users().List(r.Context())
+		for _, u := range list {
+			users = append(users, map[string]string{
+				"id": u.ID, "username": u.Username, "display_name": u.DisplayName,
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"workstation_id":     wsID,
+		"is_public":          share.IsPublic,
+		"grant_roles":        share.Roles,
+		"created_by_user_id": share.CreatedBy,
+		"can_manage":         canManage,
+		"members":            members,
+		"users":              users,
+	})
+}
+
+func (d Deps) handlePutWSSharing(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	wsID := r.PathValue("id")
+	if !d.canManageWorkstationShare(r.Context(), sess, wsID) {
+		writeErr(w, http.StatusForbidden, "只有工作站创建者可以调整授权")
+		return
+	}
+	var req struct {
+		Public        bool     `json:"public"`
+		GrantRoles    []string `json:"grant_roles"`
+		MemberUserIDs []string `json:"member_user_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "无效请求体")
+		return
+	}
+	roles := cleanGrantRoles(req.GrantRoles)
+	if req.Public && len(roles) == 0 {
+		writeErr(w, http.StatusBadRequest, "公用工作站请至少选择一个默认授权角色")
+		return
+	}
+	if !req.Public {
+		roles = nil
+	}
+	if d.WSShare != nil {
+		share, _ := d.WSShare.Get(r.Context(), wsID)
+		share.WorkstationID = wsID
+		share.IsPublic = req.Public
+		share.Roles = roles
+		if share.CreatedBy == "" {
+			share.CreatedBy = sess.UserID
+		}
+		if err := d.WSShare.Save(r.Context(), share); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if d.WSMembers != nil {
+		want := map[string]struct{}{sess.UserID: {}}
+		for _, id := range req.MemberUserIDs {
+			id = strings.TrimSpace(id)
+			if id != "" {
+				want[id] = struct{}{}
+			}
+		}
+		current, _ := d.WSMembers.ListByWorkstation(r.Context(), wsID)
+		for _, m := range current {
+			if _, ok := want[m.UserID]; ok || m.UserID == shareCreator(d, r, wsID) {
+				continue
+			}
+			_ = d.WSMembers.Remove(r.Context(), wsID, m.UserID)
+		}
+		creator := d.workstationCreatedBy(r.Context(), wsID)
+		if creator == "" {
+			creator = sess.UserID
+		}
+		_ = d.WSMembers.Upsert(r.Context(), &wsmember.Membership{
+			WorkstationID: wsID, UserID: creator, Role: wsmember.RoleOwner, Status: wsmember.StatusActive,
+		})
+		for id := range want {
+			if id == creator {
+				continue
+			}
+			_ = d.WSMembers.Upsert(r.Context(), &wsmember.Membership{
+				WorkstationID: wsID, UserID: id, Role: wsmember.RoleMember, Status: wsmember.StatusActive,
+			})
+		}
+	}
+	d.auditUser(r, sess, "workstation.sharing.update", map[string]string{
+		"workstation_id": wsID,
+		"public":         fmt.Sprintf("%v", req.Public),
+		"roles":          strings.Join(roles, ","),
+	})
+	d.handleGetWSSharing(w, r, sess)
+}
+
+func shareCreator(d Deps, r *http.Request, wsID string) string {
+	return d.workstationCreatedBy(r.Context(), wsID)
+}
+
 func (d Deps) handleListWSMembers(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	wsID := r.PathValue("id")
 	if !d.canAccessWorkstation(r, sess, wsID) {
@@ -696,8 +946,8 @@ func (d Deps) handleListWSMembers(w http.ResponseWriter, r *http.Request, sess *
 
 func (d Deps) handleAddWSMember(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	wsID := r.PathValue("id")
-	if d.resolveScope(r.Context(), sess, "workstation.write") != authz.ScopeALL && !d.canAccessWorkstation(r, sess, wsID) {
-		writeErr(w, http.StatusForbidden, "权限不足")
+	if !d.canManageWorkstationShare(r.Context(), sess, wsID) {
+		writeErr(w, http.StatusForbidden, "只有工作站创建者可以调整授权")
 		return
 	}
 	var req struct {
@@ -733,6 +983,14 @@ func (d Deps) handleRemoveWSMember(w http.ResponseWriter, r *http.Request, sess 
 	}
 	wsID := r.PathValue("id")
 	userID := r.PathValue("userId")
+	if !d.canManageWorkstationShare(r.Context(), sess, wsID) {
+		writeErr(w, http.StatusForbidden, "只有工作站创建者可以调整授权")
+		return
+	}
+	if userID == d.workstationCreatedBy(r.Context(), wsID) {
+		writeErr(w, http.StatusBadRequest, "不能取消创建者自己的授权")
+		return
+	}
 	if err := d.WSMembers.Remove(r.Context(), wsID, userID); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

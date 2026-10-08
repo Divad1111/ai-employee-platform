@@ -22,12 +22,14 @@ var (
 
 // Token 一次性注册令牌。
 type Token struct {
-	ID        string
-	Hash      string
-	Label     string
-	ExpiresAt time.Time
-	UsedAt    time.Time
-	CreatedBy string
+	ID         string
+	Hash       string
+	Label      string
+	ExpiresAt  time.Time
+	UsedAt     time.Time
+	CreatedBy  string
+	Public     bool
+	GrantRoles []string
 }
 
 // Store Token 存储。
@@ -55,7 +57,7 @@ func NewService(store Store, ca *certca.Authority, audit Auditor) *Service {
 }
 
 // CreateToken 签发一次性 token（明文仅返回一次）。
-func (s *Service) CreateToken(ctx context.Context, label, createdBy, ip string, ttl time.Duration) (plain string, meta *Token, err error) {
+func (s *Service) CreateToken(ctx context.Context, label, createdBy, ip string, ttl time.Duration, public bool, grantRoles []string) (plain string, meta *Token, err error) {
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
@@ -66,11 +68,13 @@ func (s *Service) CreateToken(ctx context.Context, label, createdBy, ip string, 
 	plain = hex.EncodeToString(b)
 	sum := sha256.Sum256([]byte(plain))
 	t := &Token{
-		ID:        hex.EncodeToString(b[:8]),
-		Hash:      hex.EncodeToString(sum[:]),
-		Label:     label,
-		ExpiresAt: time.Now().Add(ttl),
-		CreatedBy: createdBy,
+		ID:         hex.EncodeToString(b[:8]),
+		Hash:       hex.EncodeToString(sum[:]),
+		Label:      label,
+		ExpiresAt:  time.Now().Add(ttl),
+		CreatedBy:  createdBy,
+		Public:     public,
+		GrantRoles: append([]string(nil), grantRoles...),
 	}
 	if err := s.store.Save(ctx, t); err != nil {
 		return "", nil, err
@@ -79,29 +83,30 @@ func (s *Service) CreateToken(ctx context.Context, label, createdBy, ip string, 
 	return plain, t, nil
 }
 
-// Enroll 校验 token、签发客户端证书。返回 CA PEM、客户端证书 PEM、证书记录、Token 标签名称。
-func (s *Service) Enroll(ctx context.Context, plainToken, workstationID string, csrPEM []byte, ip string) (caPEM, certPEM string, rec *certca.Record, tokenLabel string, err error) {
+// Enroll 校验 token、签发客户端证书。返回 CA PEM、客户端证书 PEM、证书记录、Token 标签、发令牌的用户。
+func (s *Service) Enroll(ctx context.Context, plainToken, workstationID string, csrPEM []byte, ip string) (caPEM, certPEM string, rec *certca.Record, tokenLabel, createdBy string, public bool, grantRoles []string, err error) {
 	sum := sha256.Sum256([]byte(plainToken))
 	hash := hex.EncodeToString(sum[:])
 	t, err := s.store.FindByHash(ctx, hash)
 	if err != nil || t == nil {
 		s.audit.Log(ctx, "WORKSTATION", workstationID, "enrollment.enroll", "failed_token", ip, nil)
-		return "", "", nil, "", ErrTokenInvalid
+		return "", "", nil, "", "", false, nil, ErrTokenInvalid
 	}
 	if !t.UsedAt.IsZero() {
-		return "", "", nil, "", ErrTokenUsed
+		return "", "", nil, "", "", false, nil, ErrTokenUsed
 	}
 	if time.Now().After(t.ExpiresAt) {
-		return "", "", nil, "", ErrTokenInvalid
+		return "", "", nil, "", "", false, nil, ErrTokenInvalid
 	}
 	rec, err = s.ca.SignCSR(workstationID, csrPEM, 365)
 	if err != nil {
 		s.audit.Log(ctx, "WORKSTATION", workstationID, "enrollment.enroll", "failed_sign", ip, nil)
-		return "", "", nil, "", err
+		return "", "", nil, "", "", false, nil, err
 	}
 	_ = s.store.MarkUsed(ctx, t.ID)
 	s.audit.Log(ctx, "WORKSTATION", workstationID, "enrollment.enroll", "success", ip, map[string]string{"fingerprint": rec.Fingerprint})
-	return string(s.ca.CAPEM()), rec.CertPEM, rec, t.Label, nil
+	roles := append([]string(nil), t.GrantRoles...)
+	return string(s.ca.CAPEM()), rec.CertPEM, rec, t.Label, t.CreatedBy, t.Public, roles, nil
 }
 
 // MemoryStore 内存 Token 库。

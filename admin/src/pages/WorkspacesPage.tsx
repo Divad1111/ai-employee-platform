@@ -3,7 +3,7 @@
  * 创建流程：先选工作站节点，再填写该节点上的本机绝对路径。
  */
 import { FormEvent, useEffect, useMemo, useState } from 'react'
-import { apiDelete, apiGet, apiPost } from '../api/client'
+import { apiDelete, apiGet, apiPatch, apiPost } from '../api/client'
 import { IconFolder, IconPlus, IconRefresh, IconUsers, IconServer } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
@@ -45,11 +45,17 @@ export function WorkspacesPage() {
   const [repository, setRepository] = useState('')
   const [branch, setBranch] = useState('main')
   const [employeeId, setEmployeeId] = useState('')
+  const [editingId, setEditingId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
   const [loading, setLoading] = useState(false)
   const [deleteId, setDeleteId] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [deletePassword, setDeletePassword] = useState('')
+  const [deleteTotp, setDeleteTotp] = useState('')
+  const [deleteTotpEnabled, setDeleteTotpEnabled] = useState(false)
+  const [showDeleteTotp, setShowDeleteTotp] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
 
   async function load() {
     setLoading(true)
@@ -94,7 +100,28 @@ export function WorkspacesPage() {
     void load().catch((e) => setError(String(e)))
   }, [])
 
-  async function onCreate(e: FormEvent) {
+  function resetWorkspaceForm() {
+    setEditingId(null)
+    setWorkstationId('')
+    setPath('')
+    setRepository('')
+    setBranch('main')
+    setEmployeeId('')
+  }
+
+  function startEdit(w: Workspace) {
+    setEditingId(w.id)
+    setWorkstationId(w.workstation_id || '')
+    setPath(w.path || '')
+    setRepository(w.repository || '')
+    setBranch(w.branch || 'main')
+    setEmployeeId(w.employee_id || '')
+    setError('')
+    setMsg('')
+    document.getElementById('workspace-editor')?.scrollIntoView({ block: 'start' })
+  }
+
+  async function onSubmit(e: FormEvent) {
     e.preventDefault()
     setError('')
     setMsg('')
@@ -102,23 +129,28 @@ export function WorkspacesPage() {
       setError('请先选择工作站节点，再填写该节点上的本机路径')
       return
     }
+    const body = {
+      workstation_id: workstationId.trim(),
+      path: path.trim(),
+      repository: repository.trim(),
+      branch: branch.trim() || 'main',
+    }
     try {
-      await apiPost('/workspaces', {
-        workstation_id: workstationId.trim(),
-        path: path.trim(),
-        repository: repository.trim(),
-        branch: branch.trim() || 'main',
-        employee_id: employeeId.trim() || undefined,
-      })
-      setWorkstationId('')
-      setPath('')
-      setRepository('')
-      setBranch('main')
-      setEmployeeId('')
-      setMsg('项目工作区创建成功')
+      if (editingId) {
+        await apiPatch(`/workspaces/${editingId}`, body)
+        await apiPost(`/workspaces/${editingId}/bind`, { employee_id: employeeId.trim() })
+        setMsg('工作区已更新')
+      } else {
+        await apiPost('/workspaces', {
+          ...body,
+          employee_id: employeeId.trim() || undefined,
+        })
+        setMsg('项目工作区创建成功')
+      }
+      resetWorkspaceForm()
       await load()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '创建工作区失败')
+      setError(err instanceof Error ? err.message : editingId ? '更新工作区失败' : '创建工作区失败')
     }
   }
 
@@ -127,25 +159,48 @@ export function WorkspacesPage() {
     setMsg('')
     try {
       await apiPost(`/workspaces/${wsId}/bind`, { employee_id: empId })
-      setMsg('工作区绑定更新成功')
+      setMsg(empId ? '工作区绑定更新成功' : '已解除工作区绑定')
       await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : '绑定员工失败')
     }
   }
 
+  function openDelete(id: string) {
+    setDeleteId(id)
+    setDeletePassword('')
+    setDeleteTotp('')
+    setDeleteError('')
+    setShowDeleteTotp(false)
+    void apiGet<{ enabled: boolean }>('/auth/totp')
+      .then((res) => setDeleteTotpEnabled(!!res.enabled))
+      .catch(() => setDeleteTotpEnabled(false))
+  }
+
   async function confirmDelete() {
     if (!deleteId) return
+    if (!deletePassword.trim()) {
+      setDeleteError('删除工作区需要二次认证，请输入登录密码')
+      return
+    }
     setDeleting(true)
-    setError('')
-    setMsg('')
+    setDeleteError('')
     try {
+      await apiPost('/auth/step-up', {
+        password: deletePassword.trim(),
+        totp: deleteTotp.trim() || undefined,
+      })
       await apiDelete(`/workspaces/${deleteId}`)
       setMsg('工作区已删除')
       setDeleteId(null)
       await load()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除工作区失败')
+      const errMsg = err instanceof Error ? err.message : '删除工作区失败'
+      if (errMsg.includes('TOTP') || errMsg.includes('动态验证码') || errMsg.includes('动态口令') || errMsg.includes('双因子')) {
+        setDeleteTotpEnabled(true)
+        setShowDeleteTotp(true)
+      }
+      setDeleteError(errMsg)
     } finally {
       setDeleting(false)
     }
@@ -196,14 +251,14 @@ export function WorkspacesPage() {
       {msg ? <div className="ok-msg">{msg}</div> : null}
 
       {canWrite ? (
-      <div className="panel">
+      <div className="panel" id="workspace-editor">
         <div className="panel-header">
           <div>
-            <h2>新建项目工作区</h2>
-            <p>先选择工作站节点，再填写该节点上的本机绝对路径；路径只在所选节点上有效</p>
+            <h2>{editingId ? '编辑工作区' : '新建项目工作区'}</h2>
+            <p>{editingId ? '修改工作站、路径、仓库和绑定员工后保存' : '先选择工作站节点，再填写该节点上的本机绝对路径；路径只在所选节点上有效'}</p>
           </div>
         </div>
-        <form className="inline-form" onSubmit={onCreate}>
+        <form className="inline-form" onSubmit={onSubmit}>
           <SearchableSelect
             value={workstationId}
             onChange={setWorkstationId}
@@ -246,8 +301,13 @@ export function WorkspacesPage() {
           />
           <button type="submit" disabled={!workstationId || !path.trim()}>
             <IconPlus size={15} />
-            <span>创建工作区</span>
+            <span>{editingId ? '保存修改' : '创建工作区'}</span>
           </button>
+          {editingId ? (
+            <button type="button" className="btn-ghost" onClick={resetWorkspaceForm}>
+              取消编辑
+            </button>
+          ) : null}
         </form>
         {workstations.length === 0 ? (
           <p style={{ margin: '0.75rem 0 0', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
@@ -348,14 +408,19 @@ export function WorkspacesPage() {
                   </td>
                   <td>
                     {canWrite ? (
-                    <button
-                      type="button"
-                      className="btn-ghost btn-sm"
-                      style={{ color: '#dc2626' }}
-                      onClick={() => setDeleteId(w.id)}
-                    >
-                      删除
-                    </button>
+                    <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                      <button type="button" className="btn-ghost btn-sm" onClick={() => startEdit(w)}>
+                        编辑
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-ghost btn-sm"
+                        style={{ color: '#dc2626' }}
+                        onClick={() => openDelete(w.id)}
+                      >
+                        删除
+                      </button>
+                    </div>
                     ) : (
                       <span className="muted">—</span>
                     )}
@@ -388,7 +453,36 @@ export function WorkspacesPage() {
         busy={deleting}
         onCancel={() => !deleting && setDeleteId(null)}
         onConfirm={() => void confirmDelete()}
-      />
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem', marginBottom: '0.8rem' }}>
+          <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>登录密码（二次认证）</label>
+          <input
+            type="password"
+            value={deletePassword}
+            onChange={(e) => setDeletePassword(e.target.value)}
+            placeholder="请输入当前登录密码"
+            autoComplete="current-password"
+          />
+          {(deleteTotpEnabled || showDeleteTotp) ? (
+            <input
+              value={deleteTotp}
+              onChange={(e) => setDeleteTotp(e.target.value)}
+              placeholder="TOTP 动态验证码"
+              inputMode="numeric"
+            />
+          ) : (
+            <button
+              type="button"
+              className="btn-ghost btn-sm"
+              style={{ alignSelf: 'flex-start' }}
+              onClick={() => setShowDeleteTotp(true)}
+            >
+              + 输入 TOTP 动态码
+            </button>
+          )}
+          {deleteError ? <p className="error" style={{ margin: 0 }}>{deleteError}</p> : null}
+        </div>
+      </ConfirmDialog>
     </section>
   )
 }

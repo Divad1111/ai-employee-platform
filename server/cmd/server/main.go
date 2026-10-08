@@ -79,13 +79,14 @@ func main() {
 		wsMetaStore workstation.MetaStore = workstation.NewMemoryMeta()
 		totpStore   approval.TOTPStore    = approval.NewMemoryTOTP()
 		certStore   certca.CertificateStore
-		wfStore     workflowmcp.Store = workflowmcp.NewMemoryStore()
-		mcpTokStore mcpauth.Store     = mcpauth.NewMemoryStore()
-		autoStore   automation.Store  = automation.NewMemoryStore()
-		artStore    artifact.Store    = artifact.NewMemoryStore()
-		wsMembers   wsmember.Store    = wsmember.NewMemoryStore()
-		quotaStore  quota.Store       = quota.NewMemoryStore()
-		mcpStore    mcp.Store         = mcp.NewMemoryStore()
+		wfStore     workflowmcp.Store      = workflowmcp.NewMemoryStore()
+		mcpTokStore mcpauth.Store          = mcpauth.NewMemoryStore()
+		autoStore   automation.Store       = automation.NewMemoryStore()
+		artStore    artifact.Store         = artifact.NewMemoryStore()
+		wsMembers   wsmember.Store         = wsmember.NewMemoryStore()
+		wsShare     workstation.ShareStore = workstation.NewMemoryShare()
+		quotaStore  quota.Store            = quota.NewMemoryStore()
+		mcpStore    mcp.Store              = mcp.NewMemoryStore()
 		pgSQL       *sql.DB
 	)
 
@@ -124,6 +125,10 @@ func main() {
 			autoStore = automation.NewPostgresStore(db.SQL)
 			artStore = artifact.NewPostgresStore(db.SQL)
 			wsMembers = db.NewWSMemberStore()
+			wsShare = db.NewShareStore()
+			if err := db.EnsureWorkstationOwners(context.Background()); err != nil {
+				fmt.Printf("⚠️ 回填工作站创建者成员失败: %v\n", err)
+			}
 			quotaStore = quota.NewPostgresStore(db.SQL)
 			mcpStore = mcp.NewPGStore(db.SQL)
 		}
@@ -540,6 +545,7 @@ func main() {
 		SkillSyncer:     sched,
 		Automation:      autoSvc,
 		WSMembers:       wsMembers,
+		WSShare:         wsShare,
 		Quota:           quotaSvc,
 		Backup:          backupSvc,
 	})

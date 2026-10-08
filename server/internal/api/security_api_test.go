@@ -74,6 +74,18 @@ func TestStepUpRequiredForDelete(t *testing.T) {
 	}
 }
 
+func TestStepUpWrongPasswordKeepsSession(t *testing.T) {
+	h, tok, _ := setupM7(t)
+	code, bad := doJSON(t, h, http.MethodPost, "/api/auth/step-up", tok, map[string]string{"password": "wrong-pass"})
+	if code != http.StatusForbidden || bad["error"] != "密码错误" {
+		t.Fatalf("密码错误应 403 且不注销: %d %v", code, bad)
+	}
+	code, me := doJSON(t, h, http.MethodGet, "/api/me", tok, nil)
+	if code != http.StatusOK || me["username"] != "admin" {
+		t.Fatalf("错误密码后会话应仍有效: %d %v", code, me)
+	}
+}
+
 func TestPermissionEvaluateGitPushNeedsTOTP(t *testing.T) {
 	h, tok, apr := setupM7(t)
 	ctx := context.Background()

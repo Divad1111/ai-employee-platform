@@ -968,14 +968,24 @@ export function EmployeeDetailPage() {
         )}
       </div>
 
-      {feishu ? (
-        <div className="panel" style={{ marginTop: '1rem' }}>
-          <h2>飞书协同绑定状态</h2>
-          <p style={{ margin: '0.5rem 0', fontSize: '0.88rem' }}>
-            机器人别名: <strong>@{feishu.feishu_bot_alias}</strong> · 飞书 OpenID: <span className="mono">{feishu.feishu_open_id}</span>
-          </p>
+      <div className="panel" style={{ marginTop: '1rem' }}>
+        <div className="panel-header">
+          <div>
+            <h2>飞书协同绑定状态</h2>
+            <p>{feishu ? '该员工已绑定飞书呼叫别名' : '尚未绑定飞书，绑定后可在飞书里通过别名呼叫该员工'}</p>
+          </div>
+          {feishu ? null : (
+            <Link className="btn btn-sm" to={`/feishu?employee=${encodeURIComponent(e.id)}#feishu-bindings`}>
+              绑定飞书
+            </Link>
+          )}
         </div>
-      ) : null}
+        {feishu ? (
+          <p style={{ margin: '0 1.1rem 1rem', fontSize: '0.88rem' }}>
+            机器人别名: <strong>@{feishu.feishu_bot_alias}</strong> · 飞书 OpenID: <span className="mono">{feishu.feishu_open_id || '—'}</span>
+          </p>
+        ) : null}
+      </div>
 
       {/* 删除数字员工危险操作二次确认弹窗 */}
       {showDeleteModal ? (

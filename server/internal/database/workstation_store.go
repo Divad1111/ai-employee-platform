@@ -23,6 +23,18 @@ func (s *PostgresWorkstationStore) Upsert(ctx context.Context, id, name string) 
 	return err
 }
 
+// SetCreatedBy 记下发注册令牌的用户。已有创建者时不覆盖。
+func (s *PostgresWorkstationStore) SetCreatedBy(ctx context.Context, id, userID string) error {
+	if id == "" || userID == "" {
+		return nil
+	}
+	_, err := s.db.SQL.ExecContext(ctx, `
+		UPDATE workstations
+		SET created_by_user_id = $2::uuid, updated_at = NOW()
+		WHERE id = $1 AND created_by_user_id IS NULL`, id, userID)
+	return err
+}
+
 func (s *PostgresWorkstationStore) GetName(ctx context.Context, id string) string {
 	var name string
 	_ = s.db.SQL.QueryRowContext(ctx, `SELECT name FROM workstations WHERE id = $1`, id).Scan(&name)

@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../api/client'
+import { roleDisplayName } from '../lib/rbacLabels'
 import { StatusBadge } from '../components/StatusBadge'
 import { EntityName } from '../components/EntityName'
 import { IconAlertTriangle, IconCheckCircle, IconPlus, IconRefresh, IconServer, IconTerminal, IconTrash } from '../components/Icons'
@@ -19,6 +21,8 @@ type WS = {
   last_heartbeat_at?: string
   cpu_percent?: number
   memory_percent?: number
+  created_by_user_id?: string
+  can_write?: boolean
 }
 
 type TokenResult = {
@@ -62,6 +66,9 @@ export function WorkstationsPage() {
   // 令牌生成表单
   const [label, setLabel] = useState('开发计算节点')
   const [ttlHours, setTtlHours] = useState(24)
+  const [isPublic, setIsPublic] = useState(false)
+  const [grantRoles, setGrantRoles] = useState<string[]>([])
+  const [roleChoices, setRoleChoices] = useState<Array<{ name: string; description: string }>>([])
   const [serverHost, setServerHost] = useState(window.location.hostname || '127.0.0.1')
   const [serverPort, setServerPort] = useState('')
 
@@ -166,6 +173,22 @@ export function WorkstationsPage() {
     void load()
   }, [])
 
+  useEffect(() => {
+    if (!showEnroll) return
+    apiGet<{ items: Array<{ name: string; description: string }> }>('/roles')
+      .then((res) => setRoleChoices((res.items || []).filter((r) => r.name !== 'SUPER_ADMIN')))
+      .catch(() => setRoleChoices([
+        { name: 'ADMIN', description: '管理员' },
+        { name: 'OPERATOR', description: '操作员' },
+        { name: 'USER', description: '普通用户' },
+        { name: 'VIEWER', description: '只读' },
+      ]))
+  }, [showEnroll])
+
+  function toggleGrantRole(name: string) {
+    setGrantRoles((prev) => (prev.includes(name) ? prev.filter((r) => r !== name) : [...prev, name]))
+  }
+
   async function handleCreateToken(e: React.FormEvent) {
     e.preventDefault()
     setGenerating(true)
@@ -173,9 +196,16 @@ export function WorkstationsPage() {
     setTokenResult(null)
     setCopied(false)
     try {
+      if (isPublic && grantRoles.length === 0) {
+        setTokenErr('公用工作站请至少选择一个默认授权角色')
+        setGenerating(false)
+        return
+      }
       const res = await apiPost<TokenResult>('/enrollment/tokens', {
         label: label.trim() || '工作站计算节点',
         ttl_hours: Number(ttlHours) || 24,
+        public: isPublic,
+        grant_roles: isPublic ? grantRoles : [],
       })
       setTokenResult(res)
       if (res.server_port && (!serverPort || serverPort === '8080')) {
@@ -346,6 +376,23 @@ aew service status`
                 {generating ? '正在生成…' : '生成一次性接入令牌'}
               </button>
             </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginTop: '0.9rem', fontSize: '0.9rem' }}>
+              <input type="checkbox" checked={isPublic} onChange={(e) => setIsPublic(e.target.checked)} />
+              公用工作站（同角色的用户默认可使用）
+            </label>
+            {isPublic ? (
+              <div style={{ marginTop: '0.7rem' }}>
+                <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.4rem' }}>默认授权角色</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.6rem 1rem' }}>
+                  {roleChoices.map((r) => (
+                    <label key={r.name} style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.86rem' }}>
+                      <input type="checkbox" checked={grantRoles.includes(r.name)} onChange={() => toggleGrantRole(r.name)} />
+                      {roleDisplayName(r.name, r.description)}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </form>
 
           {tokenErr && <div className="error" style={{ marginBottom: '1rem' }}>{tokenErr}</div>}
@@ -509,7 +556,10 @@ aew service status`
                   </td>
                   <td>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                      {canWrite ? (
+                      <Link to={`/workstations/${w.id}`} className="btn-ghost btn-sm" style={{ textDecoration: 'none' }}>
+                        详情
+                      </Link>
+                      {w.can_write ? (
                         <>
                           <button
                             type="button"
@@ -529,7 +579,7 @@ aew service status`
                             <span>删除</span>
                           </button>
                         </>
-                      ) : (
+                      ) : canWrite ? null : (
                         <span className="muted">只读</span>
                       )}
                     </div>

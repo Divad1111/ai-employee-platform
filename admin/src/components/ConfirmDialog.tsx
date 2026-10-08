@@ -15,6 +15,7 @@ export type ConfirmDialogProps = {
   cancelText?: string
   danger?: boolean
   busy?: boolean
+  children?: ReactNode
   onConfirm: () => void
   onCancel: () => void
 }
@@ -29,6 +30,7 @@ export function ConfirmDialog({
   cancelText = '取消',
   danger = true,
   busy,
+  children,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -55,6 +57,7 @@ export function ConfirmDialog({
             {targetMeta ? <code className="mono">{targetMeta}</code> : null}
           </div>
         ) : null}
+        {children}
         <div className="auto-modal-actions">
           <button type="button" className="btn-ghost" onClick={onCancel} disabled={busy}>
             {cancelText}

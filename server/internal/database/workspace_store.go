@@ -72,6 +72,28 @@ func (s *PostgresWorkspaceStore) List(ctx context.Context) ([]*workspace.Workspa
 }
 
 func (s *PostgresWorkspaceStore) Delete(ctx context.Context, id string) error {
-	_, err := s.db.SQL.ExecContext(ctx, `DELETE FROM workspaces WHERE id = $1`, id)
-	return err
+	tx, err := s.db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// 历史会话和任务保留，只解开指向本工作区的外键。
+	if _, err := tx.ExecContext(ctx, `UPDATE employees SET workspace_id = NULL WHERE workspace_id = $1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET workspace_id = NULL WHERE workspace_id = $1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET workspace_id = NULL WHERE workspace_id = $1`, id); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return workspace.ErrNotFound
+	}
+	return tx.Commit()
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -315,7 +316,8 @@ func (d Deps) handleStepUp(w http.ResponseWriter, r *http.Request, sess *auth.Se
 	// 1. 先校验密码（不提前延长二次认证窗口）
 	if d.Auth != nil {
 		if err := d.Auth.VerifyPassword(r.Context(), sess.Username, body.Password); err != nil {
-			writeErr(w, http.StatusUnauthorized, "密码错误")
+			// 密码错误只表示二次认证失败，登录会话仍然有效。
+			writeErr(w, http.StatusForbidden, "密码错误")
 			return
 		}
 	}
@@ -333,6 +335,10 @@ func (d Deps) handleStepUp(w http.ResponseWriter, r *http.Request, sess *auth.Se
 	// 3. 密码及 TOTP 全部校验通过后，才延长 Step-Up 状态
 	out, err := d.Auth.StepUp(r.Context(), sess.Token, body.Password, clientIP(r), 10*time.Minute)
 	if err != nil {
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			writeErr(w, http.StatusForbidden, "密码错误")
+			return
+		}
 		writeErr(w, http.StatusUnauthorized, err.Error())
 		return
 	}

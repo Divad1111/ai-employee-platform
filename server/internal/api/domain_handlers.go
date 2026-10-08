@@ -209,13 +209,13 @@ func addBucket(m map[string]*usageBucket, id, name string, j *job.Job) {
 		b = &usageBucket{ID: id, Name: name}
 		m[id] = b
 	}
-		b.InputTokens += j.InputTokens
-		b.OutputTokens += j.OutputTokens
-		if j.TotalTokens > 0 {
-			b.TotalTokens += j.TotalTokens
-		} else {
-			b.TotalTokens += j.InputTokens + j.OutputTokens
-		}
+	b.InputTokens += j.InputTokens
+	b.OutputTokens += j.OutputTokens
+	if j.TotalTokens > 0 {
+		b.TotalTokens += j.TotalTokens
+	} else {
+		b.TotalTokens += j.InputTokens + j.OutputTokens
+	}
 	b.Jobs++
 }
 
@@ -322,10 +322,33 @@ func (d Deps) handleUpsertPermissionRule(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, rule)
 }
 
-func (d Deps) handleListFeishuBindings(w http.ResponseWriter, _ *http.Request, _ *auth.Session) {
+func (d Deps) handleListFeishuBindings(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	if d.Feishu == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"items": []feishu.Binding{}})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": d.Feishu.ListBindings()})
+	all := d.Feishu.ListBindings()
+	if d.resolveScope(r.Context(), sess, "employee.read") == authz.ScopeALL {
+		writeJSON(w, http.StatusOK, map[string]any{"items": all})
+		return
+	}
+	items := make([]feishu.Binding, 0)
+	for _, b := range all {
+		if d.ownsEmployee(r, sess, b.EmployeeID) {
+			items = append(items, b)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// ownsEmployee 当前用户是否为该数字员工的归属人。
+func (d Deps) ownsEmployee(r *http.Request, sess *auth.Session, employeeID string) bool {
+	if d.Employees == nil || employeeID == "" || sess == nil {
+		return false
+	}
+	e, err := d.Employees.Get(r.Context(), employeeID)
+	if err != nil || e == nil {
+		return false
+	}
+	return e.OwnerUserID == sess.UserID
 }

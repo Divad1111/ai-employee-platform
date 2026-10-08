@@ -98,19 +98,21 @@ func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string
 	return w, nil
 }
 
-// BindEmployee 绑定 Employee（独占锁）。
+// BindEmployee 绑定 Employee。一位员工只挂一个工作区；改绑时先解除原员工，并把目标员工从其他工作区移过来。
 func (s *Service) BindEmployee(ctx context.Context, workspaceID, employeeID, actorID, ip string) (*Workspace, error) {
 	w, err := s.store.Get(ctx, workspaceID)
 	if err != nil || w == nil {
 		return nil, ErrNotFound
 	}
+	if employeeID == "" {
+		return s.UnbindEmployee(ctx, workspaceID, actorID, ip)
+	}
 	if s.binder != nil {
-		owner, err := s.binder.FindByWorkspace(ctx, workspaceID)
-		if err != nil {
+		if err := s.detachWorkspaceOwners(ctx, w, employeeID); err != nil {
 			return nil, err
 		}
-		if owner != "" && owner != employeeID {
-			return nil, ErrLocked
+		if err := s.detachEmployeeElsewhere(ctx, employeeID, workspaceID); err != nil {
+			return nil, err
 		}
 		if err := s.binder.BindWorkspace(ctx, employeeID, workspaceID); err != nil {
 			return nil, err
@@ -125,6 +127,85 @@ func (s *Service) BindEmployee(ctx context.Context, workspaceID, employeeID, act
 		"workspace_id": workspaceID, "employee_id": employeeID,
 	})
 	return w, nil
+}
+
+// UnbindEmployee 解除工作区与数字员工的绑定。
+func (s *Service) UnbindEmployee(ctx context.Context, workspaceID, actorID, ip string) (*Workspace, error) {
+	w, err := s.store.Get(ctx, workspaceID)
+	if err != nil || w == nil {
+		return nil, ErrNotFound
+	}
+	if s.binder != nil {
+		owner, err := s.binder.FindByWorkspace(ctx, workspaceID)
+		if err != nil {
+			return nil, err
+		}
+		clear := map[string]struct{}{}
+		if owner != "" {
+			clear[owner] = struct{}{}
+		}
+		if w.EmployeeID != "" {
+			clear[w.EmployeeID] = struct{}{}
+		}
+		for empID := range clear {
+			if err := s.binder.BindWorkspace(ctx, empID, ""); err != nil {
+				return nil, err
+			}
+		}
+	}
+	w.EmployeeID = ""
+	w.UpdatedAt = time.Now().UTC()
+	if err := s.store.Save(ctx, w); err != nil {
+		return nil, err
+	}
+	s.audit.Log(ctx, "USER", actorID, "workspace.unbind", "success", ip, map[string]string{
+		"workspace_id": workspaceID,
+	})
+	return w, nil
+}
+
+// detachWorkspaceOwners 换绑前解除当前挂在该工作区上的其他员工。
+func (s *Service) detachWorkspaceOwners(ctx context.Context, w *Workspace, keepEmployee string) error {
+	if s.binder == nil {
+		return nil
+	}
+	owner, err := s.binder.FindByWorkspace(ctx, w.ID)
+	if err != nil {
+		return err
+	}
+	seen := map[string]struct{}{}
+	for _, id := range []string{owner, w.EmployeeID} {
+		if id == "" || id == keepEmployee {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if err := s.binder.BindWorkspace(ctx, id, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// detachEmployeeElsewhere 目标员工若还挂在别的工作区上，先从那边摘下来。
+func (s *Service) detachEmployeeElsewhere(ctx context.Context, employeeID, keepWorkspace string) error {
+	list, err := s.store.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, other := range list {
+		if other == nil || other.ID == keepWorkspace || other.EmployeeID != employeeID {
+			continue
+		}
+		other.EmployeeID = ""
+		other.UpdatedAt = time.Now().UTC()
+		if err := s.store.Save(ctx, other); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Get / List / Delete / Update
@@ -148,8 +229,8 @@ func (s *Service) Update(ctx context.Context, id, workstationID, path, repo, bra
 	changes := []string{
 		audit.FormatChange("工作站", w.WorkstationID, pick(workstationID, w.WorkstationID)),
 		audit.FormatChange("路径", w.Path, pick(path, w.Path)),
-		audit.FormatChange("仓库", w.Repository, pick(repo, w.Repository)),
-		audit.FormatChange("分支", w.Branch, pick(branch, w.Branch)),
+		audit.FormatChange("仓库", w.Repository, repo),
+		audit.FormatChange("分支", w.Branch, branch),
 	}
 	if workstationID != "" {
 		w.WorkstationID = workstationID
@@ -157,12 +238,9 @@ func (s *Service) Update(ctx context.Context, id, workstationID, path, repo, bra
 	if path != "" {
 		w.Path = path
 	}
-	if repo != "" {
-		w.Repository = repo
-	}
-	if branch != "" {
-		w.Branch = branch
-	}
+	// 仓库和分支允许改成空，编辑表单会原样提交。
+	w.Repository = repo
+	w.Branch = branch
 	w.UpdatedAt = time.Now().UTC()
 	if err := s.store.Save(ctx, w); err != nil {
 		return nil, err
@@ -182,6 +260,9 @@ func pick(next, cur string) string {
 
 func (s *Service) Delete(ctx context.Context, id, actorID, ip string) error {
 	if _, err := s.Get(ctx, id); err != nil {
+		return err
+	}
+	if _, err := s.UnbindEmployee(ctx, id, actorID, ip); err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
 	if err := s.store.Delete(ctx, id); err != nil {

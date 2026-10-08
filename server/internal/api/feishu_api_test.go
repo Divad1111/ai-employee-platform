@@ -210,3 +210,87 @@ func TestSecretNotEchoed(t *testing.T) {
 		t.Fatal("应有引用")
 	}
 }
+
+func TestFeishuBindingListScopedToOwner(t *testing.T) {
+	auditor := audit.NewMemory()
+	users := auth.NewMemoryUserStore()
+	if err := users.SeedAdmin("admin", "admin12345", "Admin"); err != nil {
+		t.Fatal(err)
+	}
+	authSvc := auth.NewService(users, auth.NewMemorySessionStore(), auditor)
+	vault, err := secret.NewMemoryVault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := api.NewRouter(api.Deps{
+		Auth:      authSvc,
+		Audit:     auditor,
+		Employees: employee.NewService(employee.NewMemoryStore(), auditor, nil),
+		Feishu:    feishu.NewService(vault),
+	})
+	login := func(user, pass string) string {
+		t.Helper()
+		code, resp := doJSON(t, h, http.MethodPost, "/api/auth/login", "", map[string]string{"username": user, "password": pass})
+		if code != http.StatusOK {
+			t.Fatalf("login %s: %d %v", user, code, resp)
+		}
+		return resp["token"].(string)
+	}
+	adminTok := login("admin", "admin12345")
+	code, alice := doJSON(t, h, http.MethodPost, "/api/users", adminTok, map[string]any{
+		"username": "alice", "password": "alice12345", "roles": []string{"USER"},
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create alice: %d %v", code, alice)
+	}
+	aliceID := alice["id"].(string)
+	code, mine := doJSON(t, h, http.MethodPost, "/api/employees", adminTok, map[string]string{"name": "管理员的员工"})
+	if code != http.StatusCreated {
+		t.Fatalf("create mine: %d %v", code, mine)
+	}
+	code, hers := doJSON(t, h, http.MethodPost, "/api/employees", adminTok, map[string]any{
+		"name": "Alice 的员工", "owner_user_id": aliceID,
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create hers: %d %v", code, hers)
+	}
+	for _, b := range []map[string]string{
+		{"employee_id": mine["id"].(string), "feishu_bot_alias": "adminbot"},
+		{"employee_id": hers["id"].(string), "feishu_bot_alias": "alicebot"},
+	} {
+		code, body := doJSON(t, h, http.MethodPost, "/api/integrations/feishu/bindings", adminTok, b)
+		if code != http.StatusOK {
+			t.Fatalf("bind %s: %d %v", b["feishu_bot_alias"], code, body)
+		}
+	}
+	aliceTok := login("alice", "alice12345")
+	code, listed := doJSON(t, h, http.MethodGet, "/api/integrations/feishu/bindings", aliceTok, nil)
+	if code != http.StatusOK {
+		t.Fatalf("list: %d %v", code, listed)
+	}
+	items, _ := listed["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("应只看到自己的绑定: %+v", listed["items"])
+	}
+	row, _ := items[0].(map[string]any)
+	if row["employee_id"] != hers["id"] || row["feishu_bot_alias"] != "alicebot" {
+		t.Fatalf("看到了别人的绑定: %+v", row)
+	}
+	code, denied := doJSON(t, h, http.MethodPost, "/api/integrations/feishu/bindings", aliceTok, map[string]string{
+		"employee_id": mine["id"].(string), "feishu_bot_alias": "stolen",
+	})
+	if code != http.StatusForbidden {
+		t.Fatalf("不能改别人的绑定: %d %v", code, denied)
+	}
+	code, denied = doJSON(t, h, http.MethodDelete, "/api/integrations/feishu/bindings?feishu_bot_alias=adminbot", aliceTok, nil)
+	if code != http.StatusForbidden {
+		t.Fatalf("不能删别人的绑定: %d %v", code, denied)
+	}
+	code, all := doJSON(t, h, http.MethodGet, "/api/integrations/feishu/bindings", adminTok, nil)
+	if code != http.StatusOK {
+		t.Fatal(all)
+	}
+	if n := len(all["items"].([]any)); n != 2 {
+		t.Fatalf("管理员应看到全部绑定, got %d", n)
+	}
+}

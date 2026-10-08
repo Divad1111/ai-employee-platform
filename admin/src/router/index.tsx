@@ -21,6 +21,7 @@ import { SessionsPage } from '../pages/SessionsPage'
 import { McpServersPage } from '../pages/mcp/McpServersPage'
 import { WorkflowMcpPage } from '../pages/workflow/WorkflowMcpPage'
 import { WorkstationsPage } from '../pages/WorkstationsPage'
+import { WorkstationDetailPage } from '../pages/WorkstationDetailPage'
 import { WorkspacesPage } from '../pages/WorkspacesPage'
 import { UsersPage } from '../pages/UsersPage'
 import { UserDetailPage } from '../pages/UserDetailPage'
@@ -53,6 +54,7 @@ export function AppRouter() {
             <Route path="/employees" element={<EmployeesPage />} />
             <Route path="/employees/:id" element={<EmployeeDetailPage />} />
             <Route path="/workstations" element={<WorkstationsPage />} />
+            <Route path="/workstations/:id" element={<WorkstationDetailPage />} />
             <Route path="/workspaces" element={<WorkspacesPage />} />
             <Route path="/jobs" element={<JobsPage />} />
             <Route path="/jobs/:id" element={<JobDetailPage />} />

@@ -80,6 +80,7 @@ type Deps struct {
 	SkillSyncer     SkillSyncer
 	Automation      *automation.Service
 	WSMembers       wsmember.Store
+	WSShare         workstation.ShareStore
 	Quota           *quota.Service
 	Backup          *backup.Service
 }
@@ -161,6 +162,8 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/workstations/{id}/models/refresh", d.requirePerm("workstation.read", d.handleRefreshWorkstationModels))
 	mux.HandleFunc("PATCH /api/workstations/{id}", d.requirePerm("workstation.write", d.handleUpdateWorkstation))
 	mux.HandleFunc("DELETE /api/workstations/{id}", d.requirePermStepUp("workstation.write", d.handleDeleteWorkstation))
+	mux.HandleFunc("GET /api/workstations/{id}/sharing", d.requirePerm("workstation.read", d.handleGetWSSharing))
+	mux.HandleFunc("PUT /api/workstations/{id}/sharing", d.requirePerm("workstation.read", d.handlePutWSSharing))
 	mux.HandleFunc("GET /api/workstations/{id}/members", d.requirePerm("workstation.read", d.handleListWSMembers))
 	mux.HandleFunc("POST /api/workstations/{id}/members", d.requirePerm("workstation.write", d.handleAddWSMember))
 	mux.HandleFunc("DELETE /api/workstations/{id}/members/{userId}", d.requirePerm("workstation.write", d.handleRemoveWSMember))
@@ -492,8 +495,10 @@ func (d Deps) handleMe(w http.ResponseWriter, _ *http.Request, sess *auth.Sessio
 }
 
 type createTokenReq struct {
-	Label    string `json:"label"`
-	TTLHours int    `json:"ttl_hours"`
+	Label      string   `json:"label"`
+	TTLHours   int      `json:"ttl_hours"`
+	Public     bool     `json:"public"`
+	GrantRoles []string `json:"grant_roles"`
 }
 
 func (d Deps) resolveEnrollmentEndpoint(r *http.Request) (port, host, urlStr, grpcPort string) {
@@ -548,7 +553,15 @@ func (d Deps) handleCreateToken(w http.ResponseWriter, r *http.Request, sess *au
 	if req.TTLHours > 0 {
 		ttl = req.TTLHours
 	}
-	plain, meta, err := d.Enrollment.CreateToken(r.Context(), req.Label, sess.UserID, clientIP(r), time.Duration(ttl)*time.Hour)
+	grantRoles := cleanGrantRoles(req.GrantRoles)
+	if req.Public && len(grantRoles) == 0 {
+		writeErr(w, http.StatusBadRequest, "公用工作站请至少选择一个默认授权角色")
+		return
+	}
+	if !req.Public {
+		grantRoles = nil
+	}
+	plain, meta, err := d.Enrollment.CreateToken(r.Context(), req.Label, sess.UserID, clientIP(r), time.Duration(ttl)*time.Hour, req.Public, grantRoles)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -577,7 +590,7 @@ func (d Deps) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "无效请求体")
 		return
 	}
-	caPEM, certPEM, rec, tokenLabel, err := d.Enrollment.Enroll(r.Context(), req.Token, req.WorkstationID, []byte(req.CSRPEM), clientIP(r))
+	caPEM, certPEM, rec, tokenLabel, createdBy, publicWS, grantRoles, err := d.Enrollment.Enroll(r.Context(), req.Token, req.WorkstationID, []byte(req.CSRPEM), clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
@@ -592,6 +605,32 @@ func (d Deps) handleEnroll(w http.ResponseWriter, r *http.Request) {
 			wsName = "工作站-" + suffix
 		}
 		d.Workstations.EnsureRegistered(r.Context(), req.WorkstationID, wsName)
+		if createdBy != "" {
+			if setter, ok := d.Workstations.Meta.(interface {
+				SetCreatedBy(ctx context.Context, id, userID string) error
+			}); ok {
+				_ = setter.SetCreatedBy(r.Context(), req.WorkstationID, createdBy)
+			}
+			if d.WSMembers != nil {
+				_ = d.WSMembers.Upsert(r.Context(), &wsmember.Membership{
+					WorkstationID: req.WorkstationID,
+					UserID:        createdBy,
+					Role:          wsmember.RoleOwner,
+				})
+			}
+		}
+		if d.WSShare != nil {
+			share := workstation.Share{
+				WorkstationID: req.WorkstationID,
+				IsPublic:      publicWS,
+				CreatedBy:     createdBy,
+				Roles:         grantRoles,
+			}
+			if !publicWS {
+				share.Roles = nil
+			}
+			_ = d.WSShare.Save(r.Context(), share)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ca_pem": caPEM, "certificate": certPEM, "fingerprint": rec.Fingerprint,
@@ -619,6 +658,10 @@ func (d Deps) handleUpdateWorkstation(w http.ResponseWriter, r *http.Request, se
 		writeErr(w, http.StatusBadRequest, "工作站名称不能为空")
 		return
 	}
+	if !d.canWriteWorkstation(r, sess, id) {
+		writeErr(w, http.StatusForbidden, "无权修改该工作站")
+		return
+	}
 	oldName := ""
 	if d.Workstations != nil && d.Workstations.Meta != nil {
 		oldName = d.Workstations.Meta.GetName(r.Context(), id)
@@ -644,6 +687,10 @@ func (d Deps) handleDeleteWorkstation(w http.ResponseWriter, r *http.Request, se
 	}
 	if d.Workstations == nil {
 		writeErr(w, http.StatusServiceUnavailable, "工作站服务不可用")
+		return
+	}
+	if !d.canWriteWorkstation(r, sess, id) {
+		writeErr(w, http.StatusForbidden, "无权删除该工作站")
 		return
 	}
 	if err := d.Workstations.Delete(r.Context(), id); err != nil {
@@ -934,11 +981,16 @@ func (d Deps) handleBindWorkspace(w http.ResponseWriter, r *http.Request, sess *
 	var body struct {
 		EmployeeID string `json:"employee_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.EmployeeID == "" {
-		writeErr(w, http.StatusBadRequest, "需要 employee_id")
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "无效请求体")
 		return
 	}
-	res, err := d.Workspaces.BindEmployee(r.Context(), r.PathValue("id"), body.EmployeeID, sess.UserID, clientIP(r))
+	var res *workspace.Workspace
+	if strings.TrimSpace(body.EmployeeID) == "" {
+		res, err = d.Workspaces.UnbindEmployee(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r))
+	} else {
+		res, err = d.Workspaces.BindEmployee(r.Context(), r.PathValue("id"), body.EmployeeID, sess.UserID, clientIP(r))
+	}
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
@@ -972,11 +1024,21 @@ func (d Deps) handleListWorkstations(w http.ResponseWriter, r *http.Request, ses
 		byID[v.ID] = v
 	}
 	allowed := d.filterWorkstationIDs(r, sess, ids)
-	items := make([]workstation.View, 0, len(allowed))
+	items := make([]workstationListItem, 0, len(allowed))
 	for _, id := range allowed {
-		items = append(items, byID[id])
+		items = append(items, workstationListItem{
+			View:            byID[id],
+			CreatedByUserID: d.workstationCreatedBy(r.Context(), id),
+			CanWrite:        d.canWriteWorkstation(r, sess, id),
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+type workstationListItem struct {
+	workstation.View
+	CreatedByUserID string `json:"created_by_user_id,omitempty"`
+	CanWrite        bool   `json:"can_write"`
 }
 
 func (d Deps) handleGetWorkstation(w http.ResponseWriter, r *http.Request, sess *auth.Session) {

@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"fmt"
@@ -86,6 +87,17 @@ func (db *DB) ensureHelperTables() error {
 		ON CONFLICT (role_id, permission_id) DO UPDATE SET scope = 'OWN';
 	`)
 
+	// 公用工作站与按角色授权（兼容尚未执行 goose 的环境）
+	_, _ = db.SQL.Exec(`ALTER TABLE workstations ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT FALSE`)
+	_, _ = db.SQL.Exec(`
+		CREATE TABLE IF NOT EXISTS workstation_role_grants (
+			workstation_id TEXT NOT NULL REFERENCES workstations(id) ON DELETE CASCADE,
+			role_name      TEXT NOT NULL,
+			created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (workstation_id, role_name)
+		)
+	`)
+
 	// Token Usage：Job 汇总缓存列 + Run 明细表（幂等自愈，兼容未跑 goose 的环境）
 	_, _ = db.SQL.Exec(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cached_input_tokens BIGINT NOT NULL DEFAULT 0`)
 	_, _ = db.SQL.Exec(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cache_write_input_tokens BIGINT NOT NULL DEFAULT 0`)
@@ -130,6 +142,37 @@ func (db *DB) NewUserStore() auth.UserStore {
 
 func (db *DB) NewWSMemberStore() wsmember.Store {
 	return NewWSMemberStore(db)
+}
+
+// EnsureWorkstationOwners 把已记下创建者、但还没有站内成员的工作站补成 OWNER。
+// 创建者为空、且用过的注册令牌都来自同一个人时，把这些工作站归到这个人。
+func (db *DB) EnsureWorkstationOwners(ctx context.Context) error {
+	if db == nil || db.SQL == nil {
+		return nil
+	}
+	_, err := db.SQL.ExecContext(ctx, `
+		UPDATE workstations w
+		SET created_by_user_id = c.created_by, updated_at = NOW()
+		FROM (
+			SELECT created_by
+			FROM enrollment_tokens
+			WHERE used_at IS NOT NULL AND created_by IS NOT NULL
+			GROUP BY created_by
+		) c
+		WHERE w.created_by_user_id IS NULL
+		  AND (SELECT COUNT(DISTINCT created_by) FROM enrollment_tokens WHERE used_at IS NOT NULL AND created_by IS NOT NULL) = 1
+	`)
+	if err != nil {
+		return err
+	}
+	_, err = db.SQL.ExecContext(ctx, `
+		INSERT INTO workstation_users (id, workstation_id, user_id, role, status, created_at, updated_at)
+		SELECT gen_random_uuid(), w.id, w.created_by_user_id, 'OWNER', 'active', NOW(), NOW()
+		FROM workstations w
+		WHERE w.created_by_user_id IS NOT NULL
+		ON CONFLICT (workstation_id, user_id) DO NOTHING
+	`)
+	return err
 }
 
 func (db *DB) NewWebSessionStore() auth.SessionStore {

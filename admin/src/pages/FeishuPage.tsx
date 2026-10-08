@@ -1,8 +1,8 @@
 /**
  * Feishu 飞书集成与协同配置。
  */
-import { FormEvent, useEffect, useMemo, useState } from 'react'
-import { Navigate } from 'react-router-dom'
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { Navigate, useSearchParams } from 'react-router-dom'
 import { apiDelete, apiGet, apiPost, apiPut } from '../api/client'
 import { IconPlus } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
@@ -48,6 +48,9 @@ type FeishuStatus = {
 
 export function FeishuPage() {
   const { ready, can, roles } = usePerm()
+  const [searchParams] = useSearchParams()
+  const presetEmployee = searchParams.get('employee') || ''
+  const presetApplied = useRef(false)
   const canConfig = can('system.write')
   const canCredentials = roles.includes('SUPER_ADMIN')
   const [cfg, setCfg] = useState<FeishuConfig | null>(null)
@@ -98,7 +101,12 @@ export function FeishuPage() {
       setEnabled(!!c.enabled)
     }
     setBindings(b.items ?? [])
-    setEmployees(empData.items ?? [])
+    const nextEmployees = empData.items ?? []
+    setEmployees(nextEmployees)
+    if (!presetApplied.current && presetEmployee && nextEmployees.some((e) => e.id === presetEmployee)) {
+      setEmpId(presetEmployee)
+      presetApplied.current = true
+    }
     setStatus(st)
   }
 
@@ -126,7 +134,12 @@ export function FeishuPage() {
   useEffect(() => {
     if (!ready || !canConfig) return
     void load().catch((e) => setError(e instanceof Error ? e.message : '加载飞书配置失败'))
-  }, [ready, canConfig])
+  }, [ready, canConfig, presetEmployee])
+
+  useEffect(() => {
+    if (!presetEmployee) return
+    document.getElementById('feishu-bindings')?.scrollIntoView({ block: 'start' })
+  }, [presetEmployee, employees])
 
   if (ready && !canConfig) {
     return <Navigate to="/" replace />
@@ -646,7 +659,7 @@ export function FeishuPage() {
         </div>
       </div>
 
-      <div className="panel">
+      <div className="panel" id="feishu-bindings">
         <div className="panel-header">
           <div>
             <h2>数字员工与飞书机器人别名绑定</h2>
