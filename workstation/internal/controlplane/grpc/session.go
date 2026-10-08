@@ -27,7 +27,9 @@ type Session struct {
 	HeartbeatInterval time.Duration
 	AgentVersion      string
 	OnCommand         func(ctx context.Context, cmd *aiev1.Command) error
-	Stats             heartbeat.StatsFunc
+	// OnConnected 在 Hello 发出后调用一次（每次重连都会触发，用于注册时上报模型）。
+	OnConnected func()
+	Stats       heartbeat.StatsFunc
 
 	mu     sync.Mutex
 	stream aiev1.WorkerService_ConnectClient
@@ -123,6 +125,9 @@ func (s *Session) runOnce(ctx context.Context) error {
 		return err
 	}
 	s.Backoff.MarkConnected()
+	if s.OnConnected != nil {
+		s.OnConnected()
+	}
 
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	defer hbCancel()
@@ -156,6 +161,12 @@ func (s *Session) runOnce(ctx context.Context) error {
 		}
 		// HeartbeatAck / EventAck 可忽略或记日志
 	}
+}
+
+// SendHeartbeat 发送一帧心跳（注册或按需刷新模型时使用，不进入周期循环）。
+func (s *Session) SendHeartbeat(ctx context.Context, st heartbeat.Stats) error {
+	hb := heartbeat.Build(s.Client.WorkstationID(), s.AgentVersion, "", time.Now(), st)
+	return s.send(ctx, &aiev1.WorkerToServer{Body: &aiev1.WorkerToServer_Heartbeat{Heartbeat: hb}})
 }
 
 // EnqueueEvent 经 Outbox 上报（断网不丢）。

@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -109,4 +110,17 @@ func LoadFile(path string) (*Config, error) {
 	}
 	c.normalize()
 	return c, nil
+}
+
+// SaveFile 将当前配置持久化保存到 YAML 文件中。
+func (c *Config) SaveFile(path string) error {
+	c.normalize()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
 }

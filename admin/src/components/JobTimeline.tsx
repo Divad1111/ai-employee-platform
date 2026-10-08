@@ -67,10 +67,15 @@ function eventTitle(ev: JobEvent) {
 function tokenLine(payload: Record<string, string>) {
   const input = payload.input_tokens
   const output = payload.output_tokens
-  if (!input && !output) return ''
-  const source = payload.token_source === 'agent' ? 'Agent 上报' : payload.token_source === 'estimate' ? '按文本估算' : payload.token_source
-  const agent = payload.agent ? ` · ${payload.agent}` : ''
-  return `输入 ${input || 0} / 输出 ${output || 0}${agent}${source ? `（${source}）` : ''}`
+  if (payload.token_source === 'estimate' || payload.usage_status === 'UNAVAILABLE' || payload.token_source === 'unavailable') {
+    return '真实 Token 用量不可用'
+  }
+  if (!input && !output && !payload.total_tokens) return ''
+  const total = payload.total_tokens
+  const source = payload.usage_source || payload.token_source
+  const agent = (payload.agent || payload.provider) ? ` · ${payload.agent || payload.provider}` : ''
+  const status = payload.usage_status ? ` · ${payload.usage_status}` : ''
+  return `输入 ${input || 0} / 输出 ${output || 0}${total ? ` / 合计 ${total}` : ''}${agent}${status}${source ? `（${source}）` : ''}`
 }
 
 export function JobTimeline({ events }: { events: JobEvent[] }) {

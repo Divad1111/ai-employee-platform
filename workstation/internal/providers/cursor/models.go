@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,15 +19,59 @@ import (
 func (p *Provider) ListModels(ctx context.Context) ([]providers.Model, error) {
 	info, err := p.Detect(ctx)
 	if err != nil || info == nil || info.Path == "" || isFakePath(info.Path) || isGUICursorBinary(info.Path) {
-		return nil, nil
+		return defaultCursorModels(), nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	return listACPModels(ctx, info.Path)
+	models, err := listACPModels(ctx, info.Path)
+	if err == nil && len(models) > 0 {
+		return models, nil
+	}
+	// 降级尝试从命令行 `agent models` 读取
+	if fb, ferr := listFallbackModels(ctx, info.Path); ferr == nil && len(fb) > 0 {
+		return fb, nil
+	}
+	return defaultCursorModels(), nil
+}
+
+func listFallbackModels(ctx context.Context, bin string) ([]providers.Model, error) {
+	cmd := exec.CommandContext(ctx, bin, "models")
+	if userHome := findUserHome(); userHome != "" {
+		cmd.Env = append(os.Environ(),
+			"USERPROFILE="+userHome,
+			"HOME="+userHome,
+			"LOCALAPPDATA="+filepath.Join(userHome, "AppData", "Local"),
+			"APPDATA="+filepath.Join(userHome, "AppData", "Roaming"),
+		)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, err
+	}
+	return ParseModelLines(string(out)), nil
+}
+
+func defaultCursorModels() []providers.Model {
+	return []providers.Model{
+		{ID: "default[]", Label: "Auto"},
+		{ID: "claude-sonnet-4-5", Label: "Claude Sonnet 4.5"},
+		{ID: "claude-opus-4-5", Label: "Claude Opus 4.5"},
+		{ID: "gpt-5", Label: "GPT-5"},
+		{ID: "composer-2.5", Label: "Composer 2.5"},
+		{ID: "gemini-3-flash", Label: "Gemini 3 Flash"},
+	}
 }
 
 func listACPModels(ctx context.Context, bin string) ([]providers.Model, error) {
 	cmd := exec.CommandContext(ctx, bin, "acp")
+	if userHome := findUserHome(); userHome != "" {
+		cmd.Env = append(os.Environ(),
+			"USERPROFILE="+userHome,
+			"HOME="+userHome,
+			"LOCALAPPDATA="+filepath.Join(userHome, "AppData", "Local"),
+			"APPDATA="+filepath.Join(userHome, "AppData", "Roaming"),
+		)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -71,9 +117,13 @@ func listACPModels(ctx context.Context, bin string) ([]providers.Model, error) {
 	if err := write(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"}); err != nil {
 		return nil, err
 	}
+	tempDir := os.TempDir()
+	if tempDir == "" {
+		tempDir = "."
+	}
 	if err := write(map[string]any{
 		"jsonrpc": "2.0", "id": 2, "method": "session/new",
-		"params": map[string]any{"cwd": "/tmp", "mcpServers": []any{}},
+		"params": map[string]any{"cwd": tempDir, "mcpServers": []any{}},
 	}); err != nil {
 		return nil, err
 	}

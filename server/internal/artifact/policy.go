@@ -29,7 +29,7 @@ var safeNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,178}$`)
 
 // allowedTypes 显式白名单；空 type 归一为 bin。
 var allowedTypes = map[string]bool{
-	"bin": true, "json": true, "txt": true, "log": true,
+	"bin": true, "json": true, "txt": true, "log": true, "md": true, "markdown": true,
 	"diff": true, "patch": true, "zip": true, "tar": true, "gz": true,
 	"png": true, "jpg": true, "jpeg": true, "webp": true,
 	"apk": true, "ipa": true, "result": true, "report": true,

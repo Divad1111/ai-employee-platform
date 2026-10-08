@@ -23,8 +23,12 @@ type Job = {
   result?: string
   input_tokens?: number
   output_tokens?: number
+  cached_input_tokens?: number
+  reasoning_output_tokens?: number
+  total_tokens?: number
   agent?: string
   token_source?: string
+  token_usage_status?: string
   source?: string
   idempotency_key: string
   timeout_sec: number
@@ -171,11 +175,15 @@ export function JobSourceBadge({ source }: { source?: string }) {
 }
 
 function formatJobTokens(job: Job) {
-  const total = (job.input_tokens || 0) + (job.output_tokens || 0)
-  if (!total && !job.token_source) return '—'
-  const source = job.token_source === 'agent' ? 'Agent 上报' : job.token_source === 'estimate' ? '按文本估算' : ''
+  const status = (job.token_usage_status || '').toUpperCase()
+  const total = job.total_tokens || (job.input_tokens || 0) + (job.output_tokens || 0)
+  if (!total && !status && !job.token_source) return '—'
+  if (status === 'UNAVAILABLE' || job.token_source === 'unavailable' || job.token_source === 'estimate') {
+    return '真实用量不可用'
+  }
   const agent = job.agent ? ` · ${job.agent}` : ''
-  return `输入 ${job.input_tokens || 0} / 输出 ${job.output_tokens || 0}${agent}${source ? `（${source}）` : ''}`
+  const st = status && status !== 'FINAL' ? ` · ${status}` : ''
+  return `输入 ${job.input_tokens || 0} / 输出 ${job.output_tokens || 0} / 合计 ${total}${agent}${st}`
 }
 
 function isTerminal(status: string) {
@@ -355,7 +363,7 @@ export function JobsPage() {
         <div className="panel-header">
           <div>
             <h2>手动派发新任务</h2>
-            <p>可搜索选择已有数字员工与工作区，也可直接输入 ID</p>
+            <p>选择已有数字员工；工作区请从已登记列表选择，路径请先在项目工作区登记</p>
           </div>
         </div>
         <form className="inline-form" onSubmit={onCreate}>
@@ -372,8 +380,7 @@ export function JobsPage() {
             value={workspaceId}
             onChange={setWorkspaceId}
             options={wsOptions}
-            placeholder="工作区（可选）"
-            allowCustom
+            placeholder="工作区（可选，须已登记）"
             style={{ minWidth: 200 }}
           />
           <input
@@ -530,11 +537,39 @@ export function JobsPage() {
   )
 }
 
+type TokenRun = {
+  id: string
+  provider: string
+  provider_run_id?: string
+  input_tokens: number
+  output_tokens: number
+  cached_input_tokens?: number
+  reasoning_output_tokens?: number
+  total_tokens: number
+  usage_status: string
+  usage_source?: string
+}
+
+type TokenUsageView = {
+  job_id: string
+  summary: {
+    input_tokens: number
+    output_tokens: number
+    cached_input_tokens?: number
+    reasoning_output_tokens?: number
+    total_tokens: number
+    usage_status: string
+    run_count: number
+  }
+  runs: TokenRun[]
+}
+
 export function JobDetailPage() {
   const { id } = useParams()
   const [job, setJob] = useState<Job | null>(null)
   const [empName, setEmpName] = useState('')
   const [events, setEvents] = useState<JobEvent[]>([])
+  const [tokenUsage, setTokenUsage] = useState<TokenUsageView | null>(null)
   const [error, setError] = useState('')
   const [confirmCancel, setConfirmCancel] = useState(false)
   const [cancelling, setCancelling] = useState(false)
@@ -571,6 +606,9 @@ export function JobDetailPage() {
     void apiGet<{ items: JobEvent[] }>(`/jobs/${id}/events`)
       .then((d) => setEvents(d.items ?? []))
       .catch(() => undefined)
+    void apiGet<TokenUsageView>(`/jobs/${id}/token-usage`)
+      .then((u) => setTokenUsage(u))
+      .catch(() => setTokenUsage(null))
   }, [id])
 
   if (!job) {
@@ -632,6 +670,58 @@ export function JobDetailPage() {
         <div style={{ background: '#f8fafc', padding: '1rem', borderRadius: '8px', border: '1px solid var(--border-subtle)', marginTop: '0.5rem', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
           {job.prompt}
         </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Token Usage</h2>
+            <p>仅统计 Agent Runtime 上报的真实用量，不按文本长度估算</p>
+          </div>
+        </div>
+        {tokenUsage ? (
+          <>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(140px,1fr))', gap: '0.75rem', marginTop: '0.75rem' }}>
+              <div><div style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>Input</div><strong>{tokenUsage.summary.input_tokens}</strong></div>
+              <div><div style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>Cached Input</div><strong>{tokenUsage.summary.cached_input_tokens || 0}</strong></div>
+              <div><div style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>Output</div><strong>{tokenUsage.summary.output_tokens}</strong></div>
+              <div><div style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>Reasoning</div><strong>{tokenUsage.summary.reasoning_output_tokens || 0}</strong></div>
+              <div><div style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>Total</div><strong>{tokenUsage.summary.total_tokens}</strong></div>
+              <div><div style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>Status</div><strong>{tokenUsage.summary.usage_status || '—'}</strong></div>
+            </div>
+            <div className="table-wrapper" style={{ marginTop: '1rem' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Provider</th>
+                    <th>Run ID</th>
+                    <th>Input</th>
+                    <th>Output</th>
+                    <th>Total</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(tokenUsage.runs || []).map((r) => (
+                    <tr key={r.id}>
+                      <td>{r.provider || '—'}</td>
+                      <td className="mono" style={{ fontSize: '0.8rem' }}>{r.provider_run_id || '—'}</td>
+                      <td>{r.input_tokens}</td>
+                      <td>{r.output_tokens}</td>
+                      <td>{r.total_tokens}</td>
+                      <td>{r.usage_status}</td>
+                    </tr>
+                  ))}
+                  {(tokenUsage.runs || []).length === 0 ? (
+                    <tr><td colSpan={6} className="empty-tip">暂无 Run 明细</td></tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : (
+          <div className="empty-tip" style={{ marginTop: '0.5rem' }}>{formatJobTokens(job)}</div>
+        )}
       </div>
 
       <div className="panel">

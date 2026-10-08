@@ -6,6 +6,7 @@ import { IconCheckCircle, IconRefresh, IconKey, IconShield, IconAlertTriangle } 
 import { EntityName } from '../components/EntityName'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
 import { formatDateTime } from '../lib/time'
+import { copyToClipboard } from '../lib/clipboard'
 
 type Approval = {
   id: string
@@ -194,12 +195,13 @@ export function ApprovalsPage() {
     }
   }
 
-  const copySecret = () => {
+  const copySecret = async () => {
     if (!enrollSecret) return
-    navigator.clipboard.writeText(enrollSecret).then(() => {
+    const ok = await copyToClipboard(enrollSecret)
+    if (ok) {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
-    })
+    }
   }
 
   return (

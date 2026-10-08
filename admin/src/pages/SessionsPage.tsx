@@ -20,7 +20,7 @@ type Sess = {
 
 export function SessionsPage() {
   const [items, setItems] = useState<Sess[]>([])
-  const [employees, setEmployees] = useState<Array<{ id: string; name: string }>>([])
+  const [employees, setEmployees] = useState<Array<{ id: string; name: string; default_provider?: string }>>([])
   const [loading, setLoading] = useState(false)
 
   async function load() {
@@ -28,7 +28,7 @@ export function SessionsPage() {
     try {
       const [d, empData] = await Promise.all([
         apiGet<{ items: Sess[] }>('/sessions'),
-        apiGet<{ items: Array<{ id: string; name: string }> }>('/employees').catch(() => ({ items: [] })),
+        apiGet<{ items: Array<{ id: string; name: string; default_provider?: string }> }>('/employees').catch(() => ({ items: [] })),
       ])
       setItems(d.items ?? [])
       setEmployees(empData.items ?? [])
@@ -38,6 +38,7 @@ export function SessionsPage() {
   }
 
   const empMap = Object.fromEntries(employees.map((e) => [e.id, e.name]))
+  const providerMap = Object.fromEntries(employees.map((e) => [e.id, e.default_provider || '']))
 
   useEffect(() => {
     void load()
@@ -50,7 +51,7 @@ export function SessionsPage() {
       <header className="page-header">
         <div>
           <h1>运行会话管理 (Sessions)</h1>
-          <p>数字员工在工作站上的 Agent 运行上下文（ACP / Provider），由任务触发按需创建</p>
+          <p>只显示你名下数字员工的会话；管理员可查看全部</p>
         </div>
         <button type="button" className="btn-ghost" onClick={() => void load()} disabled={loading}>
           <IconRefresh size={15} />
@@ -132,7 +133,7 @@ export function SessionsPage() {
                   </td>
                   <td>
                     <span className="badge" style={{ textTransform: 'capitalize' }}>
-                      {s.provider || 'cursor'}
+                      {s.provider || providerMap[s.employee_id] || '未上报'}
                     </span>
                   </td>
                   <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>

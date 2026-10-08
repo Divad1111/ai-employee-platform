@@ -24,6 +24,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/message"
 	"github.com/ai-employee-platform/server/internal/reliability"
 	"github.com/ai-employee-platform/server/internal/session"
+	"github.com/ai-employee-platform/server/internal/tokenusage"
 	"github.com/ai-employee-platform/server/internal/workflowmcp"
 	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/workspace"
@@ -63,6 +64,7 @@ func setupAPI(t *testing.T) (http.Handler, string) {
 			return empStore.Save(ctx, e)
 		},
 	})
+	jobSvc := job.NewService(job.NewMemoryStore(), auditor, bus)
 	h := api.NewRouter(api.Deps{
 		Auth:         authSvc,
 		Enrollment:   enrollment.NewService(enrollment.NewMemoryStore(), ca, auditor),
@@ -71,7 +73,8 @@ func setupAPI(t *testing.T) (http.Handler, string) {
 		Workspaces:   wsSvc,
 		Workstations: workstation.NewService(ca, presence, nil),
 		Sessions:     session.NewService(session.NewMemoryStore(), auditor, bus),
-		Jobs:         job.NewService(job.NewMemoryStore(), auditor, bus),
+		Jobs:         jobSvc,
+		TokenUsage:   tokenusage.NewService(tokenusage.NewMemoryStore(), apiJobTokenBridge{jobs: jobSvc}),
 		Messages:     message.NewService(message.NewMemoryStore(), auditor),
 		Bus:          bus,
 		Audit:        auditor,

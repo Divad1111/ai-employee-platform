@@ -22,3 +22,13 @@ func TestCodexProviderStart(t *testing.T) {
 	}
 	_ = p.Stop(context.Background(), "S1")
 }
+
+func TestCodexDetect(t *testing.T) {
+	p := codex.NewProvider(nil, "")
+	info, err := p.Detect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Detected: Name=%s, Path=%s, Version=%s", info.Name, info.Path, info.Version)
+}
+

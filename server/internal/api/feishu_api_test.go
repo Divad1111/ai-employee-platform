@@ -24,8 +24,8 @@ import (
 	"github.com/ai-employee-platform/server/internal/scheduler"
 	"github.com/ai-employee-platform/server/internal/secret"
 	"github.com/ai-employee-platform/server/internal/session"
-	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/workspace"
+	"github.com/ai-employee-platform/server/internal/workstation"
 )
 
 func setupM6(t *testing.T) (http.Handler, string, *feishu.MemorySender, *reliability.Presence) {
@@ -69,8 +69,14 @@ func setupM6(t *testing.T) (http.Handler, string, *feishu.MemorySender, *reliabi
 func TestFeishuWebhookChallengeAndJob(t *testing.T) {
 	h, tok, sender, presence := setupM6(t)
 	// 建 Employee + 绑定
+	code, ws := doJSON(t, h, http.MethodPost, "/api/workspaces", tok, map[string]string{
+		"workstation_id": "WS-1", "path": "/repo",
+	})
+	if code != 201 {
+		t.Fatal(ws)
+	}
 	code, emp := doJSON(t, h, http.MethodPost, "/api/employees", tok, map[string]string{
-		"name": "Dev", "workstation_id": "WS-1", "workspace_id": "W1",
+		"name": "Dev", "workstation_id": "WS-1", "workspace_id": ws["id"].(string),
 	})
 	if code != 201 {
 		t.Fatal(emp)

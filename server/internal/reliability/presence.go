@@ -35,15 +35,16 @@ type wsPresence struct {
 	DiskPercent   float64
 	Providers     []string
 	Models        map[string][]ModelOption
+	ModelsAt      time.Time
 }
 
-// NewPresence 创建心跳跟踪器。默认约 5s 心跳、约 15s Offline。
+// NewPresence 创建心跳跟踪器。默认约 5s 心跳、约 45s Offline（避免外部网络偶发抖动或初始化高负载导致误判为离线）。
 func NewPresence(heartbeatSec, offlineAfterSec int) *Presence {
 	if heartbeatSec <= 0 {
 		heartbeatSec = 5
 	}
 	if offlineAfterSec <= 0 {
-		offlineAfterSec = 15
+		offlineAfterSec = 45
 	}
 	return &Presence{
 		byWS:            make(map[string]*wsPresence),
@@ -126,6 +127,18 @@ func (p *Presence) SetModels(wsID string, models map[string][]ModelOption) {
 		next[name] = append([]ModelOption(nil), list...)
 	}
 	w.Models = next
+	w.ModelsAt = p.nowFunc()
+}
+
+// ModelsUpdatedAt 返回该工作站最近一次成功上报模型的时间。
+func (p *Presence) ModelsUpdatedAt(wsID string) time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	w, ok := p.byWS[wsID]
+	if !ok {
+		return time.Time{}
+	}
+	return w.ModelsAt
 }
 
 // Models 返回该工作站最近一次上报的模型。

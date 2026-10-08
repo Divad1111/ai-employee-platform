@@ -145,7 +145,7 @@ func (d Deps) attachUsageBreakdown(r *http.Request, sess *auth.Session, out map[
 			wsName[w.ID] = w.Name
 		}
 	}
-	var inputSum, outputSum int64
+	var inputSum, outputSum, usedSum int64
 	byWS := map[string]*usageBucket{}
 	byEmp := map[string]*usageBucket{}
 	byAgent := map[string]*usageBucket{}
@@ -153,11 +153,19 @@ func (d Deps) attachUsageBreakdown(r *http.Request, sess *auth.Session, out map[
 		if j == nil || j.CreatedBy != sess.UserID || j.CreatedAt.UTC().Format("2006-01") != period {
 			continue
 		}
-		if j.InputTokens == 0 && j.OutputTokens == 0 {
+		if j.TokenSource == "estimate" || j.TokenUsageStatus == "UNAVAILABLE" {
+			continue
+		}
+		if j.InputTokens == 0 && j.OutputTokens == 0 && j.TotalTokens == 0 {
 			continue
 		}
 		inputSum += j.InputTokens
 		outputSum += j.OutputTokens
+		if j.TotalTokens > 0 {
+			usedSum += j.TotalTokens
+		} else {
+			usedSum += j.InputTokens + j.OutputTokens
+		}
 		addBucket(byWS, j.WorkstationID, firstNonEmpty(wsName[j.WorkstationID], j.WorkstationID, "未指定工作站"), j)
 		addBucket(byEmp, j.EmployeeID, firstNonEmpty(empName[j.EmployeeID], j.EmployeeID, "未指定数字员工"), j)
 		agent := j.Agent
@@ -168,7 +176,10 @@ func (d Deps) attachUsageBreakdown(r *http.Request, sess *auth.Session, out map[
 	}
 	out["input_tokens"] = inputSum
 	out["output_tokens"] = outputSum
-	used := inputSum + outputSum
+	used := usedSum
+	if used == 0 {
+		used = inputSum + outputSum
+	}
 	out["tokens_used"] = used
 	if limit, ok := out["token_limit"].(int64); ok && limit > 0 {
 		pct := float64(used) / float64(limit) * 100
@@ -198,9 +209,13 @@ func addBucket(m map[string]*usageBucket, id, name string, j *job.Job) {
 		b = &usageBucket{ID: id, Name: name}
 		m[id] = b
 	}
-	b.InputTokens += j.InputTokens
-	b.OutputTokens += j.OutputTokens
-	b.TotalTokens += j.InputTokens + j.OutputTokens
+		b.InputTokens += j.InputTokens
+		b.OutputTokens += j.OutputTokens
+		if j.TotalTokens > 0 {
+			b.TotalTokens += j.TotalTokens
+		} else {
+			b.TotalTokens += j.InputTokens + j.OutputTokens
+		}
 	b.Jobs++
 }
 
@@ -223,18 +238,22 @@ func firstNonEmpty(vals ...string) string {
 }
 
 // handleEmployeeOverview 对齐 §10：详情聚合。
-func (d Deps) handleEmployeeOverview(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleEmployeeOverview(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	id := r.PathValue("id")
 	e, err := d.Employees.Get(r.Context(), id)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
+	if !d.canSeeEmployee(r, sess, e) {
+		writeErr(w, http.StatusNotFound, "employee 不存在")
+		return
+	}
 	sessions := make([]any, 0)
 	if d.Sessions != nil {
 		all, _ := d.Sessions.List(r.Context())
 		for _, s := range all {
-			if s.EmployeeID == id {
+			if s.EmployeeID == id && d.canSeeSession(r, sess, s, "session.read") {
 				sessions = append(sessions, s)
 			}
 		}

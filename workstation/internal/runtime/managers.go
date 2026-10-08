@@ -13,6 +13,9 @@ import (
 	"github.com/ai-employee-platform/workstation/internal/acp"
 	"github.com/ai-employee-platform/workstation/internal/platform"
 	"github.com/ai-employee-platform/workstation/internal/providers"
+	"github.com/ai-employee-platform/workstation/internal/tokenusage"
+	codexusage "github.com/ai-employee-platform/workstation/internal/tokenusage/codex"
+	cursorusage "github.com/ai-employee-platform/workstation/internal/tokenusage/cursor"
 )
 
 // 状态常量。
@@ -71,8 +74,12 @@ type Job struct {
 	Status       string
 	InputTokens  int64
 	OutputTokens int64
+	TotalTokens  int64
 	Agent        string
 	TokenSource  string
+	UsageStatus  string
+	TokenUsage   *tokenusage.TokenUsage
+	UsageSummary *tokenusage.TokenUsageSummary
 }
 
 // EventSink 上报事件（Outbox / 测试）。
@@ -83,10 +90,11 @@ type InquiryCallback func(ctx context.Context, jobID, employeeID string, inq acp
 
 // Managers 本地运行时门面。
 type Managers struct {
-	Paths    platform.Paths
-	Registry *providers.Registry
-	MaxSess  int
-	Sink     EventSink
+	Paths         platform.Paths
+	Registry      *providers.Registry
+	MaxSess       int
+	Sink          EventSink
+	UsageCollector *tokenusage.Collector
 
 	mu              sync.Mutex
 	employees       map[string]*Employee
@@ -106,15 +114,19 @@ func (m *Managers) SetInquiryCallback(cb InquiryCallback) {
 
 // NewManagers 创建。
 func NewManagers(paths platform.Paths, reg *providers.Registry) *Managers {
+	usageReg := tokenusage.NewRegistry()
+	usageReg.Register(codexusage.New())
+	usageReg.Register(cursorusage.New())
 	return &Managers{
-		Paths:      paths,
-		Registry:   reg,
-		MaxSess:    1,
-		employees:  map[string]*Employee{},
-		workspaces: map[string]*Workspace{},
-		sessions:   map[string]*Session{},
-		jobs:       map[string]*Job{},
-		agentSess:  map[string]providers.AgentSession{},
+		Paths:          paths,
+		Registry:       reg,
+		MaxSess:        1,
+		UsageCollector: tokenusage.NewCollector(usageReg),
+		employees:      map[string]*Employee{},
+		workspaces:     map[string]*Workspace{},
+		sessions:       map[string]*Session{},
+		jobs:           map[string]*Job{},
+		agentSess:      map[string]providers.AgentSession{},
 	}
 }
 
@@ -265,34 +277,58 @@ func (m *Managers) RunJob(ctx context.Context, jobID, employeeID, sessionID, pro
 		}
 	}
 
+	providerName := ""
+	m.mu.Lock()
+	if s, ok := m.sessions[sessionID]; ok {
+		providerName = s.Provider
+	}
+	m.mu.Unlock()
+
+	runtimeName := tokenusage.AgentRuntime(providerName)
+	execRec := &tokenusage.AgentExecution{
+		TaskID:            jobID,
+		DigitalEmployeeID: employeeID,
+		Runtime:           runtimeName,
+		ProviderSessionID: sessionID,
+		ProviderRunID:     fmt.Sprintf("%s-%s", jobID, sessionID),
+	}
+	if m.UsageCollector != nil {
+		_ = m.UsageCollector.Start(execRec)
+	}
+
 	reply, err := agent.Send(ctx, []byte(prompt))
-	inTok, outTok, agentName, source := int64(0), int64(0), "", ""
-	if u, ok := agent.(interface {
-		LastUsage() (int64, int64, string, string)
-	}); ok {
-		inTok, outTok, agentName, source = u.LastUsage()
+
+	var usage *tokenusage.TokenUsage
+	if m.UsageCollector != nil {
+		usage, _ = m.UsageCollector.CaptureFromSession(ctx, execRec, agent)
+	} else if r, ok := agent.(tokenusage.SessionReporter); ok {
+		usage = r.LastTokenUsage()
 	}
-	if agentName == "" {
-		m.mu.Lock()
-		if s, ok := m.sessions[sessionID]; ok {
-			agentName = s.Provider
+	if usage == nil {
+		usage = &tokenusage.TokenUsage{
+			Provider:    providerName,
+			Source:      "unavailable",
+			UsageStatus: tokenusage.StatusUnavailable,
 		}
-		m.mu.Unlock()
 	}
-	if inTok == 0 && outTok == 0 {
-		inTok = int64(len([]rune(prompt)))
-		outTok = int64(len([]rune(reply)))
-		source = "estimate"
+	usage.Normalize()
+	var summary *tokenusage.TokenUsageSummary
+	if m.UsageCollector != nil {
+		summary, _ = m.UsageCollector.Finalize(jobID)
+	} else {
+		summary = tokenusage.Aggregate([]*tokenusage.TokenUsage{usage})
 	}
-	if source == "" {
-		source = "estimate"
-	}
+
 	m.mu.Lock()
 	if cur, ok := m.jobs[jobID]; ok {
-		cur.InputTokens = inTok
-		cur.OutputTokens = outTok
-		cur.Agent = agentName
-		cur.TokenSource = source
+		cur.InputTokens = summary.InputTokens
+		cur.OutputTokens = summary.OutputTokens
+		cur.TotalTokens = summary.TotalTokens
+		cur.Agent = firstNonEmpty(usage.Provider, providerName)
+		cur.TokenSource = usage.Source
+		cur.UsageStatus = summary.UsageStatus
+		cur.TokenUsage = usage
+		cur.UsageSummary = summary
 	}
 	m.mu.Unlock()
 	if err != nil {
@@ -304,6 +340,15 @@ func (m *Managers) RunJob(ctx context.Context, jobID, employeeID, sessionID, pro
 	m.markSession(sessionID, SessReady)
 	m.emit("job.status", map[string]string{"job_id": jobID, "status": JobSuccess})
 	return j, reply, nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (m *Managers) setJob(id, status string) {

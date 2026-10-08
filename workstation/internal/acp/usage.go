@@ -2,22 +2,18 @@ package acp
 
 import (
 	"encoding/json"
-	"unicode/utf8"
-)
 
-// Usage 一次 prompt 的 token 消耗。
-type Usage struct {
-	InputTokens  int64
-	OutputTokens int64
-	Agent        string
-	Source       string // agent=协议上报，estimate=按文本估算
-}
+	"github.com/ai-employee-platform/workstation/internal/tokenusage"
+)
 
 func (s *StdioSession) resetUsage(prompt string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.inTok = 0
-	s.outTok = 0
+	s.lastUsage = tokenusage.TokenUsage{
+		Provider:    "cursor",
+		Source:      "cursor_acp_event",
+		UsageStatus: tokenusage.StatusPending,
+	}
 	s.promptText = prompt
 	s.replyText = ""
 }
@@ -28,40 +24,69 @@ func (s *StdioSession) rememberReply(reply string) {
 	s.mu.Unlock()
 }
 
-// LastUsage 返回本次 Send 的用量。Agent 没上报时按字符数估算。
+// LastUsage 兼容旧接口；无真实 usage 时返回 0，不再按字符估算。
 func (s *StdioSession) LastUsage() Usage {
+	u := s.LastTokenUsage()
+	if u == nil {
+		return Usage{Agent: "cursor", Source: "unavailable"}
+	}
+	return Usage{
+		InputTokens:  u.InputTokens,
+		OutputTokens: u.OutputTokens,
+		Agent:        firstNonEmpty(u.Provider, s.agentModel, "cursor"),
+		Source:       firstNonEmpty(u.Source, "cursor_acp_event"),
+	}
+}
+
+// LastTokenUsage 返回本次 Send 的真实用量；未上报则为 UNAVAILABLE。
+func (s *StdioSession) LastTokenUsage() *tokenusage.TokenUsage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	u := Usage{
-		InputTokens:  s.inTok,
-		OutputTokens: s.outTok,
-		Agent:        s.agentModel,
-		Source:       "agent",
+	u := s.lastUsage
+	if u.Provider == "" {
+		u.Provider = firstNonEmpty(s.agentModel, "cursor")
 	}
-	if u.Agent == "" {
-		u.Agent = "cursor"
+	u.Normalize()
+	if !u.HasAny() {
+		u.UsageStatus = tokenusage.StatusUnavailable
+		u.Source = "unavailable"
+	} else if u.UsageStatus == tokenusage.StatusPending {
+		u.UsageStatus = tokenusage.StatusFinal
 	}
-	if u.InputTokens > 0 || u.OutputTokens > 0 {
-		return u
-	}
-	u.Source = "estimate"
-	u.InputTokens = estimateTokens(s.promptText)
-	u.OutputTokens = estimateTokens(s.replyText)
-	return u
+	out := u
+	return &out
 }
 
 func (s *StdioSession) absorbUsage(raw json.RawMessage) {
-	in, out, agent, ok := parseTokenUsage(raw)
-	if !ok && agent == "" {
+	parsed, ok := parseTokenUsageFull(raw)
+	if !ok {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.inTok = mergeToken(s.inTok, in)
-	s.outTok = mergeToken(s.outTok, out)
-	if agent != "" {
-		s.agentModel = agent
+	s.lastUsage.InputTokens = mergeToken(s.lastUsage.InputTokens, parsed.InputTokens)
+	s.lastUsage.OutputTokens = mergeToken(s.lastUsage.OutputTokens, parsed.OutputTokens)
+	s.lastUsage.CachedInputTokens = mergeToken(s.lastUsage.CachedInputTokens, parsed.CachedInputTokens)
+	s.lastUsage.CacheWriteInputTokens = mergeToken(s.lastUsage.CacheWriteInputTokens, parsed.CacheWriteInputTokens)
+	s.lastUsage.CacheReadInputTokens = mergeToken(s.lastUsage.CacheReadInputTokens, parsed.CacheReadInputTokens)
+	s.lastUsage.ReasoningOutputTokens = mergeToken(s.lastUsage.ReasoningOutputTokens, parsed.ReasoningOutputTokens)
+	if parsed.TotalTokens > s.lastUsage.TotalTokens {
+		s.lastUsage.TotalTokens = parsed.TotalTokens
 	}
+	if parsed.Provider != "" {
+		s.agentModel = parsed.Provider
+		s.lastUsage.Provider = parsed.Provider
+	}
+	s.lastUsage.Source = "cursor_acp_event"
+	s.lastUsage.UsageStatus = tokenusage.StatusPartial
+}
+
+// Usage 兼容旧结构。
+type Usage struct {
+	InputTokens  int64
+	OutputTokens int64
+	Agent        string
+	Source       string
 }
 
 func mergeToken(cur, next int64) int64 {
@@ -74,15 +99,14 @@ func mergeToken(cur, next int64) int64 {
 	return cur + next
 }
 
-// parseTokenUsage 从 ACP session/update 或 prompt 结果里取 token。
-// 兼容 tokens.input/output、inputTokens/outputTokens、promptTokens/completionTokens。
-func parseTokenUsage(raw json.RawMessage) (inTok, outTok int64, agent string, ok bool) {
+func parseTokenUsageFull(raw json.RawMessage) (tokenusage.TokenUsage, bool) {
+	var out tokenusage.TokenUsage
 	if len(raw) == 0 || string(raw) == "null" {
-		return 0, 0, "", false
+		return out, false
 	}
 	var root map[string]any
 	if err := json.Unmarshal(raw, &root); err != nil {
-		return 0, 0, "", false
+		return out, false
 	}
 	blobs := []map[string]any{root}
 	if up, ok := root["update"].(map[string]any); ok {
@@ -94,27 +118,56 @@ func parseTokenUsage(raw json.RawMessage) (inTok, outTok int64, agent string, ok
 			blobs = append(blobs, up)
 		}
 	}
+	ok := false
 	for _, b := range blobs {
 		if b == nil {
 			continue
 		}
 		if a := stringField(b, "model", "agent", "modelId"); a != "" {
-			agent = a
+			out.Provider = a
 		}
-		if tok, ok := b["tokens"].(map[string]any); ok {
-			inTok = firstInt(tok, "input", "inputTokens", "prompt", "promptTokens")
-			outTok = firstInt(tok, "output", "outputTokens", "completion", "completionTokens")
-			if inTok > 0 || outTok > 0 {
-				return inTok, outTok, agent, true
+		if tok, okTok := b["tokens"].(map[string]any); okTok {
+			fillUsageFromMap(&out, tok)
+			if out.HasAny() {
+				ok = true
 			}
 		}
-		inTok = firstInt(b, "inputTokens", "input_tokens", "promptTokens", "prompt_tokens")
-		outTok = firstInt(b, "outputTokens", "output_tokens", "completionTokens", "completion_tokens")
-		if inTok > 0 || outTok > 0 {
-			return inTok, outTok, agent, true
+		if usage, okU := b["usage"].(map[string]any); okU {
+			fillUsageFromMap(&out, usage)
+			if out.HasAny() {
+				ok = true
+			}
+		}
+		fillUsageFromMap(&out, b)
+		if out.HasAny() {
+			ok = true
 		}
 	}
-	return 0, 0, agent, false
+	return out, ok
+}
+
+func fillUsageFromMap(u *tokenusage.TokenUsage, m map[string]any) {
+	if v := firstInt(m, "inputTokens", "input_tokens", "promptTokens", "prompt_tokens", "input"); v > 0 {
+		u.InputTokens = v
+	}
+	if v := firstInt(m, "outputTokens", "output_tokens", "completionTokens", "completion_tokens", "output"); v > 0 {
+		u.OutputTokens = v
+	}
+	if v := firstInt(m, "cachedInputTokens", "cached_input_tokens", "cacheReadTokens", "cache_read_tokens"); v > 0 {
+		u.CachedInputTokens = v
+	}
+	if v := firstInt(m, "cacheWriteInputTokens", "cache_write_input_tokens", "cacheWriteTokens", "cache_write_tokens"); v > 0 {
+		u.CacheWriteInputTokens = v
+	}
+	if v := firstInt(m, "cacheReadInputTokens", "cache_read_input_tokens"); v > 0 {
+		u.CacheReadInputTokens = v
+	}
+	if v := firstInt(m, "reasoningOutputTokens", "reasoning_output_tokens", "reasoningTokens", "reasoning_tokens"); v > 0 {
+		u.ReasoningOutputTokens = v
+	}
+	if v := firstInt(m, "totalTokens", "total_tokens"); v > 0 {
+		u.TotalTokens = v
+	}
 }
 
 func stringField(m map[string]any, keys ...string) string {
@@ -143,16 +196,16 @@ func firstInt(m map[string]any, keys ...string) int64 {
 	return 0
 }
 
-func estimateTokens(text string) int64 {
-	n := utf8.RuneCountInString(text)
-	if n <= 0 {
-		return 0
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
 	}
-	return int64(n)
+	return ""
 }
 
 // normalizeMCPServers 把 MCP 配置转成 ACP session/new 接受的形状。
-// headers / env 必须是 {name,value} 数组；传对象时 Cursor Agent 会返回 -32603。
 func normalizeMCPServers(in []any) []any {
 	if len(in) == 0 {
 		return []any{}

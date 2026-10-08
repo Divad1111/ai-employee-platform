@@ -5,6 +5,7 @@ package workstation
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -133,6 +134,26 @@ func (s *Service) Get(ctx context.Context, id string) View {
 		v.CertStatus = "ACTIVE"
 	}
 	return v
+}
+
+// ModelsUpdatedAt 返回最近一次模型上报时间。
+func (s *Service) ModelsUpdatedAt(wsID string) time.Time {
+	if s.Presence == nil {
+		return time.Time{}
+	}
+	return s.Presence.ModelsUpdatedAt(wsID)
+}
+
+// RequestModelRefresh 让在线工作站重新查询并上报模型列表。
+func (s *Service) RequestModelRefresh(wsID string) error {
+	if s.Commander == nil {
+		return errors.New("工作站通道未就绪")
+	}
+	if s.Presence == nil || s.Presence.StatusOf(wsID) != reliability.StatusOnline {
+		return errors.New("工作站离线，无法拉取模型列表")
+	}
+	_, err := s.Commander.PushCommand(wsID, aiev1.CommandType_COMMAND_TYPE_UPDATE_WORKSTATION, "", "", `{"op":"refresh_models"}`)
+	return err
 }
 
 // Revoke 吊销证书。

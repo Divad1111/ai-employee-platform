@@ -60,7 +60,7 @@ var transitions = map[string]map[string]bool{
 		StatusRunning: true, StatusCancelled: true, StatusFailed: true,
 	},
 	StatusUnknown: {
-		StatusRunning: true, StatusFailed: true, StatusCancelled: true,
+		StatusRunning: true, StatusSuccess: true, StatusFailed: true, StatusCancelled: true,
 	},
 }
 
@@ -103,11 +103,17 @@ type Job struct {
 	CreatedBy        string         `json:"created_by"`
 	Status           string         `json:"status"`
 	Result           string         `json:"result"`
-	InputTokens      int64          `json:"input_tokens"`
-	OutputTokens     int64          `json:"output_tokens"`
-	Agent            string         `json:"agent"`
-	TokenSource      string         `json:"token_source"`
-	Source           string         `json:"source"`
+	InputTokens           int64          `json:"input_tokens"`
+	OutputTokens          int64          `json:"output_tokens"`
+	CachedInputTokens     int64          `json:"cached_input_tokens"`
+	CacheWriteInputTokens int64          `json:"cache_write_input_tokens"`
+	CacheReadInputTokens  int64          `json:"cache_read_input_tokens"`
+	ReasoningOutputTokens int64          `json:"reasoning_output_tokens"`
+	TotalTokens           int64          `json:"total_tokens"`
+	Agent                 string         `json:"agent"`
+	TokenSource           string         `json:"token_source"`
+	TokenUsageStatus      string         `json:"token_usage_status"`
+	Source                string         `json:"source"`
 	IdempotencyKey   string         `json:"idempotency_key"`
 	TimeoutSec       int            `json:"timeout_sec"`
 	WorkflowID       string         `json:"workflow_id,omitempty"`
@@ -354,23 +360,82 @@ func (s *Service) SetResult(ctx context.Context, jobID, result string) error {
 	return s.store.Save(ctx, j)
 }
 
-// RecordTokens 写入任务 token 消耗。已记过则不再重复，避免事件重放把用量加两次。
+// TokenSummary 任务汇总缓存写入参数。
+type TokenSummary struct {
+	InputTokens           int64
+	OutputTokens          int64
+	CachedInputTokens     int64
+	CacheWriteInputTokens int64
+	CacheReadInputTokens  int64
+	ReasoningOutputTokens int64
+	TotalTokens           int64
+	UsageStatus           string
+}
+
+// ApplyTokenSummary 用明细汇总刷新 jobs 缓存字段（可重复调用）。
+func (s *Service) ApplyTokenSummary(ctx context.Context, jobID string, sum TokenSummary, agentName, source string) (createdBy string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, err := s.store.Get(ctx, jobID)
+	if err != nil || j == nil {
+		return "", ErrNotFound
+	}
+	j.InputTokens = sum.InputTokens
+	j.OutputTokens = sum.OutputTokens
+	j.CachedInputTokens = sum.CachedInputTokens
+	j.CacheWriteInputTokens = sum.CacheWriteInputTokens
+	j.CacheReadInputTokens = sum.CacheReadInputTokens
+	j.ReasoningOutputTokens = sum.ReasoningOutputTokens
+	j.TotalTokens = sum.TotalTokens
+	if j.TotalTokens <= 0 {
+		j.TotalTokens = j.InputTokens + j.OutputTokens
+	}
+	j.TokenUsageStatus = sum.UsageStatus
+	if agentName != "" {
+		j.Agent = agentName
+	}
+	if source != "" && source != "estimate" {
+		j.TokenSource = source
+	}
+	if j.TokenSource == "estimate" {
+		j.TokenSource = "unavailable"
+		if j.TokenUsageStatus == "" {
+			j.TokenUsageStatus = "UNAVAILABLE"
+		}
+	}
+	if err := s.store.Save(ctx, j); err != nil {
+		return j.CreatedBy, err
+	}
+	return j.CreatedBy, nil
+}
+
+// RecordTokens 兼容旧事件：单次写入汇总缓存。真实明细请走 tokenusage.Service。
 func (s *Service) RecordTokens(ctx context.Context, jobID string, input, output int64, agentName, source string) (createdBy string, first bool, err error) {
+	if source == "estimate" {
+		source = "unavailable"
+		input, output = 0, 0
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j, err := s.store.Get(ctx, jobID)
 	if err != nil || j == nil {
 		return "", false, ErrNotFound
 	}
-	if j.TokenSource != "" {
+	if j.TokenUsageStatus != "" || (j.TokenSource != "" && j.TokenSource != "estimate") {
 		return j.CreatedBy, false, nil
 	}
 	j.InputTokens = input
 	j.OutputTokens = output
+	j.TotalTokens = input + output
 	j.Agent = agentName
 	j.TokenSource = source
 	if j.TokenSource == "" {
-		j.TokenSource = "estimate"
+		j.TokenSource = "unavailable"
+	}
+	if input == 0 && output == 0 {
+		j.TokenUsageStatus = "UNAVAILABLE"
+	} else {
+		j.TokenUsageStatus = "FINAL"
 	}
 	if err := s.store.Save(ctx, j); err != nil {
 		return j.CreatedBy, false, err

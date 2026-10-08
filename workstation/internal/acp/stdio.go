@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/ai-employee-platform/workstation/internal/tokenusage"
 )
 
 // StdioSession 通过 stdio 连接真实 ACP Server（如 `agent acp`）。
@@ -37,8 +39,7 @@ type StdioSession struct {
 	collecting   bool
 	replyBuf     strings.Builder
 	replyText    string
-	inTok        int64
-	outTok       int64
+	lastUsage    tokenusage.TokenUsage
 	agentModel   string
 	promptText     string
 	mcpServers     []any

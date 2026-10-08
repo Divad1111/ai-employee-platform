@@ -76,19 +76,19 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 }
 
-func (l *Loop) tick(ctx context.Context) error {
-	st := Stats{}
-	if l.Stats != nil {
-		st = l.Stats()
+// Build 组装一帧心跳。模型列表只在注册或按需刷新时放入 Stats.Models。
+func Build(workstationID, version, messageID string, now time.Time, st Stats) *aiev1.Heartbeat {
+	if messageID == "" {
+		messageID = now.Format("hb-20060102150405.000")
 	}
 	hb := &aiev1.Heartbeat{
 		Meta: &aiev1.EnvelopeMeta{
-			MessageId:       l.newID(),
-			TimestampUnixMs: l.now().UnixMilli(),
+			MessageId:       messageID,
+			TimestampUnixMs: now.UnixMilli(),
 		},
-		WorkstationId:   l.WorkstationID,
-		TimestampUnixMs: l.now().UnixMilli(),
-		Version:         l.Version,
+		WorkstationId:   workstationID,
+		TimestampUnixMs: now.UnixMilli(),
+		Version:         version,
 		Resources: &aiev1.ResourceUsage{
 			CpuPercent:    st.CPU,
 			MemoryPercent: st.Memory,
@@ -113,5 +113,21 @@ func (l *Loop) tick(ctx context.Context) error {
 		}
 		hb.Capabilities = append(hb.Capabilities, &aiev1.Capability{Key: "model", Value: string(raw)})
 	}
-	return l.Send(ctx, hb)
+	return hb
+}
+
+func (l *Loop) tick(ctx context.Context) error {
+	st := Stats{}
+	if l.Stats != nil {
+		st = l.Stats()
+	}
+	id := ""
+	if l.newID != nil {
+		id = l.newID()
+	}
+	now := time.Now()
+	if l.now != nil {
+		now = l.now()
+	}
+	return l.Send(ctx, Build(l.WorkstationID, l.Version, id, now, st))
 }

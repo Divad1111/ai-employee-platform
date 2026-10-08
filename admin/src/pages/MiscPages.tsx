@@ -10,6 +10,7 @@ import { AlertDialog } from '../components/AlertDialog'
 import { roleDisplayName } from '../lib/rbacLabels'
 import { getUser } from '../stores/session'
 import { formatDateTime } from '../lib/time'
+import { copyToClipboard } from '../lib/clipboard'
 
 type AuditItem = {
   id: number
@@ -466,9 +467,9 @@ export function SettingsPage() {
                       <button
                         type="button"
                         className="btn-ghost btn-sm"
-                        onClick={() => {
-                          void navigator.clipboard.writeText(totpSecret)
-                          setTotpMsg('密钥已复制到剪贴板！')
+                        onClick={async () => {
+                          const ok = await copyToClipboard(totpSecret)
+                          if (ok) setTotpMsg('密钥已复制到剪贴板！')
                         }}
                       >
                         复制密钥

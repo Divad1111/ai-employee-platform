@@ -15,6 +15,7 @@ import (
 	"github.com/ai-employee-platform/workstation/internal/acp"
 	"github.com/ai-employee-platform/workstation/internal/providers"
 	"github.com/ai-employee-platform/workstation/internal/runtime/process"
+	"github.com/ai-employee-platform/workstation/internal/tokenusage"
 )
 
 const (
@@ -79,8 +80,30 @@ func lookupCodex() string {
 	switch runtime.GOOS {
 	case "windows":
 		candidates = append(candidates,
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "OpenAI", "Codex", "bin", "codex.exe"),
 			filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "codex", "codex.exe"),
 		)
+		sysDrive := os.Getenv("SystemDrive")
+		if sysDrive == "" {
+			sysDrive = "C:"
+		}
+		if entries, err := os.ReadDir(filepath.Join(sysDrive, "\\Users")); err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				u := entry.Name()
+				if u == "Public" || u == "Default" || u == "All Users" || u == "Default User" {
+					continue
+				}
+				candidates = append(candidates,
+					filepath.Join(sysDrive, "\\Users", u, "AppData", "Local", "Programs", "OpenAI", "Codex", "bin", "codex.exe"),
+					filepath.Join(sysDrive, "\\Users", u, "AppData", "Local", "Programs", "codex", "codex.exe"),
+					filepath.Join(sysDrive, "\\Users", u, ".local", "bin", "codex.exe"),
+					filepath.Join(sysDrive, "\\Users", u, ".local", "bin", "codex.cmd"),
+				)
+			}
+		}
 	}
 	for _, c := range candidates {
 		if c == "" {
@@ -169,19 +192,54 @@ func (a *agentSession) Send(ctx context.Context, input []byte) (string, error) {
 	return a.acp.Send(ctx, input)
 }
 
-// LastUsage 读取本次 ACP prompt 的 token 用量。
+// LastUsage 兼容旧接口。
 func (a *agentSession) LastUsage() (int64, int64, string, string) {
+	if u := a.LastTokenUsage(); u != nil {
+		return u.InputTokens, u.OutputTokens, firstNonEmpty(u.Provider, "codex"), u.Source
+	}
+	return 0, 0, "codex", "unavailable"
+}
+
+// LastTokenUsage 读取 Codex 真实用量。
+func (a *agentSession) LastTokenUsage() *tokenusage.TokenUsage {
 	type reporter interface {
-		LastUsage() acp.Usage
+		LastTokenUsage() *tokenusage.TokenUsage
 	}
 	if r, ok := a.acp.(reporter); ok {
-		u := r.LastUsage()
-		if u.Agent == "" || u.Agent == "cursor" {
-			u.Agent = "codex"
-		}
-		return u.InputTokens, u.OutputTokens, u.Agent, u.Source
+		return r.LastTokenUsage()
 	}
-	return 0, 0, "codex", ""
+	type legacy interface {
+		LastUsage() acp.Usage
+	}
+	if r, ok := a.acp.(legacy); ok {
+		u := r.LastUsage()
+		agent := u.Agent
+		if agent == "" || agent == "cursor" {
+			agent = "codex"
+		}
+		out := &tokenusage.TokenUsage{
+			InputTokens:  u.InputTokens,
+			OutputTokens: u.OutputTokens,
+			Provider:     agent,
+			Source:       firstNonEmpty(u.Source, "codex_cli_event"),
+		}
+		out.Normalize()
+		if !out.HasAny() {
+			out.UsageStatus = tokenusage.StatusUnavailable
+			out.Source = "unavailable"
+		}
+		return out
+	}
+	return &tokenusage.TokenUsage{Provider: "codex", Source: "unavailable", UsageStatus: tokenusage.StatusUnavailable}
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 func (a *agentSession) Stop(ctx context.Context) error { return a.p.Stop(ctx, a.id) }
 

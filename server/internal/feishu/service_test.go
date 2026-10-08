@@ -58,6 +58,28 @@ func TestParseTargetAliasAndEmpID(t *testing.T) {
 	}
 }
 
+func TestParseTargetAliasEncoding(t *testing.T) {
+	v, _ := secret.NewMemoryVault()
+	s := feishu.NewService(v)
+	s.UpsertBinding(feishu.Binding{EmployeeID: "EMP-K", FeishuAlias: "可乐"})
+	s.UpsertBinding(feishu.Binding{EmployeeID: "EMP-K1", FeishuAlias: "可乐1"})
+
+	id, prompt, err := s.ParseTarget("@可乐1 你是谁")
+	if err != nil || id != "EMP-K1" || prompt != "你是谁" {
+		t.Fatalf("半角数字: id=%s prompt=%q err=%v", id, prompt, err)
+	}
+	// 全角数字 １ U+FF11、全角 ＠ U+FF20
+	id, _, err = s.ParseTarget("＠可乐１ 你是谁")
+	if err != nil || id != "EMP-K1" {
+		t.Fatalf("全角数字: id=%s err=%v", id, err)
+	}
+	// 零宽字符插在「乐」和「1」之间
+	id, _, err = s.ParseTarget("@可乐\u200b1 你是谁")
+	if err != nil || id != "EMP-K1" {
+		t.Fatalf("零宽字符: id=%s err=%v", id, err)
+	}
+}
+
 func TestVerifySignatureAndDedupe(t *testing.T) {
 	v, _ := secret.NewMemoryVault()
 	s := feishu.NewService(v)
@@ -425,6 +447,27 @@ func TestAutoBindFromMention(t *testing.T) {
 	}
 }
 
+func TestAutoBindSameOpenIDOnTwoEmployees(t *testing.T) {
+	v, _ := secret.NewMemoryVault()
+	s := feishu.NewService(v)
+	s.UpsertBinding(feishu.Binding{EmployeeID: "e1", FeishuAlias: "test"})
+	s.UpsertBinding(feishu.Binding{EmployeeID: "e2", FeishuAlias: "test2"})
+
+	n1 := s.AutoBindFromMention("e1", "ou_shared", "oc_p2p", false)
+	n2 := s.AutoBindFromMention("e2", "ou_shared", "oc_p2p", false)
+	if !n1.OpenBoundNow || !n2.OpenBoundNow {
+		t.Fatalf("两个员工都应自动绑定同一 OpenID: %+v %+v", n1, n2)
+	}
+	b1 := s.BindingByEmployee("e1")
+	b2 := s.BindingByEmployee("e2")
+	if b1 == nil || b2 == nil || b1.FeishuOpenID != "ou_shared" || b2.FeishuOpenID != "ou_shared" {
+		t.Fatalf("绑定结果不符: %+v %+v", b1, b2)
+	}
+	if !s.EmployeeHasOpenID("e1", "ou_shared") || !s.EmployeeHasOpenID("e2", "ou_shared") {
+		t.Fatal("同一飞书用户应同时关联两个员工")
+	}
+}
+
 func TestResolveTargetChatAndUserName(t *testing.T) {
 	v, _ := secret.NewMemoryVault()
 	s := feishu.NewService(v)
@@ -455,4 +498,3 @@ func TestResolveTargetChatAndUserName(t *testing.T) {
 		t.Fatalf("未知用户未连接真实接口时期望空，得到 %s", name)
 	}
 }
-

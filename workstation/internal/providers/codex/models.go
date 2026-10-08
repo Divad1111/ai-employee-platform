@@ -30,6 +30,7 @@ func (p *Provider) ListModels(ctx context.Context) ([]providers.Model, error) {
 		return nil, err
 	}
 	cmd.Stderr = nil
+	applyCodexEnv(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}

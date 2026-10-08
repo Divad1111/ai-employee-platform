@@ -18,8 +18,15 @@ func TestNormalizeMCPHeaders(t *testing.T) {
 
 func TestParseTokenUsage(t *testing.T) {
 	raw := []byte(`{"update":{"sessionUpdate":"usage_update","model":"composer","tokens":{"input":120,"output":45}}}`)
-	in, out, agent, ok := parseTokenUsage(raw)
-	if !ok || in != 120 || out != 45 || agent != "composer" {
-		t.Fatalf("%d %d %s %v", in, out, agent, ok)
+	u, ok := parseTokenUsageFull(raw)
+	if !ok || u.InputTokens != 120 || u.OutputTokens != 45 || u.Provider != "composer" {
+		t.Fatalf("%+v ok=%v", u, ok)
+	}
+}
+
+func TestParseTokenUsageNoEstimate(t *testing.T) {
+	u, ok := parseTokenUsageFull([]byte(`{"text":"hello world"}`))
+	if ok || u.HasAny() {
+		t.Fatalf("不应从纯文本估算: %+v ok=%v", u, ok)
 	}
 }

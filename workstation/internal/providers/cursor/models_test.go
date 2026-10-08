@@ -1,6 +1,7 @@
 package cursor
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 )
@@ -23,3 +24,10 @@ func TestModelsFromSessionResult(t *testing.T) {
 		t.Fatalf("got %#v", got)
 	}
 }
+
+func TestLiveListModels(t *testing.T) {
+	p := NewProvider(nil, "")
+	models, err := p.ListModels(context.Background())
+	t.Logf("models: %+v, err: %v", models, err)
+}
+

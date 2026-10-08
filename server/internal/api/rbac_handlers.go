@@ -14,6 +14,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/job"
 	"github.com/ai-employee-platform/server/internal/quota"
+	"github.com/ai-employee-platform/server/internal/session"
 	"github.com/ai-employee-platform/server/internal/workspace"
 	"github.com/ai-employee-platform/server/internal/wsmember"
 )
@@ -97,6 +98,37 @@ func (d Deps) filterEmployees(r *http.Request, sess *auth.Session, list []*emplo
 		}
 	}
 	return out
+}
+
+func (d Deps) filterSessions(r *http.Request, sess *auth.Session, list []*session.Session, perm string) []*session.Session {
+	if d.resolveScope(r.Context(), sess, perm) == authz.ScopeALL {
+		return list
+	}
+	out := make([]*session.Session, 0)
+	for _, s := range list {
+		if d.canSeeSession(r, sess, s, perm) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// canSeeSession 非全局权限时，只允许看到自己名下数字员工的会话。
+func (d Deps) canSeeSession(r *http.Request, sess *auth.Session, s *session.Session, perm string) bool {
+	if s == nil {
+		return false
+	}
+	if d.resolveScope(r.Context(), sess, perm) == authz.ScopeALL {
+		return true
+	}
+	if d.Employees == nil || s.EmployeeID == "" || sess == nil {
+		return false
+	}
+	e, err := d.Employees.Get(r.Context(), s.EmployeeID)
+	if err != nil || e == nil {
+		return false
+	}
+	return e.OwnerUserID == sess.UserID
 }
 
 func (d Deps) canSeeEmployee(r *http.Request, sess *auth.Session, e *employee.Employee) bool {

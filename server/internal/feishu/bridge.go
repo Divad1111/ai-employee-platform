@@ -19,16 +19,22 @@ type ChatBinder interface {
 // UserRoles 查询平台用户角色，供配额检查。
 type UserRoles func(ctx context.Context, userID string) []string
 
+// WorkspaceResolver 把员工上的工作区引用解析成已登记 id（路径会登记为工作区）。
+type WorkspaceResolver interface {
+	ResolveBinding(ctx context.Context, ref, workstationID, employeeID, actorID, ip string) (string, error)
+}
+
 // Bridge 将飞书接入接到 Employee/Job/Message/Scheduler/Notification。
 type Bridge struct {
-	Employees *employee.Service
-	Jobs      *job.Service
-	Messages  *message.Service
-	Scheduler *scheduler.Service
-	Notify    ChatBinder
-	Feishu    *Service
-	Quota     *quota.Service
-	Roles     UserRoles
+	Employees  *employee.Service
+	Jobs       *job.Service
+	Messages   *message.Service
+	Scheduler  *scheduler.Service
+	Notify     ChatBinder
+	Feishu     *Service
+	Quota      *quota.Service
+	Roles      UserRoles
+	Workspaces WorkspaceResolver
 }
 
 // ResolveAlias 实现 EmployeeChecker。
@@ -99,9 +105,22 @@ func (b *Bridge) CreateFromFeishu(ctx context.Context, employeeID, prompt, idemp
 			clientIP = bnd.FeishuOpenID
 		}
 	}
+	wsID := e.WorkspaceID
+	if b.Workspaces != nil && wsID != "" {
+		resolved, rerr := b.Workspaces.ResolveBinding(ctx, wsID, e.WorkstationID, employeeID, userID, clientIP)
+		if rerr != nil {
+			return "", rerr
+		}
+		if resolved != wsID {
+			if _, uerr := b.Employees.Update(ctx, employeeID, employee.UpdateInput{WorkspaceID: &resolved}, userID, clientIP); uerr != nil {
+				return "", uerr
+			}
+			wsID = resolved
+		}
+	}
 	j, _, err := b.Jobs.Create(ctx, job.CreateInput{
 		EmployeeID:     employeeID,
-		WorkspaceID:    e.WorkspaceID,
+		WorkspaceID:    wsID,
 		WorkstationID:  e.WorkstationID,
 		Prompt:         prompt,
 		IdempotencyKey: idempotencyKey,
@@ -129,6 +148,9 @@ func (b *Bridge) CreateFromFeishu(ctx context.Context, employeeID, prompt, idemp
 func (b *Bridge) feishuUserID(ctx context.Context, senderOpenID string, target *employee.Employee) string {
 	if b.Feishu == nil || b.Employees == nil || senderOpenID == "" {
 		return ""
+	}
+	if target != nil && target.OwnerUserID != "" && b.Feishu.EmployeeHasOpenID(target.ID, senderOpenID) {
+		return target.OwnerUserID
 	}
 	boundEmp := b.Feishu.EmployeeByOpenID(senderOpenID)
 	if boundEmp == "" {

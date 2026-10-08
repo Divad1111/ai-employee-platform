@@ -41,10 +41,40 @@ func Dial(ctx context.Context, endpoint string, b *identity.Bundle) (*Client, er
 		host = h
 	}
 	tlsCfg := &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{cert},
-		RootCAs:      pool,
-		ServerName:   host,
+		MinVersion:         tls.VersionTLS13,
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true,
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("缺少服务端证书")
+			}
+			serverCert, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("解析服务端证书失败: %w", err)
+			}
+			opts := x509.VerifyOptions{
+				Roots:         pool,
+				CurrentTime:   time.Now(),
+				Intermediates: x509.NewCertPool(),
+			}
+			for i := 1; i < len(rawCerts); i++ {
+				if intermediate, err := x509.ParseCertificate(rawCerts[i]); err == nil {
+					opts.Intermediates.AddCert(intermediate)
+				}
+			}
+			optsWithDNS := opts
+			optsWithDNS.DNSName = host
+			if _, err := serverCert.Verify(optsWithDNS); err == nil {
+				return nil
+			}
+			if _, err := serverCert.Verify(opts); err != nil {
+				return fmt.Errorf("服务端证书不受信任或已过期: %w", err)
+			}
+			if serverCert.Subject.CommonName != "control-plane" && serverCert.Subject.CommonName != host {
+				return fmt.Errorf("服务端身份不符: %s", serverCert.Subject.CommonName)
+			}
+			return nil
+		},
 	}
 	creds := credentials.NewTLS(tlsCfg)
 	conn, err := grpc.DialContext(ctx, endpoint, grpc.WithTransportCredentials(creds), grpc.WithBlock())

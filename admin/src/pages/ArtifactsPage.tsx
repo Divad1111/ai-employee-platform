@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { apiGet, getToken } from '../api/client'
 import { IconPackage, IconRefresh } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
+import { MarkdownView } from '../components/MarkdownView'
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
 import { formatDateTime } from '../lib/time'
 
@@ -33,6 +34,7 @@ export function ArtifactsPage() {
   const [jobMap, setJobMap] = useState<Record<string, string>>({})
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
+  const [preview, setPreview] = useState<{ name: string; text: string } | null>(null)
 
   const reload = () => {
     setLoading(true)
@@ -53,6 +55,29 @@ export function ArtifactsPage() {
   useEffect(() => {
     reload()
   }, [])
+
+  const isText = (a: Artifact) => {
+    const name = a.name.toLowerCase()
+    const typ = (a.type || '').toLowerCase()
+    return typ === 'md' || typ === 'markdown' || typ === 'txt' || typ === 'log' || typ === 'result' || typ === 'report'
+      || name.endsWith('.md') || name.endsWith('.markdown') || name.endsWith('.txt')
+  }
+
+  const loadText = async (id: string) => {
+    const tok = getToken()
+    const res = await fetch(`/api/artifacts/${id}/download`, {
+      headers: tok ? { Authorization: `Bearer ${tok}` } : {},
+    })
+    if (!res.ok) throw new Error(`读取失败 (状态码: ${res.status})`)
+    return res.text()
+  }
+
+  const openPreview = (a: Artifact) => {
+    setErr('')
+    void loadText(a.id)
+      .then((text) => setPreview({ name: a.name, text }))
+      .catch((e: Error) => setErr(e.message))
+  }
 
   const download = (id: string, name: string) => {
     const tok = getToken()
@@ -77,7 +102,7 @@ export function ArtifactsPage() {
       <header className="page-header">
         <div>
           <h1>任务制品产物中心 (Artifacts)</h1>
-          <p>任务执行产出的代码包、日志报表与生成物 · 基于 SHA-256 自动去重保全存储</p>
+          <p>任务执行产出的代码包、日志报表与生成物 · 文本默认按 Markdown 展示</p>
         </div>
         <button type="button" className="btn-ghost" onClick={() => reload()} disabled={loading}>
           <IconRefresh size={15} />
@@ -159,9 +184,16 @@ export function ArtifactsPage() {
                     {a.created_at ? formatDateTime(a.created_at) : '—'}
                   </td>
                   <td>
+                    <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                    {isText(a) ? (
+                      <button type="button" className="btn-ghost btn-sm" onClick={() => openPreview(a)}>
+                        查看 Markdown
+                      </button>
+                    ) : null}
                     <button type="button" className="btn-ghost btn-sm" onClick={() => download(a.id, a.name)}>
                       下载制品文件
                     </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -174,6 +206,21 @@ export function ArtifactsPage() {
           </table>
         </div>
       </div>
+
+      {preview ? (
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <h2>文本预览</h2>
+              <p>{preview.name} · 默认按 Markdown 渲染</p>
+            </div>
+            <button type="button" className="btn-ghost" onClick={() => setPreview(null)}>
+              关闭预览
+            </button>
+          </div>
+          <MarkdownView text={preview.text} />
+        </div>
+      ) : null}
     </section>
   )
 }

@@ -9,7 +9,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -511,8 +513,8 @@ func runRegister(args []string) error {
 	body, _ := json.Marshal(map[string]string{
 		"token": *token, "workstation_id": b.WorkstationID, "csr_pem": string(b.CSRPEM),
 	})
-	url := strings.TrimRight(*server, "/") + "/api/enrollment/enroll"
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	enrollURL := strings.TrimRight(*server, "/") + "/api/enrollment/enroll"
+	resp, err := http.Post(enrollURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -533,7 +535,43 @@ func runRegister(args []string) error {
 	if err := identity.Save(paths, b); err != nil {
 		return err
 	}
+
+	// 自动将 Control Plane 的服务网络端点写入 config.yaml，避免错误回退到 localhost:9090
+	serverURL := strings.TrimRight(*server, "/")
+	grpcHost := "127.0.0.1"
+	grpcPort := "9090"
+	if parsed, err := url.Parse(serverURL); err == nil {
+		if h := parsed.Hostname(); h != "" {
+			grpcHost = h
+		}
+	}
+	// 尝试向服务端探测声明的对外 gRPC 端口与服务器地址
+	epURL := serverURL + "/api/enrollment/endpoint"
+	if epResp, err := http.Get(epURL); err == nil && epResp.StatusCode == http.StatusOK {
+		var ep struct {
+			GRPCPort   string `json:"grpc_port"`
+			ServerHost string `json:"server_host"`
+		}
+		if rawEP, err := io.ReadAll(epResp.Body); err == nil {
+			_ = json.Unmarshal(rawEP, &ep)
+			if ep.GRPCPort != "" {
+				grpcPort = ep.GRPCPort
+			}
+			if ep.ServerHost != "" && ep.ServerHost != "127.0.0.1" && ep.ServerHost != "localhost" {
+				grpcHost = ep.ServerHost
+			}
+		}
+		_ = epResp.Body.Close()
+	}
+
+	cfgPath := filepath.Join(paths.ConfigDir(), "config.yaml")
+	cfg, _ := config.LoadFile(cfgPath)
+	cfg.ControlPlane.Endpoint = net.JoinHostPort(grpcHost, grpcPort)
+	cfg.ControlPlane.HTTPEndpoint = serverURL
+	_ = cfg.SaveFile(cfgPath)
+
 	fmt.Printf("注册成功\nWorkstation ID : %s\nIdentity Dir   : %s\n", b.WorkstationID, paths.IdentityDir())
+	fmt.Printf("Control Plane  : gRPC=%s, HTTP=%s (已更新至 %s)\n", cfg.ControlPlane.Endpoint, cfg.ControlPlane.HTTPEndpoint, cfgPath)
 	fmt.Println("私钥仅保存在本地，未上传 Control Plane。")
 	return nil
 }

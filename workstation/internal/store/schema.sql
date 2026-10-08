@@ -114,3 +114,30 @@ CREATE TABLE IF NOT EXISTS updates (
     created_at   TEXT NOT NULL,
     finished_at  TEXT
 );
+
+-- Token Usage：本地 Run 明细（断网可重报）
+CREATE TABLE IF NOT EXISTS token_usage (
+    id                        TEXT PRIMARY KEY,
+    job_id                    TEXT NOT NULL,
+    execution_id              TEXT NOT NULL DEFAULT '',
+    provider                  TEXT NOT NULL DEFAULT '',
+    provider_session_id       TEXT NOT NULL DEFAULT '',
+    provider_run_id           TEXT NOT NULL DEFAULT '',
+    input_tokens              INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens       INTEGER NOT NULL DEFAULT 0,
+    cache_write_input_tokens  INTEGER NOT NULL DEFAULT 0,
+    cache_read_input_tokens   INTEGER NOT NULL DEFAULT 0,
+    output_tokens             INTEGER NOT NULL DEFAULT 0,
+    reasoning_output_tokens   INTEGER NOT NULL DEFAULT 0,
+    total_tokens              INTEGER NOT NULL DEFAULT 0,
+    usage_status              TEXT NOT NULL DEFAULT 'UNAVAILABLE',
+    usage_source              TEXT NOT NULL DEFAULT '',
+    created_at                TEXT NOT NULL,
+    updated_at                TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_token_usage_provider_run
+    ON token_usage(provider, provider_run_id)
+    WHERE provider_run_id IS NOT NULL AND provider_run_id != '';
+
+CREATE INDEX IF NOT EXISTS idx_token_usage_job ON token_usage(job_id);

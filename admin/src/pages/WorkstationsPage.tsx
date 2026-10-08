@@ -8,6 +8,7 @@ import { PromptDialog } from '../components/PromptDialog'
 import { AlertDialog } from '../components/AlertDialog'
 import { usePerm } from '../stores/permissions'
 import { formatDateTime } from '../lib/time'
+import { copyToClipboard } from '../lib/clipboard'
 
 type WS = {
   id: string
@@ -209,10 +210,12 @@ aew service start
 aew service status`
     : ''
 
-  function copyCommand(text: string) {
-    void navigator.clipboard.writeText(text)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2500)
+  async function copyCommand(text: string) {
+    const success = await copyToClipboard(text)
+    if (success) {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2500)
+    }
   }
 
   const onlineCount = items.filter((w) => w.status === 'ONLINE' || w.status === 'BUSY').length

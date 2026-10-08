@@ -8,7 +8,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -50,6 +52,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/scheduler"
 	"github.com/ai-employee-platform/server/internal/secret"
 	"github.com/ai-employee-platform/server/internal/session"
+	"github.com/ai-employee-platform/server/internal/tokenusage"
 	"github.com/ai-employee-platform/server/internal/workergrpc"
 	"github.com/ai-employee-platform/server/internal/workflowmcp"
 	"github.com/ai-employee-platform/server/internal/workspace"
@@ -160,7 +163,7 @@ func main() {
 		vault = fv
 	}
 
-	presence := reliability.NewPresence(5, 15)
+	presence := reliability.NewPresence(5, 45)
 	empSvc := employee.NewService(empStore, auditor, bus)
 	wsSvc := workspace.NewService(wsStore, auditor)
 	wsSvc.SetBinder(workspace.EmployeeBridge{
@@ -184,6 +187,11 @@ func main() {
 	wsNodeSvc := workstation.NewService(ca, presence, wsMetaStore)
 	sessSvc := session.NewService(sessStore, auditor, bus)
 	jobSvc := job.NewService(jobStore, auditor, bus)
+	var tokenUsageStore tokenusage.Store = tokenusage.NewMemoryStore()
+	if pgSQL != nil {
+		tokenUsageStore = tokenusage.NewPostgresStore(pgSQL)
+	}
+	tokenUsageSvc := tokenusage.NewService(tokenUsageStore, jobTokenBridge{jobs: jobSvc})
 	msgSvc := message.NewService(message.NewMemoryStore(), auditor)
 
 	feishuSvc := feishu.NewService(vault)
@@ -207,7 +215,24 @@ func main() {
 		}
 	}
 
-	srvCert, err := workergrpc.LoadServerCertificate(ca, "localhost", "127.0.0.1")
+	grpcHosts := []string{"localhost", "127.0.0.1"}
+	if cfg.PublicServerURL != "" {
+		if u, err := url.Parse(cfg.PublicServerURL); err == nil && u.Hostname() != "" {
+			grpcHosts = append(grpcHosts, u.Hostname())
+		}
+	}
+	if ifaces, err := net.Interfaces(); err == nil {
+		for _, iface := range ifaces {
+			if addrs, err := iface.Addrs(); err == nil {
+				for _, addr := range addrs {
+					if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+						grpcHosts = append(grpcHosts, ipNet.IP.String())
+					}
+				}
+			}
+		}
+	}
+	srvCert, err := workergrpc.LoadServerCertificate(ca, grpcHosts...)
 	if err != nil {
 		fatal("签发服务端证书失败: %v", err)
 	}
@@ -270,6 +295,13 @@ func main() {
 				empID = j.EmployeeID
 			}
 		}
+		// 工作站没带上驱动引擎时，用员工默认引擎，避免会话被记成空值后在界面上被看成 Cursor。
+		sessionProvider := strings.TrimSpace(payload["provider"])
+		if sessionProvider == "" && empID != "" {
+			if e, err := empSvc.Get(ctx, empID); err == nil && e != nil {
+				sessionProvider = e.DefaultProvider
+			}
+		}
 
 		switch ev.GetType() {
 		case aiev1.EventType_EVENT_TYPE_SESSION_STARTED,
@@ -290,7 +322,7 @@ func main() {
 				}
 			}
 			if sessID != "" && empID != "" {
-				_, _ = sessSvc.ReportFromWorkstation(ctx, sessID, empID, wsID, payload["workspace_id"], payload["provider"], st)
+				_, _ = sessSvc.ReportFromWorkstation(ctx, sessID, empID, wsID, payload["workspace_id"], sessionProvider, st)
 			}
 			if jobID != "" {
 				_ = jobSvc.AppendEvent(ctx, jobID, "SESSION", map[string]string{
@@ -305,7 +337,7 @@ func main() {
 			if jobID != "" {
 				if sessID != "" {
 					_ = jobSvc.BindSession(ctx, jobID, sessID)
-					_, _ = sessSvc.ReportFromWorkstation(ctx, sessID, empID, wsID, payload["workspace_id"], payload["provider"], session.StatusBusy)
+					_, _ = sessSvc.ReportFromWorkstation(ctx, sessID, empID, wsID, payload["workspace_id"], sessionProvider, session.StatusBusy)
 				}
 				_, _ = jobSvc.Transition(ctx, jobID, job.StatusRunning, "workstation", wsID, payload)
 			}
@@ -324,7 +356,7 @@ func main() {
 					if uj.Result == "" && payload["reply"] != "" {
 						uj.Result = payload["reply"]
 					}
-					recordJobTokens(ctx, jobSvc, quotaStore, jobID, payload)
+					recordJobTokens(ctx, jobSvc, tokenUsageSvc, quotaStore, jobID, wsID, empID, payload)
 					_ = notifySvc.OnJobTerminal(ctx, uj)
 					autoSvc.OnJobTerminal(ctx, uj)
 				}
@@ -341,7 +373,7 @@ func main() {
 					fmt.Printf("[Server] ⚠️ Transition to FAILED 失败 (job=%s): %v\n", jobID, err)
 				}
 				if err == nil && uj != nil {
-					recordJobTokens(ctx, jobSvc, quotaStore, jobID, payload)
+					recordJobTokens(ctx, jobSvc, tokenUsageSvc, quotaStore, jobID, wsID, empID, payload)
 					_ = notifySvc.OnJobTerminal(ctx, uj)
 					autoSvc.OnJobTerminal(ctx, uj)
 				}
@@ -399,7 +431,8 @@ func main() {
 	bridge := &feishu.Bridge{
 		Employees: empSvc, Jobs: jobSvc, Messages: msgSvc,
 		Scheduler: sched, Notify: notifySvc, Feishu: feishuSvc,
-		Quota: quotaSvc,
+		Workspaces: wsSvc,
+		Quota:      quotaSvc,
 		Roles: func(ctx context.Context, userID string) []string {
 			u, err := users.FindByID(ctx, userID)
 			if err != nil || u == nil {
@@ -476,9 +509,9 @@ func main() {
 	}()
 
 	httpHandler := api.NewRouter(api.Deps{
-		Config:          cfg,
-		Auth:            authSvc,
-		Enrollment:      enrollSvc,
+		Config:     cfg,
+		Auth:       authSvc,
+		Enrollment: enrollSvc,
 
 		CA:              ca,
 		Employees:       empSvc,
@@ -486,6 +519,7 @@ func main() {
 		Workstations:    wsNodeSvc,
 		Sessions:        sessSvc,
 		Jobs:            jobSvc,
+		TokenUsage:      tokenUsageSvc,
 		Messages:        msgSvc,
 		Bus:             bus,
 		Audit:           auditor,
@@ -536,21 +570,65 @@ func main() {
 	fmt.Println("已关闭")
 }
 
-func recordJobTokens(ctx context.Context, jobSvc *job.Service, store quota.Store, jobID string, payload map[string]string) {
+// jobTokenBridge 把 tokenusage.Summary 写入 jobs 汇总缓存。
+type jobTokenBridge struct {
+	jobs *job.Service
+}
+
+func (b jobTokenBridge) ApplyTokenSummary(ctx context.Context, jobID string, sum tokenusage.Summary, agent, source string) (string, error) {
+	return b.jobs.ApplyTokenSummary(ctx, jobID, job.TokenSummary{
+		InputTokens:           sum.InputTokens,
+		OutputTokens:          sum.OutputTokens,
+		CachedInputTokens:     sum.CachedInputTokens,
+		CacheWriteInputTokens: sum.CacheWriteInputTokens,
+		CacheReadInputTokens:  sum.CacheReadInputTokens,
+		ReasoningOutputTokens: sum.ReasoningOutputTokens,
+		TotalTokens:           sum.TotalTokens,
+		UsageStatus:           sum.UsageStatus,
+	}, agent, source)
+}
+
+func recordJobTokens(ctx context.Context, jobSvc *job.Service, usageSvc *tokenusage.Service, store quota.Store, jobID, wsID, empID string, payload map[string]string) {
+	src := payload["usage_source"]
+	if src == "" {
+		src = payload["token_source"]
+	}
 	inTok, _ := strconv.ParseInt(payload["input_tokens"], 10, 64)
 	outTok, _ := strconv.ParseInt(payload["output_tokens"], 10, 64)
-	src := payload["token_source"]
-	if src == "" && inTok == 0 && outTok == 0 {
+	total, _ := strconv.ParseInt(payload["total_tokens"], 10, 64)
+	if src == "" && inTok == 0 && outTok == 0 && total == 0 && payload["usage_status"] == "" {
 		return
 	}
-	userID, first, err := jobSvc.RecordTokens(ctx, jobID, inTok, outTok, payload["agent"], src)
-	if err != nil || !first || store == nil {
+	var first bool
+	var userID string
+	if usageSvc != nil {
+		_, first, _ = usageSvc.UpsertFromEventPayload(ctx, jobID, wsID, empID, payload)
+		if j, err := jobSvc.Get(ctx, jobID); err == nil && j != nil {
+			userID = j.CreatedBy
+			inTok = j.InputTokens
+			outTok = j.OutputTokens
+			if j.TotalTokens > 0 {
+				total = j.TotalTokens
+			}
+		}
+	} else {
+		var err error
+		userID, first, err = jobSvc.RecordTokens(ctx, jobID, inTok, outTok, payload["agent"], src)
+		if err != nil {
+			return
+		}
+	}
+	if !first || store == nil {
 		return
 	}
 	if userID == "" || userID == "feishu" || strings.HasPrefix(userID, "automation:") || strings.HasPrefix(userID, "feishu:") {
 		return
 	}
-	_, _ = store.AddUsage(ctx, quota.TypeUser, userID, quota.PeriodMonthly, inTok+outTok, 1)
+	delta := total
+	if delta <= 0 {
+		delta = inTok + outTok
+	}
+	_, _ = store.AddUsage(ctx, quota.TypeUser, userID, quota.PeriodMonthly, delta, 1)
 }
 
 func getenv(k, def string) string {

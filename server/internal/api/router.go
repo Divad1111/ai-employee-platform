@@ -40,6 +40,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/scheduler"
 	"github.com/ai-employee-platform/server/internal/secret"
 	"github.com/ai-employee-platform/server/internal/session"
+	"github.com/ai-employee-platform/server/internal/tokenusage"
 	"github.com/ai-employee-platform/server/internal/workflowmcp"
 	"github.com/ai-employee-platform/server/internal/workspace"
 	"github.com/ai-employee-platform/server/internal/workstation"
@@ -48,8 +49,8 @@ import (
 
 // Deps HTTP API 依赖。
 type Deps struct {
-	Config          *config.Config
-	Auth            *auth.Service
+	Config *config.Config
+	Auth   *auth.Service
 
 	Enrollment      *enrollment.Service
 	CA              *certca.Authority
@@ -58,6 +59,7 @@ type Deps struct {
 	Workstations    *workstation.Service
 	Sessions        *session.Service
 	Jobs            *job.Service
+	TokenUsage      *tokenusage.Service
 	Messages        *message.Service
 	Bus             *eventbus.Bus
 	Audit           *audit.Memory
@@ -156,6 +158,7 @@ func NewRouter(d Deps) http.Handler {
 	// Workstations
 	mux.HandleFunc("GET /api/workstations", d.requirePerm("workstation.read", d.handleListWorkstations))
 	mux.HandleFunc("GET /api/workstations/{id}", d.requirePerm("workstation.read", d.handleGetWorkstation))
+	mux.HandleFunc("POST /api/workstations/{id}/models/refresh", d.requirePerm("workstation.read", d.handleRefreshWorkstationModels))
 	mux.HandleFunc("PATCH /api/workstations/{id}", d.requirePerm("workstation.write", d.handleUpdateWorkstation))
 	mux.HandleFunc("DELETE /api/workstations/{id}", d.requirePermStepUp("workstation.write", d.handleDeleteWorkstation))
 	mux.HandleFunc("GET /api/workstations/{id}/members", d.requirePerm("workstation.read", d.handleListWSMembers))
@@ -173,6 +176,8 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/jobs", d.requirePerm("job.write", d.handleCreateJob))
 	mux.HandleFunc("GET /api/jobs/{id}", d.requirePerm("job.read", d.handleGetJob))
 	mux.HandleFunc("GET /api/jobs/{id}/events", d.requirePerm("job.read", d.handleJobTimeline))
+	mux.HandleFunc("GET /api/jobs/{id}/token-usage", d.requirePerm("job.read", d.handleGetJobTokenUsage))
+	mux.HandleFunc("POST /api/jobs/{id}/token-usage", d.requirePerm("job.write", d.handleUpsertJobTokenUsage))
 	mux.HandleFunc("POST /api/jobs/{id}/transition", d.requirePerm("job.write", d.handleJobTransition))
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", d.requirePerm("job.cancel", d.handleCancelJob))
 
@@ -560,7 +565,6 @@ func (d Deps) handleCreateToken(w http.ResponseWriter, r *http.Request, sess *au
 	})
 }
 
-
 type enrollReq struct {
 	Token         string `json:"token"`
 	WorkstationID string `json:"workstation_id"`
@@ -683,6 +687,15 @@ func (d Deps) handleListEmployees(w http.ResponseWriter, r *http.Request, sess *
 	writeJSON(w, http.StatusOK, map[string]any{"items": d.filterEmployees(r, sess, list)})
 }
 
+// resolveEmployeeWorkspace 校验工作区 id；本机路径会登记成工作区并返回新 id。
+func (d Deps) resolveEmployeeWorkspace(ctx context.Context, ref, workstationID, employeeID, actorID, ip string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || d.Workspaces == nil {
+		return ref, nil
+	}
+	return d.Workspaces.ResolveBinding(ctx, ref, workstationID, employeeID, actorID, ip)
+}
+
 func (d Deps) handleCreateEmployee(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	var in employee.CreateInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -696,10 +709,25 @@ func (d Deps) handleCreateEmployee(w http.ResponseWriter, r *http.Request, sess 
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
+	if resolved, err := d.resolveEmployeeWorkspace(r.Context(), in.WorkspaceID, in.WorkstationID, "", sess.UserID, clientIP(r)); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	} else {
+		in.WorkspaceID = resolved
+	}
 	e, err := d.Employees.Create(r.Context(), in, sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if e.WorkspaceID != "" && d.Workspaces != nil {
+		if _, berr := d.Workspaces.BindEmployee(r.Context(), e.WorkspaceID, e.ID, sess.UserID, clientIP(r)); berr != nil {
+			writeErr(w, http.StatusConflict, berr.Error())
+			return
+		}
+		if refreshed, gerr := d.Employees.Get(r.Context(), e.ID); gerr == nil && refreshed != nil {
+			e = refreshed
+		}
 	}
 	writeJSON(w, http.StatusCreated, e)
 }
@@ -753,7 +781,16 @@ func (d Deps) handleUpdateEmployee(w http.ResponseWriter, r *http.Request, sess 
 		in.WorkstationID = &v
 	}
 	if v, ok := raw["workspace_id"].(string); ok {
-		in.WorkspaceID = &v
+		node := existing.WorkstationID
+		if in.WorkstationID != nil {
+			node = *in.WorkstationID
+		}
+		resolved, rerr := d.resolveEmployeeWorkspace(r.Context(), v, node, existing.ID, sess.UserID, clientIP(r))
+		if rerr != nil {
+			writeErr(w, http.StatusBadRequest, rerr.Error())
+			return
+		}
+		in.WorkspaceID = &resolved
 	}
 	if v, ok := raw["permission_profile"].(string); ok {
 		in.PermissionProfile = &v
@@ -765,6 +802,12 @@ func (d Deps) handleUpdateEmployee(w http.ResponseWriter, r *http.Request, sess 
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if e.WorkspaceID != "" && d.Workspaces != nil && in.WorkspaceID != nil {
+		if _, berr := d.Workspaces.BindEmployee(r.Context(), e.WorkspaceID, e.ID, sess.UserID, clientIP(r)); berr != nil {
+			writeErr(w, http.StatusConflict, berr.Error())
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, e)
 }
@@ -945,9 +988,60 @@ func (d Deps) handleGetWorkstation(w http.ResponseWriter, r *http.Request, sess 
 	writeJSON(w, http.StatusOK, d.Workstations.Get(r.Context(), id))
 }
 
-func (d Deps) handleListSessions(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleRefreshWorkstationModels(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	id := r.PathValue("id")
+	if d.Workstations == nil {
+		writeErr(w, http.StatusServiceUnavailable, "工作站服务未启用")
+		return
+	}
+	if !d.canAccessWorkstation(r, sess, id) {
+		writeErr(w, http.StatusNotFound, "工作站不存在或无权限")
+		return
+	}
+	before := d.Workstations.ModelsUpdatedAt(id)
+	if err := d.Workstations.RequestModelRefresh(id); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	deadline := time.Now().Add(28 * time.Second)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if d.Workstations.ModelsUpdatedAt(id).After(before) {
+			view := d.Workstations.Get(r.Context(), id)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"models":    view.Models,
+				"providers": view.Providers,
+			})
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			writeErr(w, http.StatusRequestTimeout, "请求已取消")
+			return
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				writeErr(w, http.StatusGatewayTimeout, "工作站未在时限内返回模型列表")
+				return
+			}
+		}
+	}
+}
+
+func (d Deps) handleListSessions(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	list, _ := d.Sessions.List(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{"items": list})
+	items := d.filterSessions(r, sess, list, "session.read")
+	if d.Employees != nil {
+		for _, s := range items {
+			if s == nil || s.Provider != "" {
+				continue
+			}
+			if e, err := d.Employees.Get(r.Context(), s.EmployeeID); err == nil && e != nil && e.DefaultProvider != "" {
+				s.Provider = e.DefaultProvider
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (d Deps) handleCreateSession(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
@@ -964,10 +1058,14 @@ func (d Deps) handleCreateSession(w http.ResponseWriter, r *http.Request, sess *
 	writeJSON(w, http.StatusCreated, s)
 }
 
-func (d Deps) handleGetSession(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleGetSession(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	s, err := d.Sessions.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !d.canSeeSession(r, sess, s, "session.read") {
+		writeErr(w, http.StatusNotFound, "session 不存在")
 		return
 	}
 	writeJSON(w, http.StatusOK, s)
@@ -979,6 +1077,15 @@ func (d Deps) handleSessionTransition(w http.ResponseWriter, r *http.Request, se
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Status == "" {
 		writeErr(w, http.StatusBadRequest, "需要 status")
+		return
+	}
+	cur, err := d.Sessions.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !d.canSeeSession(r, sess, cur, "session.write") {
+		writeErr(w, http.StatusNotFound, "session 不存在")
 		return
 	}
 	s, err := d.Sessions.Transition(r.Context(), r.PathValue("id"), body.Status, sess.UserID, clientIP(r))

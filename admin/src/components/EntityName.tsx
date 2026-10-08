@@ -3,6 +3,7 @@
  */
 import React, { useState } from 'react'
 import { Link } from 'react-router-dom'
+import { copyToClipboard } from '../lib/clipboard'
 
 interface EntityNameProps {
   name?: string
@@ -35,13 +36,15 @@ export function EntityName({
   // 是否存在需要展示的独立 ID
   const hasId = Boolean(id && id !== primaryName)
 
-  function onCopy(e: React.MouseEvent) {
+  async function onCopy(e: React.MouseEvent) {
     e.stopPropagation()
     e.preventDefault()
     if (id) {
-      void navigator.clipboard.writeText(id)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+      const ok = await copyToClipboard(id)
+      if (ok) {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 2000)
+      }
     }
   }
 

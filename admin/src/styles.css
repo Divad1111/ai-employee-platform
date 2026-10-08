@@ -1688,6 +1688,23 @@ button.auto-chip {
   margin-bottom: 0;
 }
 
+.md-view {
+  padding: 0.25rem 0.15rem 0.5rem;
+  line-height: 1.65;
+  font-size: 0.92rem;
+}
+.md-view p { margin: 0.45rem 0; white-space: pre-wrap; }
+.md-view ul { margin: 0.4rem 0 0.4rem 1.2rem; }
+.md-view h3, .md-view h4, .md-view h5 { margin: 0.8rem 0 0.35rem; }
+.md-code {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 0.75rem 0.9rem;
+  border-radius: 8px;
+  overflow: auto;
+  font-size: 0.82rem;
+}
+
 .empty-tip {
   text-align: center;
   color: var(--text-muted);

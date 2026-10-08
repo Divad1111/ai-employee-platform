@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ai-employee-platform/workstation/internal/acp"
+	"github.com/ai-employee-platform/workstation/internal/tokenusage"
 )
 
 // appServerSession 通过 `codex app-server`（JSON-RPC over stdio）跑一轮对话。
@@ -37,8 +38,7 @@ type appServerSession struct {
 	turnErr    string
 	turnDone   chan struct{}
 	activeTurn string
-	inTok      int64
-	outTok     int64
+	lastUsage  tokenusage.TokenUsage
 }
 
 type rpcMsg struct {
@@ -70,9 +70,33 @@ func (s *appServerSession) Ready() bool {
 func (s *appServerSession) Events() <-chan acp.Event { return s.events }
 
 func (s *appServerSession) LastUsage() (int64, int64, string, string) {
+	u := s.LastTokenUsage()
+	if u == nil {
+		return 0, 0, "codex", "unavailable"
+	}
+	return u.InputTokens, u.OutputTokens, "codex", u.Source
+}
+
+// LastTokenUsage 返回 Codex 上报的真实用量；无上报则为 UNAVAILABLE。
+func (s *appServerSession) LastTokenUsage() *tokenusage.TokenUsage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.inTok, s.outTok, "codex", "agent"
+	u := s.lastUsage
+	if u.Provider == "" {
+		u.Provider = "codex"
+	}
+	if u.Source == "" {
+		u.Source = "codex_cli_event"
+	}
+	u.Normalize()
+	if !u.HasAny() {
+		u.UsageStatus = tokenusage.StatusUnavailable
+		u.Source = "unavailable"
+	} else if u.UsageStatus == tokenusage.StatusPending || u.UsageStatus == "" {
+		u.UsageStatus = tokenusage.StatusFinal
+	}
+	out := u
+	return &out
 }
 
 func (s *appServerSession) Start(ctx context.Context) error {
@@ -87,6 +111,7 @@ func (s *appServerSession) Start(ctx context.Context) error {
 		return err
 	}
 	cmd.Stderr = io.Discard
+	applyCodexEnv(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动 Codex app-server 失败: %w", err)
 	}
@@ -145,6 +170,11 @@ func (s *appServerSession) Send(ctx context.Context, input []byte) (string, erro
 	tid := s.threadID
 	s.reply.Reset()
 	s.turnErr = ""
+	s.lastUsage = tokenusage.TokenUsage{
+		Provider:    "codex",
+		Source:      "codex_cli_event",
+		UsageStatus: tokenusage.StatusPending,
+	}
 	s.turnDone = make(chan struct{})
 	s.mu.Unlock()
 
@@ -296,11 +326,13 @@ func (s *appServerSession) onNotify(msg rpcMsg) {
 		s.mu.Unlock()
 	case "turn/completed":
 		var p struct {
-			Turn struct {
+			Usage json.RawMessage `json:"usage"`
+			Turn  struct {
 				Status string `json:"status"`
 				Error  *struct {
 					Message string `json:"message"`
 				} `json:"error"`
+				Usage json.RawMessage `json:"usage"`
 			} `json:"turn"`
 		}
 		_ = json.Unmarshal(msg.Params, &p)
@@ -309,6 +341,27 @@ func (s *appServerSession) onNotify(msg rpcMsg) {
 			s.turnErr = p.Turn.Error.Message
 		} else if p.Turn.Status == "failed" {
 			s.turnErr = "Codex 回合失败"
+		}
+		raw := p.Usage
+		if len(raw) == 0 {
+			raw = p.Turn.Usage
+		}
+		if len(raw) > 0 {
+			var umap map[string]any
+			if json.Unmarshal(raw, &umap) == nil {
+				applyCodexUsageMap(&s.lastUsage, umap)
+				s.lastUsage.Provider = "codex"
+				s.lastUsage.Source = "codex_cli_event"
+				s.lastUsage.UsageStatus = tokenusage.StatusFinal
+			}
+		}
+		// v2 的用量在 thread/tokenUsage/updated，turn/completed 往往不再带 usage。
+		if s.lastUsage.HasAny() && s.lastUsage.UsageStatus != tokenusage.StatusFinal {
+			s.lastUsage.Provider = "codex"
+			if s.lastUsage.Source == "" || s.lastUsage.Source == "unavailable" {
+				s.lastUsage.Source = "codex_cli_event"
+			}
+			s.lastUsage.UsageStatus = tokenusage.StatusFinal
 		}
 		if s.turnDone != nil {
 			select {
@@ -319,19 +372,84 @@ func (s *appServerSession) onNotify(msg rpcMsg) {
 		}
 		s.mu.Unlock()
 	case "thread/tokenUsage/updated":
-		var p struct {
-			InputTokens  int64 `json:"inputTokens"`
-			OutputTokens int64 `json:"outputTokens"`
+		s.mu.Lock()
+		if applyThreadTokenUsage(&s.lastUsage, msg.Params) {
+			s.lastUsage.Provider = "codex"
+			s.lastUsage.Source = "codex_cli_event"
+			s.lastUsage.UsageStatus = tokenusage.StatusPartial
 		}
-		if json.Unmarshal(msg.Params, &p) == nil {
-			s.mu.Lock()
-			if p.InputTokens > 0 {
-				s.inTok = p.InputTokens
-			}
-			if p.OutputTokens > 0 {
-				s.outTok = p.OutputTokens
-			}
-			s.mu.Unlock()
+		s.mu.Unlock()
+	}
+}
+
+// applyThreadTokenUsage 读取本回合用量。Codex app-server v2 放在 tokenUsage.last，旧事件则是顶层字段。
+func applyThreadTokenUsage(u *tokenusage.TokenUsage, params json.RawMessage) bool {
+	if u == nil || len(params) == 0 {
+		return false
+	}
+	var p struct {
+		TokenUsage struct {
+			Last  map[string]any `json:"last"`
+			Total map[string]any `json:"total"`
+		} `json:"tokenUsage"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return false
+	}
+	before := *u
+	if len(p.TokenUsage.Last) > 0 {
+		applyCodexUsageMap(u, p.TokenUsage.Last)
+	} else if len(p.TokenUsage.Total) > 0 {
+		applyCodexUsageMap(u, p.TokenUsage.Total)
+	} else {
+		var flat map[string]any
+		if json.Unmarshal(params, &flat) == nil {
+			applyCodexUsageMap(u, flat)
 		}
 	}
+	return u.HasAny() || before != *u
+}
+
+func applyCodexUsageMap(u *tokenusage.TokenUsage, m map[string]any) {
+	if u == nil || m == nil {
+		return
+	}
+	if v := floatField(m, "inputTokens", "input_tokens"); v > 0 {
+		u.InputTokens = v
+	}
+	if v := floatField(m, "cachedInputTokens", "cached_input_tokens"); v > 0 {
+		u.CachedInputTokens = v
+	}
+	if v := floatField(m, "cacheWriteInputTokens", "cache_write_input_tokens"); v > 0 {
+		u.CacheWriteInputTokens = v
+	}
+	if v := floatField(m, "cacheReadInputTokens", "cache_read_input_tokens"); v > 0 {
+		u.CacheReadInputTokens = v
+	}
+	if v := floatField(m, "outputTokens", "output_tokens"); v > 0 {
+		u.OutputTokens = v
+	}
+	if v := floatField(m, "reasoningOutputTokens", "reasoning_output_tokens"); v > 0 {
+		u.ReasoningOutputTokens = v
+	}
+	if v := floatField(m, "totalTokens", "total_tokens"); v > 0 {
+		u.TotalTokens = v
+	}
+}
+
+func floatField(m map[string]any, keys ...string) int64 {
+	for _, k := range keys {
+		switch n := m[k].(type) {
+		case float64:
+			if n > 0 {
+				return int64(n)
+			}
+		case json.Number:
+			v, _ := n.Int64()
+			if v > 0 {
+				return v
+			}
+		}
+	}
+	return 0
 }

@@ -67,9 +67,10 @@ type Daemon struct {
 	Artifacts *artifactlocal.Queue
 	ArtUpload *artifactlocal.Uploader
 
-	modelMu    sync.Mutex
-	modelAt    time.Time
-	modelCache []heartbeat.ModelInfo
+	modelMu         sync.Mutex
+	modelCache      []heartbeat.ModelInfo
+	modelRefreshing bool
+	modelAgain      bool
 
 	inqMu            sync.Mutex
 	pendingInquiries map[string]chan string
@@ -249,6 +250,10 @@ func (d *Daemon) maintainControlPlane(ctx context.Context) {
 		sess := grpcclient.NewSession(cli, d.Opts.Journal)
 		sess.Outbox = &outbox.Dispatcher{Store: d.Outbox}
 		sess.HeartbeatInterval = 5 * time.Second
+		// 连上控制面（注册/重连）后上报一次模型，不放进周期心跳。
+		sess.OnConnected = func() {
+			go d.reportModels(context.Background())
+		}
 		// 连接成功后刷新 ArtUpload 身份，并冲刷待上传队列
 		d.ArtUpload = &artifactlocal.Uploader{
 			HTTPBase: d.Opts.Config.ControlPlaneHTTPEndpoint,
@@ -271,7 +276,6 @@ func (d *Daemon) maintainControlPlane(ctx context.Context) {
 				Memory:    sample.MemoryPercent,
 				Disk:      sample.DiskPercent,
 				Providers: d.installedProviders(context.Background()),
-				Models:    d.providerModels(context.Background()),
 			}
 		}
 		sess.OnCommand = func(cctx context.Context, cmd *aiev1.Command) error {
@@ -397,32 +401,57 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 		}
 
 		_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_STARTED,
-			fmt.Sprintf(`{"status":"running","session_id":%q}`, sessID)))
+			fmt.Sprintf(`{"status":"running","session_id":%q,"provider":%q}`, sessID, provider)))
 
 		go func() {
 			jobCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
-			localJob, reply, rerr := d.Runtime.RunJob(jobCtx, jobID, empID, sessID, payload.Prompt)
+			localJob, reply, rerr := d.Runtime.RunJob(jobCtx, jobID, empID, sessID, promptWithMarkdownDefault(payload.Prompt))
 			usage := map[string]string{
 				"session_id":    sessID,
 				"reply":         reply,
 				"input_tokens":  "0",
 				"output_tokens": "0",
+				"total_tokens":  "0",
 				"agent":         "",
-				"token_source":  "",
+				"token_source":  "unavailable",
+				"usage_status":  "UNAVAILABLE",
 			}
 			if localJob != nil {
 				usage["input_tokens"] = strconv.FormatInt(localJob.InputTokens, 10)
 				usage["output_tokens"] = strconv.FormatInt(localJob.OutputTokens, 10)
+				usage["total_tokens"] = strconv.FormatInt(localJob.TotalTokens, 10)
 				usage["agent"] = localJob.Agent
 				usage["token_source"] = localJob.TokenSource
+				usage["usage_status"] = localJob.UsageStatus
+				if localJob.TokenUsage != nil {
+					u := localJob.TokenUsage
+					usage["cached_input_tokens"] = strconv.FormatInt(u.CachedInputTokens, 10)
+					usage["cache_write_input_tokens"] = strconv.FormatInt(u.CacheWriteInputTokens, 10)
+					usage["cache_read_input_tokens"] = strconv.FormatInt(u.CacheReadInputTokens, 10)
+					usage["reasoning_output_tokens"] = strconv.FormatInt(u.ReasoningOutputTokens, 10)
+					usage["provider"] = u.Provider
+					usage["provider_session_id"] = u.ProviderSessionID
+					usage["provider_run_id"] = u.ProviderRunID
+					usage["usage_source"] = u.Source
+					if u.TotalTokens > 0 {
+						usage["total_tokens"] = strconv.FormatInt(u.TotalTokens, 10)
+					}
+					if u.UsageStatus != "" {
+						usage["usage_status"] = u.UsageStatus
+					}
+				}
 			}
 			if rerr != nil {
-				usage["error"] = rerr.Error()
+				msg := rerr.Error()
+				if strings.Contains(msg, "401") && strings.Contains(msg, "api.openai.com") {
+					msg += "。Codex 未登录：aew 以 Windows 服务账户运行，看不到你桌面用户里的 codex login。请在运行该服务的同一账户执行 `codex login`，或把服务登录账户改成已经登录过 Codex 的用户后重启服务。"
+				}
+				usage["error"] = msg
 				pl, _ := json.Marshal(usage)
 				_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_FAILED, string(pl)))
 				if reply != "" {
-					d.stageJobArtifact(jobID, "result-partial.txt", "txt", []byte(reply))
+					d.stageJobArtifact(jobID, "result-partial.md", "md", []byte(reply))
 				}
 				return
 			}
@@ -430,11 +459,11 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			usage["message"] = "Job executed successfully"
 			pl, _ := json.Marshal(usage)
 			_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_SUCCESS, string(pl)))
-			// Job 产物：至少归档 reply 为 result.txt，并尝试上传 Control Plane
+			// 文本制品默认 Markdown；用户在任务里明确要求其他格式时，正文仍按其要求。
 			if reply == "" {
-				reply = `{"status":"success","message":"empty reply"}`
+				reply = "任务已完成，但没有文本回复。\n"
 			}
-			d.stageJobArtifact(jobID, "result.txt", "txt", []byte(reply))
+			d.stageJobArtifact(jobID, "result.md", "md", []byte(reply))
 			// Job 结束后会话回到 READY（可复用）
 			_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_READY,
 				`{"status":"READY"}`))
@@ -454,6 +483,18 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			_ = json.Unmarshal([]byte(pJSON), &p)
 		}
 		d.resolveInquiry(p.InquiryID, p.SelectedOptionID)
+		return nil
+
+	case aiev1.CommandType_COMMAND_TYPE_UPDATE_WORKSTATION:
+		var p struct {
+			Op string `json:"op"`
+		}
+		if pJSON := cmd.GetPayloadJson(); pJSON != "" {
+			_ = json.Unmarshal([]byte(pJSON), &p)
+		}
+		if p.Op == "refresh_models" {
+			go d.reportModels(context.Background())
+		}
 		return nil
 
 	case aiev1.CommandType_COMMAND_TYPE_SHUTDOWN:
@@ -768,22 +809,54 @@ func (d *Daemon) installedProviders(ctx context.Context) []string {
 	return out
 }
 
-// providerModels 缓存各引擎模型列表，避免每次心跳都启动 CLI。失败时保留上次成功的结果。
-func (d *Daemon) providerModels(ctx context.Context) []heartbeat.ModelInfo {
-	const ttl = 10 * time.Minute
+// promptWithMarkdownDefault 文本回复默认 Markdown，用户明确要求其他格式时仍以用户要求为准。
+func promptWithMarkdownDefault(prompt string) string {
+	const note = "【输出格式】文本回复与任务制品默认使用 Markdown（标题、列表、表格、代码块）。仅当用户明确要求纯文本、JSON、HTML 或其他格式时，才按该要求输出。"
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return note
+	}
+	return note + "\n\n" + prompt
+}
+
+// reportModels 向控制面上报一次模型列表。注册连上时调用，或响应刷新命令。不进入心跳周期。
+func (d *Daemon) reportModels(ctx context.Context) {
 	d.modelMu.Lock()
-	fresh := !d.modelAt.IsZero() && time.Since(d.modelAt) < ttl
+	if d.modelRefreshing {
+		d.modelAgain = true
+		d.modelMu.Unlock()
+		return
+	}
+	d.modelRefreshing = true
+	d.modelMu.Unlock()
+
+	for {
+		d.collectAndSendModels(ctx)
+		d.modelMu.Lock()
+		again := d.modelAgain
+		d.modelAgain = false
+		if !again {
+			d.modelRefreshing = false
+			d.modelMu.Unlock()
+			return
+		}
+		d.modelMu.Unlock()
+	}
+}
+
+func (d *Daemon) collectAndSendModels(ctx context.Context) {
+	if d.Registry == nil {
+		return
+	}
+	d.modelMu.Lock()
 	cached := append([]heartbeat.ModelInfo(nil), d.modelCache...)
 	d.modelMu.Unlock()
-	if fresh || d.Registry == nil {
-		return cached
-	}
 
 	byProv := map[string][]heartbeat.ModelInfo{}
 	for _, item := range cached {
 		byProv[item.Provider] = append(byProv[item.Provider], item)
 	}
-	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	for _, name := range d.Registry.List() {
 		prov, err := d.Registry.Get(name)
@@ -796,7 +869,7 @@ func (d *Daemon) providerModels(ctx context.Context) []heartbeat.ModelInfo {
 		if !ok {
 			continue
 		}
-		models, err := lister.ListModels(ctx)
+		models, err := lister.ListModels(cctx)
 		if err != nil {
 			continue
 		}
@@ -817,11 +890,31 @@ func (d *Daemon) providerModels(ctx context.Context) []heartbeat.ModelInfo {
 	for _, name := range d.Registry.List() {
 		out = append(out, byProv[name]...)
 	}
+	if len(out) == 0 {
+		return
+	}
 	d.modelMu.Lock()
-	d.modelAt = time.Now()
 	d.modelCache = out
 	d.modelMu.Unlock()
-	return out
+
+	sess := d.getActiveSession()
+	if sess == nil || d.Runtime == nil {
+		return
+	}
+	e, _, s, _ := d.Runtime.Snapshot()
+	sample := d.Sample
+	if sample.CPUPercent == 0 && sample.MemoryPercent == 0 && d.Monitor != nil {
+		sample = d.Monitor.Sample()
+	}
+	_ = sess.SendHeartbeat(context.Background(), heartbeat.Stats{
+		Employees: uint32(e),
+		Sessions:  uint32(s),
+		CPU:       sample.CPUPercent,
+		Memory:    sample.MemoryPercent,
+		Disk:      sample.DiskPercent,
+		Providers: d.installedProviders(context.Background()),
+		Models:    out,
+	})
 }
 
 func okResult(v any) ipc.Response {

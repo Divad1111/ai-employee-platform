@@ -1,7 +1,7 @@
 /**
  * Employee 详情：对齐设计文档 §10，聚合 overview + 可编辑绑定。
  */
-import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../api/client'
 import {
@@ -91,6 +91,8 @@ export function EmployeeDetailPage() {
   // 可编辑绑定字段
   const [provider, setProvider] = useState('')
   const [model, setModel] = useState('')
+  const [modelsLoading, setModelsLoading] = useState(false)
+  const modelsReq = useRef(0)
   const [wsId, setWsId] = useState('')
   const [workspaceId, setWorkspaceId] = useState('')
 
@@ -153,15 +155,77 @@ export function EmployeeDetailPage() {
       keywords: p,
     }))
   }, [workstations, wsId])
+  const defaultModelsByProvider: Record<string, Array<{ id: string; label: string }>> = {
+    cursor: [
+      { id: 'default[]', label: 'Auto (自动智能选择)' },
+      { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
+      { id: 'claude-opus-4-5', label: 'Claude Opus 4.5' },
+      { id: 'gpt-5', label: 'GPT-5' },
+      { id: 'composer-2.5', label: 'Composer 2.5' },
+      { id: 'gemini-3-flash', label: 'Gemini 3 Flash' },
+      { id: 'kimi-k3', label: 'Kimi K3' },
+    ],
+    codex: [
+      { id: 'gpt-5', label: 'GPT-5 (默认推荐)' },
+      { id: 'gpt-4o', label: 'GPT-4o' },
+      { id: 'o3-mini', label: 'o3-mini' },
+    ],
+    antigravity: [
+      { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (推荐)' },
+      { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+      { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+      { id: 'claude-3-7-sonnet', label: 'Claude 3.7 Sonnet' },
+    ],
+  }
+
   const modelOptions = useMemo(() => {
     const ws = workstations.find((w) => w.id === wsId)
     const list = ws?.models?.[provider] ?? []
-    return list.map((m) => ({
+    if (list.length > 0) {
+      return list.map((m) => ({
+        value: m.id,
+        label: m.label && m.label !== m.id ? `${m.label} (${m.id})` : m.id,
+        keywords: `${m.id} ${m.label || ''}`,
+      }))
+    }
+    const defaults = defaultModelsByProvider[provider] ?? []
+    return defaults.map((m) => ({
       value: m.id,
-      label: m.label && m.label !== m.id ? `${m.label} (${m.id})` : m.id,
-      keywords: `${m.id} ${m.label || ''}`,
+      label: `${m.label} (未上报时推荐)`,
+      keywords: `${m.id} ${m.label}`,
     }))
   }, [workstations, wsId, provider])
+  async function refreshModelsFromWorkstation() {
+    if (!wsId || !provider) return
+    const seq = ++modelsReq.current
+    setModelsLoading(true)
+    setError('')
+    try {
+      const data = await apiPost<{
+        models?: WsNode['models']
+        providers?: string[]
+      }>(`/workstations/${encodeURIComponent(wsId)}/models/refresh`, {})
+      if (seq !== modelsReq.current) return
+      setWorkstations((prev) =>
+        prev.map((w) =>
+          w.id === wsId
+            ? {
+                ...w,
+                models: data.models ?? w.models,
+                providers: data.providers?.length ? data.providers : w.providers,
+              }
+            : w,
+        ),
+      )
+    } catch (e) {
+      if (seq === modelsReq.current) {
+        setError(e instanceof Error ? e.message : '拉取模型列表失败')
+      }
+    } finally {
+      if (seq === modelsReq.current) setModelsLoading(false)
+    }
+  }
+
   const workspaceOptions = useMemo(
     () =>
       workspaces.map((ws) => ({
@@ -443,7 +507,7 @@ export function EmployeeDetailPage() {
         <div className="panel-header">
           <div>
             <h2>核心配置与资源绑定</h2>
-            <p>先选工作站，再选该节点已安装的驱动引擎，然后选该引擎上报的模型</p>
+            <p>先选工作站和驱动引擎。打开模型列表时会向该工作站要一份最新模型</p>
           </div>
         </div>
         <form className="inline-form" onSubmit={onSaveBindings}>
@@ -497,17 +561,19 @@ export function EmployeeDetailPage() {
               placeholder={
                 !provider
                   ? '请先选择驱动引擎'
-                  : modelOptions.length
-                    ? '选择该引擎上报的模型…'
-                    : '该工作站尚未上报此引擎的模型'
+                  : modelsLoading
+                    ? '正在向工作站拉取模型列表…'
+                    : '选择模型或输入自定义模型名称…'
               }
-              disabled={!provider}
+              allowCustom
+              disabled={!provider || modelsLoading}
+              onOpen={() => void refreshModelsFromWorkstation()}
               style={{ minWidth: 280 }}
             />
           </label>
           <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span>绑定工作区 (Workspace ID)</span>
+              <span>绑定工作区</span>
               <button
                 type="button"
                 className="btn-ghost btn-sm"
@@ -521,10 +587,14 @@ export function EmployeeDetailPage() {
               value={workspaceId}
               onChange={setWorkspaceId}
               options={workspaceOptions}
-              placeholder="选择或搜索工作区…"
-              allowCustom
+              placeholder="选择已登记的项目工作区…"
               style={{ minWidth: 240 }}
             />
+            {workspaceId && !workspaceOptions.some((o) => o.value === workspaceId) ? (
+              <span style={{ fontWeight: 500, color: 'var(--warning, #b45309)' }}>
+                当前值「{workspaceId}」还不是已登记工作区。已选择工作站时，再次保存会按该本机路径登记，并出现在「项目工作区」。
+              </span>
+            ) : null}
           </label>
           <button type="submit" style={{ alignSelf: 'flex-end' }}>保存配置</button>
         </form>

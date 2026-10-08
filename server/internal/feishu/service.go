@@ -13,9 +13,11 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/ai-employee-platform/server/internal/secret"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -24,8 +26,8 @@ import (
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
-	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkcontact "github.com/larksuite/oapi-sdk-go/v3/service/contact/v3"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 // 错误定义
@@ -116,8 +118,8 @@ type Service struct {
 	mu        sync.RWMutex
 	cfg       Config
 	vault     secret.Store
-	bindings  map[string]Binding // alias(lower) → binding
-	byOpenID  map[string]string  // open_id → employee_id
+	bindings  map[string]Binding  // alias(lower) → binding
+	byOpenID  map[string][]string // open_id → 可绑定多个数字员工
 	seenEvent map[string]time.Time
 	Sender    Sender
 	Jobs      JobCreator
@@ -154,7 +156,7 @@ func NewService(vault secret.Store) *Service {
 	svc := &Service{
 		vault:     vault,
 		bindings:  map[string]Binding{},
-		byOpenID:  map[string]string{},
+		byOpenID:  map[string][]string{},
 		seenEvent: map[string]time.Time{},
 		Gateway:   NewWSGateway(),
 	}
@@ -184,10 +186,10 @@ func (s *Service) loadPersistedLocked() {
 				if json.Unmarshal([]byte(str), &list) == nil {
 					for _, b := range list {
 						if b.FeishuAlias != "" {
-							s.bindings[strings.ToLower(b.FeishuAlias)] = b
+							s.bindings[aliasKey(b.FeishuAlias)] = b
 						}
 						if b.FeishuOpenID != "" {
-							s.byOpenID[b.FeishuOpenID] = b.EmployeeID
+							s.indexOpenIDLocked(b.FeishuOpenID, b.EmployeeID)
 						}
 					}
 				}
@@ -325,6 +327,7 @@ func (s *Service) rebuildLarkLocked() {
 
 			// 1. 处理 @mentions：将 @_user_x 占位符替换为具体别名或用户姓名
 			text := s.ResolveMentions(rawText, msg.Mentions)
+			text = appendMentionNames(text, msg.Mentions)
 
 			// 2. 如果存在引用/回复父消息，拉取父消息内容作为上下文
 			quotedContent := ""
@@ -348,7 +351,7 @@ func (s *Service) rebuildLarkLocked() {
 				QuotedContent: quotedContent,
 				RawType:       "im.message.receive_v1",
 			}
-			fmt.Printf("[Feishu] 📩 收到消息事件: sender=%s, chat=%s, chatType=%s, msgID=%s, text=%q, parentID=%s\n", openID, chatID, chatType, msgID, text, parentID)
+			fmt.Printf("[Feishu] 📩 收到消息事件: sender=%s, chat=%s, chatType=%s, msgID=%s, text=%q codes=%s parentID=%s\n", openID, chatID, chatType, msgID, text, runeCodes(text), parentID)
 			jobID, dup, err := s.HandleMessage(ctx, incoming)
 			if err != nil {
 				fmt.Printf("[Feishu] ⚠️ 消息处理反馈: %v (text=%q)\n", err, text)
@@ -813,19 +816,46 @@ func (s *Service) UpsertBinding(b Binding) {
 		if existing.EmployeeID == b.EmployeeID {
 			delete(s.bindings, k)
 			if existing.FeishuOpenID != "" {
-				delete(s.byOpenID, existing.FeishuOpenID)
+				s.unindexOpenIDLocked(existing.FeishuOpenID, existing.EmployeeID)
 			}
 		}
 	}
 	if b.FeishuAlias != "" {
-		s.bindings[strings.ToLower(b.FeishuAlias)] = b
+		s.bindings[aliasKey(b.FeishuAlias)] = b
 	} else if b.EmployeeID != "" {
-		s.bindings[strings.ToLower(b.EmployeeID)] = b
+		s.bindings[aliasKey(b.EmployeeID)] = b
 	}
 	if b.FeishuOpenID != "" {
-		s.byOpenID[b.FeishuOpenID] = b.EmployeeID
+		s.indexOpenIDLocked(b.FeishuOpenID, b.EmployeeID)
 	}
 	s.saveBindingsLocked()
+}
+
+func (s *Service) indexOpenIDLocked(openID, employeeID string) {
+	if openID == "" || employeeID == "" {
+		return
+	}
+	for _, id := range s.byOpenID[openID] {
+		if id == employeeID {
+			return
+		}
+	}
+	s.byOpenID[openID] = append(s.byOpenID[openID], employeeID)
+}
+
+func (s *Service) unindexOpenIDLocked(openID, employeeID string) {
+	ids := s.byOpenID[openID]
+	kept := ids[:0]
+	for _, id := range ids {
+		if id != employeeID {
+			kept = append(kept, id)
+		}
+	}
+	if len(kept) == 0 {
+		delete(s.byOpenID, openID)
+		return
+	}
+	s.byOpenID[openID] = kept
 }
 
 // IdentityNotice 本次 @ 消息里要告知对方的飞书身份。
@@ -846,7 +876,16 @@ func (s *Service) AutoBindFromMention(employeeID, senderOpenID, chatID string, g
 	}
 	existing := s.BindingByEmployee(employeeID)
 	if existing == nil {
-		note.SavedChatID = note.ChatID
+		next := Binding{EmployeeID: employeeID, FeishuOpenID: note.OpenID}
+		if group {
+			next.ChatID = note.ChatID
+		}
+		note.OpenBoundNow = note.OpenID != ""
+		note.ChatBoundNow = group && note.ChatID != ""
+		note.SavedChatID = next.ChatID
+		if note.OpenBoundNow || note.ChatBoundNow {
+			s.UpsertBinding(next)
+		}
 		return note
 	}
 	next := *existing
@@ -914,12 +953,12 @@ func (s *Service) DeleteBinding(employeeID, alias string) bool {
 	defer s.mu.Unlock()
 	removed := false
 	if alias != "" {
-		key := strings.ToLower(alias)
+		key := aliasKey(alias)
 		if b, ok := s.bindings[key]; ok {
 			if employeeID == "" || b.EmployeeID == employeeID {
 				delete(s.bindings, key)
 				if b.FeishuOpenID != "" {
-					delete(s.byOpenID, b.FeishuOpenID)
+					s.unindexOpenIDLocked(b.FeishuOpenID, b.EmployeeID)
 				}
 				removed = true
 			}
@@ -936,7 +975,7 @@ func (s *Service) DeleteBinding(employeeID, alias string) bool {
 		if b.EmployeeID == employeeID {
 			delete(s.bindings, k)
 			if b.FeishuOpenID != "" {
-				delete(s.byOpenID, b.FeishuOpenID)
+				s.unindexOpenIDLocked(b.FeishuOpenID, b.EmployeeID)
 			}
 			removed = true
 		}
@@ -974,6 +1013,63 @@ var (
 	reEmpID           = regexp.MustCompile(`(?i)\b(EMP-[a-zA-Z0-9-]+)\b`)
 	reSlash           = regexp.MustCompile(`(?i)^/(?:emp|employee)\s+(\S+)\s+(.+)$`)
 )
+
+// normalizeMentionText 去掉零宽/格式字符，并把全角 @、全角数字折成半角，避免「可乐1」对不上。
+func normalizeMentionText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		switch {
+		case r == '＠':
+			r = '@'
+		case r >= '０' && r <= '９':
+			r = '0' + (r - '０')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// aliasKey 绑定表与查找共用的别名键。
+func aliasKey(s string) string {
+	return strings.ToLower(strings.TrimSpace(normalizeMentionText(s)))
+}
+
+// runeCodes 把文本打成码点，便于对照飞书原文和库里的别名。
+func runeCodes(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "U+%04X", r)
+	}
+	return b.String()
+}
+
+// appendMentionNames 把飞书 mention 的显示名追加进文本。占位符没被替换时仍能按真实别名匹配。
+func appendMentionNames(text string, mentions []*larkim.MentionEvent) string {
+	if len(mentions) == 0 {
+		return text
+	}
+	var b strings.Builder
+	b.WriteString(text)
+	for _, m := range mentions {
+		if m == nil || m.Name == nil {
+			continue
+		}
+		name := strings.TrimSpace(*m.Name)
+		if name == "" {
+			continue
+		}
+		b.WriteString(" @")
+		b.WriteString(name)
+	}
+	return b.String()
+}
 
 // CleanPrompt 剔除开头的全部 @提及 标记（例如 "@AI员工 @合并"），返回纯净的任务指令
 func (s *Service) CleanPrompt(text string) string {
@@ -1014,7 +1110,7 @@ func (s *Service) ResolveMentions(rawText string, mentions []*larkim.MentionEven
 // ParseTarget 从文本解析目标 Employee 与 Prompt。
 // 群聊里通常会先 @机器人，再写 /emp 或别名，开头的 @提及不参与 /emp 匹配。
 func (s *Service) ParseTarget(text string) (employeeID, prompt string, err error) {
-	text = strings.TrimSpace(text)
+	text = strings.TrimSpace(normalizeMentionText(text))
 	body := strings.TrimSpace(reLeadingMentions.ReplaceAllString(text, ""))
 	if body == "" {
 		body = text
@@ -1026,7 +1122,7 @@ func (s *Service) ParseTarget(text string) (employeeID, prompt string, err error
 			return strings.ToUpper(key), prompt, nil
 		}
 		s.mu.RLock()
-		b, ok := s.bindings[strings.ToLower(key)]
+		b, ok := s.bindings[aliasKey(key)]
 		s.mu.RUnlock()
 		if !ok {
 			return "", "", ErrNoEmployee
@@ -1039,18 +1135,26 @@ func (s *Service) ParseTarget(text string) (employeeID, prompt string, err error
 		prompt = s.CleanPrompt(p)
 		return id, prompt, nil
 	}
-	// 查找文本中所有的 @mention，若任一命中绑定别名，则识别为该员工
+	// 多个别名同时命中时取最长的，避免「可乐」截走「可乐1」。
 	allMentions := reAllMentions.FindAllStringSubmatch(text, -1)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	var hit Binding
+	hitLen := -1
 	for _, match := range allMentions {
-		if len(match) == 2 {
-			alias := strings.ToLower(match[1])
-			if b, ok := s.bindings[alias]; ok {
-				prompt = s.CleanPrompt(text)
-				return b.EmployeeID, prompt, nil
-			}
+		if len(match) != 2 {
+			continue
 		}
+		alias := aliasKey(match[1])
+		b, ok := s.bindings[alias]
+		if !ok || len(alias) <= hitLen {
+			continue
+		}
+		hit = b
+		hitLen = len(alias)
+	}
+	if hitLen >= 0 {
+		return hit.EmployeeID, s.CleanPrompt(text), nil
 	}
 	return "", "", ErrNoEmployee
 }
@@ -1124,13 +1228,14 @@ func (s *Service) boundAliases() []string {
 		if alias == "" {
 			continue
 		}
-		key := strings.ToLower(alias)
+		key := aliasKey(alias)
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
 		out = append(out, alias)
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -1141,7 +1246,27 @@ func (s *Service) EmployeeByOpenID(openID string) string {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.byOpenID[openID]
+	ids := s.byOpenID[openID]
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
+}
+
+// EmployeeHasOpenID 该员工是否已绑定这个飞书用户。同一 OpenID 可以绑多个员工。
+func (s *Service) EmployeeHasOpenID(employeeID, openID string) bool {
+	openID = strings.TrimSpace(openID)
+	if employeeID == "" || openID == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, id := range s.byOpenID[openID] {
+		if id == employeeID {
+			return true
+		}
+	}
+	return false
 }
 
 // HandleMessage 异步创建 Message/Job 后返回。
@@ -1167,6 +1292,7 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 
 	empID, prompt, err := s.ParseTarget(ev.Text)
 	if err != nil || empID == "" {
+		fmt.Printf("[Feishu] 未匹配员工 text=%q codes=%s aliases=%v\n", ev.Text, runeCodes(ev.Text), s.boundAliases())
 		shouldHint := isP2PChat(ev.ChatType) || looksLikeEmployeeAddress(ev.Text)
 		if shouldHint && s.Sender != nil && ev.ChatID != "" {
 			card := BuildMentionRequiredCard(s.boundAliases())

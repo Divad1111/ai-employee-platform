@@ -21,8 +21,8 @@ import (
 	"github.com/ai-employee-platform/server/internal/secret"
 	"github.com/ai-employee-platform/server/internal/session"
 	"github.com/ai-employee-platform/server/internal/totp"
-	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/workspace"
+	"github.com/ai-employee-platform/server/internal/workstation"
 )
 
 func setupM7(t *testing.T) (http.Handler, string, *approval.Service) {
@@ -99,14 +99,21 @@ func TestPermissionEvaluateGitPushNeedsTOTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	code, ws := doJSON(t, h, http.MethodPost, "/api/workspaces", tok, map[string]string{
+		"workstation_id": "WS-1", "path": "/repo",
+	})
+	if code != 201 {
+		t.Fatal(ws)
+	}
+	wsID, _ := ws["id"].(string)
 	code, emp := doJSON(t, h, http.MethodPost, "/api/employees", tok, map[string]string{
-		"name": "Dev", "workstation_id": "WS-1", "workspace_id": "W1",
+		"name": "Dev", "workstation_id": "WS-1", "workspace_id": wsID,
 	})
 	if code != 201 {
 		t.Fatal(emp)
 	}
 	code, j := doJSON(t, h, http.MethodPost, "/api/jobs", tok, map[string]any{
-		"employee_id": emp["id"], "workspace_id": "W1", "prompt": "push", "idempotency_key": "p1",
+		"employee_id": emp["id"], "workspace_id": wsID, "prompt": "push", "idempotency_key": "p1",
 	})
 	if code != 201 {
 		t.Fatal(j)
@@ -224,4 +231,3 @@ func TestSecurityAPI_TOTPReEnrollAndDisableAndAuditFilter(t *testing.T) {
 		t.Fatalf("expected audit items matching 'totp', got 0")
 	}
 }
-

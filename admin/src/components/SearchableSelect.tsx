@@ -22,6 +22,8 @@ type Props = {
   id?: string
   className?: string
   style?: CSSProperties
+  /** 下拉展开时回调（例如向工作站拉取最新选项） */
+  onOpen?: () => void
 }
 
 function matchOption(opt: SearchOption, q: string) {
@@ -42,6 +44,7 @@ export function SearchableSelect({
   id,
   className,
   style,
+  onOpen,
 }: Props) {
   const listId = useId()
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -103,6 +106,7 @@ export function SearchableSelect({
         value={display}
         autoComplete="off"
         onFocus={() => {
+          if (!open) onOpen?.()
           setOpen(true)
           setTyping(false)
           setQuery('')

@@ -23,6 +23,7 @@ import { IconAlertTriangle, IconClock, IconMaximize, IconMinimize, IconPlus, Ico
 import { PageFeatureGuide } from '../components/PageFeatureGuide'
 import { SearchableSelect } from '../components/SearchableSelect'
 import { getUser, setSession } from '../stores/session'
+import { copyToClipboard } from '../lib/clipboard'
 import { formatDateTime, localTimeZone, timeZoneLabel, zonedYMD } from '../lib/time'
 
 type Tab = 'cron' | 'calendar' | 'webhook'
@@ -199,7 +200,7 @@ function describeCron(cfg: Record<string, unknown>): string {
 }
 
 function copyText(text: string) {
-  return navigator.clipboard.writeText(text)
+  return copyToClipboard(text)
 }
 
 export function AutomationsPage() {

@@ -16,6 +16,7 @@ import (
 	"github.com/ai-employee-platform/workstation/internal/acp"
 	"github.com/ai-employee-platform/workstation/internal/providers"
 	"github.com/ai-employee-platform/workstation/internal/runtime/process"
+	"github.com/ai-employee-platform/workstation/internal/tokenusage"
 )
 
 // 生命周期状态 §119。
@@ -290,20 +291,34 @@ func (a *agentSession) Send(ctx context.Context, input []byte) (string, error) {
 	return a.acp.Send(ctx, input)
 }
 
-// LastUsage 读取本次 ACP prompt 的 token 用量。
+// LastUsage 兼容旧接口。
 func (a *agentSession) LastUsage() (int64, int64, string, string) {
+	if u := a.LastTokenUsage(); u != nil {
+		return u.InputTokens, u.OutputTokens, firstNonEmpty(u.Provider, "cursor"), u.Source
+	}
+	return 0, 0, "cursor", "unavailable"
+}
+
+// LastTokenUsage 读取 Cursor ACP 真实用量。
+func (a *agentSession) LastTokenUsage() *tokenusage.TokenUsage {
 	type reporter interface {
-		LastUsage() acp.Usage
+		LastTokenUsage() *tokenusage.TokenUsage
 	}
 	if r, ok := a.acp.(reporter); ok {
-		u := r.LastUsage()
-		if u.Agent == "" {
-			u.Agent = "cursor"
-		}
-		return u.InputTokens, u.OutputTokens, u.Agent, u.Source
+		return r.LastTokenUsage()
 	}
-	return 0, 0, "cursor", ""
+	return &tokenusage.TokenUsage{Provider: "cursor", Source: "unavailable", UsageStatus: tokenusage.StatusUnavailable}
 }
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func (a *agentSession) Stop(ctx context.Context) error { return a.p.Stop(ctx, a.id) }
 
 // Installer V1：仅 Detect；Install 返回明确未实现完整 Registry。
