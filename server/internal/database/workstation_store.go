@@ -2,10 +2,13 @@ package database
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/ai-employee-platform/server/internal/certca"
+	"github.com/ai-employee-platform/server/internal/workstation"
 )
 
 // PostgresWorkstationStore 基于 PostgreSQL 实现 workstation.MetaStore。
@@ -39,6 +42,63 @@ func (s *PostgresWorkstationStore) GetName(ctx context.Context, id string) strin
 	var name string
 	_ = s.db.SQL.QueryRowContext(ctx, `SELECT name FROM workstations WHERE id = $1`, id).Scan(&name)
 	return name
+}
+
+func (s *PostgresWorkstationStore) SaveModelCache(ctx context.Context, id string, models map[string][]workstation.ModelOption) error {
+	if len(models) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(models)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.SQL.ExecContext(ctx, `
+		INSERT INTO workstations (id,name,model_options_json,model_options_updated_at,created_at,updated_at)
+		VALUES ($1,$1,$2::jsonb,NOW(),NOW(),NOW())
+		ON CONFLICT (id) DO UPDATE SET
+			model_options_json=EXCLUDED.model_options_json,
+			model_options_updated_at=NOW(),updated_at=NOW()`, id, string(data))
+	return err
+}
+
+func (s *PostgresWorkstationStore) LoadModelCache(ctx context.Context, id string) (map[string][]workstation.ModelOption, time.Time, error) {
+	var data []byte
+	var updated sql.NullTime
+	err := s.db.SQL.QueryRowContext(ctx, `
+		SELECT model_options_json,model_options_updated_at FROM workstations WHERE id=$1`, id).
+		Scan(&data, &updated)
+	if err == sql.ErrNoRows {
+		return nil, time.Time{}, nil
+	}
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	models := map[string][]workstation.ModelOption{}
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &models); err != nil {
+			return nil, time.Time{}, err
+		}
+	}
+	var updatedAt time.Time
+	if updated.Valid {
+		updatedAt = updated.Time
+	}
+	return models, updatedAt, nil
+}
+
+func (s *PostgresWorkstationStore) ModelCacheUpdatedAt(ctx context.Context, id string) (time.Time, error) {
+	var updated sql.NullTime
+	err := s.db.SQL.QueryRowContext(ctx, `SELECT model_options_updated_at FROM workstations WHERE id=$1`, id).Scan(&updated)
+	if err == sql.ErrNoRows {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !updated.Valid {
+		return time.Time{}, nil
+	}
+	return updated.Time, nil
 }
 
 func (s *PostgresWorkstationStore) ListIDs(ctx context.Context) []string {

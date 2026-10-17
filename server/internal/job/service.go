@@ -94,15 +94,16 @@ var (
 
 // Job 领域对象。
 type Job struct {
-	ID               string         `json:"id"`
-	EmployeeID       string         `json:"employee_id"`
-	WorkspaceID      string         `json:"workspace_id"`
-	SessionID        string         `json:"session_id"`
-	WorkstationID    string         `json:"workstation_id"`
-	Prompt           string         `json:"prompt"`
-	CreatedBy        string         `json:"created_by"`
-	Status           string         `json:"status"`
-	Result           string         `json:"result"`
+	ID                    string         `json:"id"`
+	ParentJobID           string         `json:"parent_job_id,omitempty"`
+	EmployeeID            string         `json:"employee_id"`
+	WorkspaceID           string         `json:"workspace_id"`
+	SessionID             string         `json:"session_id"`
+	WorkstationID         string         `json:"workstation_id"`
+	Prompt                string         `json:"prompt"`
+	CreatedBy             string         `json:"created_by"`
+	Status                string         `json:"status"`
+	Result                string         `json:"result"`
 	InputTokens           int64          `json:"input_tokens"`
 	OutputTokens          int64          `json:"output_tokens"`
 	CachedInputTokens     int64          `json:"cached_input_tokens"`
@@ -114,13 +115,13 @@ type Job struct {
 	TokenSource           string         `json:"token_source"`
 	TokenUsageStatus      string         `json:"token_usage_status"`
 	Source                string         `json:"source"`
-	IdempotencyKey   string         `json:"idempotency_key"`
-	TimeoutSec       int            `json:"timeout_sec"`
-	WorkflowID       string         `json:"workflow_id,omitempty"`
-	WorkflowSnapshot map[string]any `json:"workflow_snapshot,omitempty"`
-	CreatedAt        time.Time      `json:"created_at"`
-	StartedAt        time.Time      `json:"started_at,omitempty"`
-	CompletedAt      time.Time      `json:"completed_at,omitempty"`
+	IdempotencyKey        string         `json:"idempotency_key"`
+	TimeoutSec            int            `json:"timeout_sec"`
+	WorkflowID            string         `json:"workflow_id,omitempty"`
+	WorkflowSnapshot      map[string]any `json:"workflow_snapshot,omitempty"`
+	CreatedAt             time.Time      `json:"created_at"`
+	StartedAt             time.Time      `json:"started_at,omitempty"`
+	CompletedAt           time.Time      `json:"completed_at,omitempty"`
 }
 
 // Event Timeline 条目。
@@ -135,6 +136,7 @@ type Event struct {
 // CreateInput 创建。
 type CreateInput struct {
 	EmployeeID     string `json:"employee_id"`
+	ParentJobID    string `json:"parent_job_id,omitempty"`
 	WorkspaceID    string `json:"workspace_id"`
 	SessionID      string `json:"session_id"`
 	WorkstationID  string `json:"workstation_id"`
@@ -192,6 +194,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string
 	src := NormalizeSource(in.Source)
 	j := &Job{
 		ID:             idgen.New("JOB"),
+		ParentJobID:    in.ParentJobID,
 		EmployeeID:     in.EmployeeID,
 		WorkspaceID:    in.WorkspaceID,
 		SessionID:      in.SessionID,

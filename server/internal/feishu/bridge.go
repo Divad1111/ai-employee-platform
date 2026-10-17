@@ -3,6 +3,8 @@ package feishu
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/job"
@@ -26,15 +28,16 @@ type WorkspaceResolver interface {
 
 // Bridge 将飞书接入接到 Employee/Job/Message/Scheduler/Notification。
 type Bridge struct {
-	Employees  *employee.Service
-	Jobs       *job.Service
-	Messages   *message.Service
-	Scheduler  *scheduler.Service
-	Notify     ChatBinder
-	Feishu     *Service
-	Quota      *quota.Service
-	Roles      UserRoles
-	Workspaces WorkspaceResolver
+	Employees     *employee.Service
+	Jobs          *job.Service
+	Messages      *message.Service
+	Scheduler     *scheduler.Service
+	Notify        ChatBinder
+	Feishu        *Service
+	Quota         *quota.Service
+	Roles         UserRoles
+	Workspaces    WorkspaceResolver
+	Conversations TaskConversationStarter
 }
 
 // ResolveAlias 实现 EmployeeChecker。
@@ -138,8 +141,73 @@ func (b *Bridge) CreateFromFeishu(ctx context.Context, employeeID, prompt, idemp
 	if b.Notify != nil && notifyTarget != "" {
 		b.Notify.RememberChat(j.ID, notifyTarget)
 	}
+	if b.Conversations != nil {
+		if _, err := b.Conversations.Start(ctx, TaskConversationStart{
+			JobID: j.ID, EmployeeID: employeeID, EmployeeName: e.Name,
+			OwnerUserID: userID, OwnerOpenID: senderOpenID, ChatID: notifyTarget, Prompt: prompt,
+		}); err != nil {
+			fmt.Printf("[Feishu] 建立任务会话卡片失败 (job=%s): %v\n", j.ID, err)
+		}
+	}
 	if b.Scheduler != nil {
 		_, _ = b.Scheduler.ScheduleJob(ctx, j.ID)
+	}
+	return j.ID, nil
+}
+
+// CreateFollowUp 按原始用户身份创建同一任务会话中的下一轮 Job。
+func (b *Bridge) CreateFollowUp(ctx context.Context, in TaskConversationFollowUp) (string, error) {
+	if in.OwnerUserID == "" || in.ParentJobID == "" || in.Prompt == "" {
+		return "", errors.New("续聊任务参数不完整")
+	}
+	parent, err := b.Jobs.Get(ctx, in.ParentJobID)
+	if err != nil {
+		return "", err
+	}
+	if parent.EmployeeID != in.EmployeeID {
+		return "", errors.New("任务会话员工信息不匹配")
+	}
+	if err := b.IsAssignable(ctx, in.EmployeeID); err != nil {
+		return "", err
+	}
+	if b.Quota != nil {
+		var roles []string
+		if b.Roles != nil {
+			roles = b.Roles(ctx, in.OwnerUserID)
+		}
+		if err := b.Quota.CheckUser(ctx, in.OwnerUserID, roles, 1, 1); err != nil {
+			if errors.Is(err, quota.ErrExceeded) {
+				return "", errors.New("本月 Token 配额已用尽，无法继续对话")
+			}
+			return "", err
+		}
+	}
+	if b.Conversations == nil {
+		return "", errors.New("任务会话存储暂不可用")
+	}
+	prompt := in.Prompt
+	if strings.TrimSpace(in.Context) != "" {
+		prompt = strings.TrimSpace(in.Context) + "\n\n【本轮继续指令】\n" + prompt
+	}
+	j, _, err := b.Jobs.Create(ctx, job.CreateInput{
+		EmployeeID: in.EmployeeID, ParentJobID: parent.ID,
+		WorkspaceID: parent.WorkspaceID, WorkstationID: parent.WorkstationID,
+		Prompt: prompt, IdempotencyKey: in.IdempotencyKey,
+		TimeoutSec: parent.TimeoutSec, CreatedBy: in.OwnerUserID, Source: job.SourceFeishu,
+	}, in.OwnerUserID, in.OwnerOpenID)
+	if err != nil {
+		return "", err
+	}
+	if err := b.Conversations.AttachTurn(ctx, in.ConversationID, j.ID, in.Prompt); err != nil {
+		return "", err
+	}
+	if b.Notify != nil {
+		b.Notify.RememberChat(j.ID, in.ChatID)
+	}
+	if b.Scheduler != nil {
+		if _, err := b.Scheduler.ScheduleJob(ctx, j.ID); err != nil {
+			fmt.Printf("[Feishu] 续聊任务已入队，等待调度 (job=%s): %v\n", j.ID, err)
+		}
 	}
 	return j.ID, nil
 }

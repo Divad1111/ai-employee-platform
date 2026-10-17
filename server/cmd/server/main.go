@@ -52,6 +52,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/scheduler"
 	"github.com/ai-employee-platform/server/internal/secret"
 	"github.com/ai-employee-platform/server/internal/session"
+	"github.com/ai-employee-platform/server/internal/taskconversation"
 	"github.com/ai-employee-platform/server/internal/tokenusage"
 	"github.com/ai-employee-platform/server/internal/workergrpc"
 	"github.com/ai-employee-platform/server/internal/workflowmcp"
@@ -243,6 +244,17 @@ func main() {
 	}
 	gs, lis, workerSvc, err := workergrpc.ListenAndServeWith(cfg.GRPCAddr, ca, srvCert, workergrpc.Options{
 		CA: ca, Presence: presence,
+		OnModels: func(wsID string, models map[string][]reliability.ModelOption) {
+			cached := make(map[string][]workstation.ModelOption, len(models))
+			for provider, list := range models {
+				for _, model := range list {
+					cached[provider] = append(cached[provider], workstation.ModelOption{ID: model.ID, Label: model.Label})
+				}
+			}
+			if err := wsNodeSvc.CacheModelsOnRefresh(context.Background(), wsID, cached); err != nil {
+				fmt.Printf("[Workstation] 保存模型缓存失败 (ws=%s): %v\n", wsID, err)
+			}
+		},
 	})
 	if err != nil {
 		fatal("启动 gRPC 失败: %v", err)
@@ -255,11 +267,21 @@ func main() {
 
 	sched := scheduler.New(jobSvc, empSvc, wsNodeSvc, presence, workerSvc)
 	sched.SetWorkspaces(wsSvc)
+	var taskConversationStore taskconversation.Store = taskconversation.NewMemoryStore()
+	if pgSQL != nil {
+		taskConversationStore = taskconversation.NewPostgresStore(pgSQL)
+	}
+	taskConversationSvc := taskconversation.NewService(taskConversationStore, feishuSvc, jobSvc, sched)
+	feishuSvc.SetTaskConversationHandler(taskConversationSvc)
+	notifySvc.SetConversationLookup(taskConversationSvc.ManagesJob)
+	notifySvc.SetConversationStatusUpdater(taskConversationSvc.OnJobStatus)
+	go taskConversationSvc.Run(sweepCtx)
 
 	quotaSvc := quota.NewService(quotaStore)
 	autoSvc := automation.New(autoStore, jobSvc, sched, vault, auditor)
 	autoSvc.SetNotify(automation.FeishuBridge{Svc: feishuSvc}, notifySvc)
 	sched.OnTerminal = func(ctx context.Context, j *job.Job) {
+		taskConversationSvc.OnJobStatus(ctx, j.ID, j.Status, j.Result)
 		_ = notifySvc.OnJobTerminal(ctx, j)
 		autoSvc.OnJobTerminal(ctx, j)
 	}
@@ -344,7 +366,18 @@ func main() {
 					_ = jobSvc.BindSession(ctx, jobID, sessID)
 					_, _ = sessSvc.ReportFromWorkstation(ctx, sessID, empID, wsID, payload["workspace_id"], sessionProvider, session.StatusBusy)
 				}
-				_, _ = jobSvc.Transition(ctx, jobID, job.StatusRunning, "workstation", wsID, payload)
+				if _, err := jobSvc.Transition(ctx, jobID, job.StatusRunning, "workstation", wsID, payload); err == nil {
+					taskConversationSvc.OnJobStatus(ctx, jobID, job.StatusRunning, "")
+				}
+			}
+		case aiev1.EventType_EVENT_TYPE_JOB_PROGRESS:
+			switch payload["kind"] {
+			case "agent_delta":
+				sequence, _ := strconv.ParseUint(payload["delta_sequence"], 10, 64)
+				taskConversationSvc.OnAgentDelta(ctx, ev.GetEventId(), jobID, sequence, payload["text"])
+			case "agent_activity":
+				sequence, _ := strconv.ParseUint(payload["activity_sequence"], 10, 64)
+				taskConversationSvc.OnAgentActivity(ctx, ev.GetEventId(), jobID, sequence, payload["text"])
 			}
 		case aiev1.EventType_EVENT_TYPE_JOB_SUCCESS:
 			if jobID != "" {
@@ -358,6 +391,7 @@ func main() {
 					fmt.Printf("[Server] ⚠️ Transition to SUCCESS 失败 (job=%s): %v\n", jobID, err)
 				}
 				if err == nil && uj != nil {
+					taskConversationSvc.OnJobStatus(ctx, jobID, job.StatusSuccess, payload["reply"])
 					if uj.Result == "" && payload["reply"] != "" {
 						uj.Result = payload["reply"]
 					}
@@ -378,6 +412,7 @@ func main() {
 					fmt.Printf("[Server] ⚠️ Transition to FAILED 失败 (job=%s): %v\n", jobID, err)
 				}
 				if err == nil && uj != nil {
+					taskConversationSvc.OnJobStatus(ctx, jobID, job.StatusFailed, payload["reply"])
 					recordJobTokens(ctx, jobSvc, tokenUsageSvc, quotaStore, jobID, wsID, empID, payload)
 					_ = notifySvc.OnJobTerminal(ctx, uj)
 					autoSvc.OnJobTerminal(ctx, uj)
@@ -436,8 +471,9 @@ func main() {
 	bridge := &feishu.Bridge{
 		Employees: empSvc, Jobs: jobSvc, Messages: msgSvc,
 		Scheduler: sched, Notify: notifySvc, Feishu: feishuSvc,
-		Workspaces: wsSvc,
-		Quota:      quotaSvc,
+		Workspaces:    wsSvc,
+		Conversations: taskConversationSvc,
+		Quota:         quotaSvc,
 		Roles: func(ctx context.Context, userID string) []string {
 			u, err := users.FindByID(ctx, userID)
 			if err != nil || u == nil {
@@ -446,6 +482,7 @@ func main() {
 			return u.Roles
 		},
 	}
+	taskConversationSvc.SetFollowUpCreator(bridge)
 	bridge.Wire()
 
 	mcpURL := getenv("AIE_MCP_PUBLIC_URL", "http://127.0.0.1"+cfg.HTTPAddr+"/mcp")

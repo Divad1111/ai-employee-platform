@@ -18,8 +18,24 @@ type Service struct {
 	Bus    *eventbus.Bus
 	Jobs   *job.Service
 
-	mu        sync.Mutex
-	chatByJob map[string]string // job_id → feishu chat_id
+	mu                  sync.Mutex
+	chatByJob           map[string]string // job_id → feishu chat_id
+	conversationManaged func(context.Context, string) bool
+	conversationStatus  func(context.Context, string, string, string)
+}
+
+// SetConversationStatusUpdater 同步 Job 终态到对应的任务会话卡片。
+func (s *Service) SetConversationStatusUpdater(update func(context.Context, string, string, string)) {
+	s.mu.Lock()
+	s.conversationStatus = update
+	s.mu.Unlock()
+}
+
+// SetConversationLookup 让任务卡片复用其会话卡片作为终态回执，避免额外发送一张结果卡。
+func (s *Service) SetConversationLookup(lookup func(context.Context, string) bool) {
+	s.mu.Lock()
+	s.conversationManaged = lookup
+	s.mu.Unlock()
 }
 
 // New 创建。
@@ -60,10 +76,22 @@ func (s *Service) OnJobTerminal(ctx context.Context, j *job.Job) error {
 		chat = s.Feishu.ResolveTargetChat(j.EmployeeID)
 	}
 	summary := notifySummary(j.Status, j.Result, s.latestError(ctx, j))
+	s.mu.Lock()
+	statusUpdater := s.conversationStatus
+	s.mu.Unlock()
+	if statusUpdater != nil {
+		statusUpdater(ctx, j.ID, j.Status, j.Result)
+	}
 	if s.Bus != nil {
 		s.Bus.Publish(ctx, eventbus.TypeJobStatus, map[string]string{
 			"job_id": j.ID, "status": j.Status,
 		})
+	}
+	s.mu.Lock()
+	managed := s.conversationManaged
+	s.mu.Unlock()
+	if managed != nil && managed(ctx, j.ID) {
+		return nil
 	}
 	if s.Feishu != nil {
 		return s.Feishu.NotifyJobResult(ctx, chat, j.ID, j.Status, summary)

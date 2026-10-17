@@ -274,6 +274,7 @@ type fakeSessionWrapper struct {
 }
 
 func (w *fakeSessionWrapper) Start(ctx context.Context) error { return w.acp.Start(ctx) }
+func (w *fakeSessionWrapper) Events() <-chan acp.Event        { return w.acp.Events() }
 func (w *fakeSessionWrapper) Send(ctx context.Context, input []byte) (string, error) {
 	w.p.mu.Lock()
 	w.p.state = StateBusy

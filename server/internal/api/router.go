@@ -1342,7 +1342,12 @@ func (d Deps) handleCancelJob(w http.ResponseWriter, r *http.Request, sess *auth
 		writeErr(w, http.StatusForbidden, "无权取消该任务")
 		return
 	}
-	j, err := d.Jobs.Cancel(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r))
+	var j *job.Job
+	if d.Scheduler != nil {
+		j, err = d.Scheduler.CancelJob(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r))
+	} else {
+		j, err = d.Jobs.Cancel(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r))
+	}
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
@@ -1352,9 +1357,6 @@ func (d Deps) handleCancelJob(w http.ResponseWriter, r *http.Request, sess *auth
 	}
 	if d.Automation != nil {
 		d.Automation.OnJobTerminal(r.Context(), j)
-	}
-	if d.Scheduler != nil && j.WorkstationID != "" {
-		d.Scheduler.Release(j.WorkstationID)
 	}
 	writeJSON(w, http.StatusOK, j)
 }

@@ -90,10 +90,10 @@ type InquiryCallback func(ctx context.Context, jobID, employeeID string, inq acp
 
 // Managers 本地运行时门面。
 type Managers struct {
-	Paths         platform.Paths
-	Registry      *providers.Registry
-	MaxSess       int
-	Sink          EventSink
+	Paths          platform.Paths
+	Registry       *providers.Registry
+	MaxSess        int
+	Sink           EventSink
 	UsageCollector *tokenusage.Collector
 
 	mu              sync.Mutex
@@ -249,6 +249,16 @@ func (m *Managers) markSession(id, status string) {
 // RunJob 在已有或按需 Session 上跑 Job；完成后不强制关 Session（可复用）。
 // 返回的 Job.Prompt 对应输入；回复文本通过第二返回值给出。
 func (m *Managers) RunJob(ctx context.Context, jobID, employeeID, sessionID, prompt string) (*Job, string, error) {
+	return m.RunJobWithOutput(ctx, jobID, employeeID, sessionID, prompt, nil)
+}
+
+// RunJobWithOutput 在执行 Job 的同时转发 Agent 面向用户的增量文本。
+func (m *Managers) RunJobWithOutput(ctx context.Context, jobID, employeeID, sessionID, prompt string, onOutput func(string)) (*Job, string, error) {
+	return m.RunJobWithEvents(ctx, jobID, employeeID, sessionID, prompt, onOutput, nil)
+}
+
+// RunJobWithEvents 在执行 Job 时转发回复增量和安全的用户可见进度摘要。
+func (m *Managers) RunJobWithEvents(ctx context.Context, jobID, employeeID, sessionID, prompt string, onOutput, onActivity func(string)) (*Job, string, error) {
 	m.mu.Lock()
 	j := &Job{ID: jobID, EmployeeID: employeeID, SessionID: sessionID, Prompt: prompt, Status: JobRunning}
 	m.jobs[jobID] = j
@@ -296,7 +306,58 @@ func (m *Managers) RunJob(ctx context.Context, jobID, employeeID, sessionID, pro
 		_ = m.UsageCollector.Start(execRec)
 	}
 
+	streamDone := make(chan struct{})
+	streamExited := make(chan struct{})
+	if onOutput != nil || onActivity != nil {
+		var events <-chan acp.Event
+		if source, ok := agent.(interface{ Events() <-chan acp.Event }); ok {
+			events = source.Events()
+		}
+		forward := func(ev acp.Event) {
+			if ev.Type == "assistant_delta" && len(ev.Payload) > 0 {
+				if onOutput != nil {
+					onOutput(string(ev.Payload))
+				}
+			} else if ev.Type == "agent_activity" && len(ev.Payload) > 0 {
+				if onActivity != nil {
+					onActivity(string(ev.Payload))
+				}
+			}
+		}
+		go func() {
+			defer close(streamExited)
+			for {
+				select {
+				case <-streamDone:
+					// Send 返回时 ACP 可能还有已缓冲的最后几段回复；先排空，
+					// 避免终态事件先于最后的实时内容落到服务端。
+					for {
+						select {
+						case ev, ok := <-events:
+							if !ok {
+								return
+							}
+							forward(ev)
+						default:
+							return
+						}
+					}
+				case <-ctx.Done():
+					return
+				case ev, ok := <-events:
+					if !ok {
+						return
+					}
+					forward(ev)
+				}
+			}
+		}()
+	} else {
+		close(streamExited)
+	}
 	reply, err := agent.Send(ctx, []byte(prompt))
+	close(streamDone)
+	<-streamExited
 
 	var usage *tokenusage.TokenUsage
 	if m.UsageCollector != nil {
@@ -340,6 +401,17 @@ func (m *Managers) RunJob(ctx context.Context, jobID, employeeID, sessionID, pro
 	m.markSession(sessionID, SessReady)
 	m.emit("job.status", map[string]string{"job_id": jobID, "status": JobSuccess})
 	return j, reply, nil
+}
+
+// CancelJob 中止正在运行该 Job 的 Agent 进程，并释放对应工作区锁。
+func (m *Managers) CancelJob(ctx context.Context, jobID string) error {
+	m.mu.Lock()
+	j, ok := m.jobs[jobID]
+	m.mu.Unlock()
+	if !ok || j == nil || j.SessionID == "" {
+		return ErrNotFound
+	}
+	return m.StopSession(ctx, j.SessionID)
 }
 
 func firstNonEmpty(vals ...string) string {

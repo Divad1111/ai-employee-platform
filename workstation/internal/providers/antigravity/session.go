@@ -125,6 +125,13 @@ func (s *RealSession) Send(ctx context.Context, input []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Antigravity transcript 当前只在模型步骤完成后落盘，先提供完成时的最终增量。
+	if reply != "" {
+		select {
+		case s.events <- acp.Event{Type: "assistant_delta", Payload: []byte(reply)}:
+		default:
+		}
+	}
 
 	select {
 	case s.events <- acp.Event{Type: "ack", Payload: []byte(reply)}:

@@ -30,6 +30,7 @@ type Options struct {
 	Events   *reliability.EventStore
 	Presence *reliability.Presence
 	OnEvent  func(wsID string, ev *aiev1.Event)
+	OnModels func(wsID string, models map[string][]reliability.ModelOption)
 }
 
 // Server 实现 aiev1.WorkerServiceServer。
@@ -40,6 +41,7 @@ type Server struct {
 	Events   *reliability.EventStore
 	Presence *reliability.Presence
 	OnEvent  func(wsID string, ev *aiev1.Event)
+	OnModels func(wsID string, models map[string][]reliability.ModelOption)
 
 	mu      sync.Mutex
 	streams map[string]*connSession // workstation_id → 当前连接
@@ -68,6 +70,7 @@ func NewServer(opt Options) *Server {
 		Events:   opt.Events,
 		Presence: opt.Presence,
 		OnEvent:  opt.OnEvent,
+		OnModels: opt.OnModels,
 		streams:  make(map[string]*connSession),
 	}
 }
@@ -195,6 +198,9 @@ func (s *Server) handleUpstream(wsID string, stream aiev1.WorkerService_ConnectS
 				item.Label = item.ID
 			}
 			models[item.Provider] = append(models[item.Provider], reliability.ModelOption{ID: item.ID, Label: item.Label})
+		}
+		if len(models) > 0 && s.OnModels != nil {
+			s.OnModels(wsID, models)
 		}
 		s.Presence.SetModels(wsID, models)
 		return stream.Send(&aiev1.ServerToWorker{

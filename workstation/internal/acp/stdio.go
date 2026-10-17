@@ -26,21 +26,21 @@ type StdioSession struct {
 	workDir string
 	env     []string
 
-	mu           sync.Mutex
-	cmd          *exec.Cmd
-	stdin        io.WriteCloser
-	ready        bool
-	stopped      bool
-	events       chan Event
-	nextID       atomic.Int64
-	pending      map[int64]chan rpcResult
-	cancel       context.CancelFunc
-	acpSessionID string
-	collecting   bool
-	replyBuf     strings.Builder
-	replyText    string
-	lastUsage    tokenusage.TokenUsage
-	agentModel   string
+	mu             sync.Mutex
+	cmd            *exec.Cmd
+	stdin          io.WriteCloser
+	ready          bool
+	stopped        bool
+	events         chan Event
+	nextID         atomic.Int64
+	pending        map[int64]chan rpcResult
+	cancel         context.CancelFunc
+	acpSessionID   string
+	collecting     bool
+	replyBuf       strings.Builder
+	replyText      string
+	lastUsage      tokenusage.TokenUsage
+	agentModel     string
 	promptText     string
 	mcpServers     []any
 	model          string
@@ -325,7 +325,7 @@ func extractAgentTextFromUpdate(params json.RawMessage) string {
 		return ""
 	}
 	switch u.Update.SessionUpdate {
-	case "agent_message_chunk", "agent_thought_chunk", "message_chunk":
+	case "agent_message_chunk":
 		if u.Update.Content.Text != "" {
 			return u.Update.Content.Text
 		}
@@ -449,7 +449,20 @@ func (s *StdioSession) readLoop(stdout io.Reader) {
 		// 服务端请求/通知
 		if msg.Method != "" {
 			if msg.Method == "session/update" {
-				s.appendReply(extractAgentTextFromUpdate(msg.Params))
+				text := extractAgentTextFromUpdate(msg.Params)
+				s.appendReply(text)
+				if userText := extractUserFacingAgentChunk(msg.Params); userText != "" {
+					select {
+					case s.events <- Event{Type: "assistant_delta", Payload: []byte(userText)}:
+					default:
+					}
+				}
+				if activity := extractUserFacingActivity(msg.Params); activity != "" {
+					select {
+					case s.events <- Event{Type: "agent_activity", Payload: []byte(activity)}:
+					default:
+					}
+				}
 				s.absorbUsage(msg.Params)
 			}
 			payload, _ := json.Marshal(map[string]any{"method": msg.Method, "params": msg.Params})
@@ -465,6 +478,124 @@ func (s *StdioSession) readLoop(stdout io.Reader) {
 				go s.handleInquiryRequest(reqID, method, params)
 			}
 		}
+	}
+}
+
+// extractUserFacingAgentChunk 只取 Agent 面向用户的回复增量，不同步内部思考内容。
+func extractUserFacingAgentChunk(params json.RawMessage) string {
+	var u struct {
+		Update struct {
+			SessionUpdate string `json:"sessionUpdate"`
+			Content       struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			Text string `json:"text"`
+		} `json:"update"`
+	}
+	if json.Unmarshal(params, &u) != nil || u.Update.SessionUpdate != "agent_message_chunk" {
+		return ""
+	}
+	if u.Update.Content.Text != "" {
+		return u.Update.Content.Text
+	}
+	return u.Update.Text
+}
+
+// extractUserFacingActivity 只抽取工具与计划状态，不转发思考/推理内容。
+func extractUserFacingActivity(params json.RawMessage) string {
+	var u struct {
+		Update struct {
+			SessionUpdate string `json:"sessionUpdate"`
+			ToolCall      struct {
+				Title  string `json:"title"`
+				Kind   string `json:"kind"`
+				Status string `json:"status"`
+			} `json:"toolCall"`
+			ToolCallUpdate struct {
+				Title  string `json:"title"`
+				Kind   string `json:"kind"`
+				Status string `json:"status"`
+			} `json:"toolCallUpdate"`
+			Plan struct {
+				Entries []struct {
+					Content string `json:"content"`
+					Title   string `json:"title"`
+					Status  string `json:"status"`
+				} `json:"entries"`
+			} `json:"plan"`
+		} `json:"update"`
+	}
+	if json.Unmarshal(params, &u) != nil {
+		return ""
+	}
+	switch u.Update.SessionUpdate {
+	case "tool_call", "tool_call_update":
+		tool := u.Update.ToolCall
+		if u.Update.SessionUpdate == "tool_call_update" {
+			tool = u.Update.ToolCallUpdate
+		}
+		kind := userFacingToolKind(tool.Kind)
+		verb := userFacingToolStatus(tool.Status)
+		if tool.Title != "" {
+			return verb + kind + "：" + strings.TrimSpace(tool.Title)
+		}
+		return verb + kind
+	case "plan":
+		var items []string
+		for _, entry := range u.Update.Plan.Entries {
+			if entry.Status != "in_progress" && entry.Status != "pending" {
+				continue
+			}
+			title := entry.Content
+			if title == "" {
+				title = entry.Title
+			}
+			if title == "" {
+				continue
+			}
+			items = append(items, title)
+			if len(items) == 2 {
+				break
+			}
+		}
+		if len(items) > 0 {
+			return "当前计划：" + strings.Join(items, "；")
+		}
+	}
+	return ""
+}
+
+func userFacingToolKind(kind string) string {
+	switch strings.ToLower(kind) {
+	case "execute", "command", "terminal":
+		return "执行命令"
+	case "read":
+		return "读取文件"
+	case "edit", "write":
+		return "修改文件"
+	case "search":
+		return "搜索内容"
+	case "fetch":
+		return "获取信息"
+	case "mcp", "tool":
+		return "调用工具"
+	default:
+		return "处理任务"
+	}
+}
+
+func userFacingToolStatus(status string) string {
+	switch strings.ToLower(status) {
+	case "pending":
+		return "准备"
+	case "in_progress", "running":
+		return "正在"
+	case "completed", "done":
+		return "已完成："
+	case "failed":
+		return "执行失败："
+	default:
+		return "正在"
 	}
 }
 
@@ -498,9 +629,9 @@ func (s *StdioSession) handleInquiryRequest(reqID int64, method string, rawParam
 
 func parseInquiry(sessionID, method string, params json.RawMessage) Inquiry {
 	var body struct {
-		Message string `json:"message"`
-		Prompt  string `json:"prompt"`
-		Title   string `json:"title"`
+		Message  string `json:"message"`
+		Prompt   string `json:"prompt"`
+		Title    string `json:"title"`
 		ToolCall struct {
 			Name string `json:"name"`
 		} `json:"toolCall"`

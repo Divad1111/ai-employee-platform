@@ -78,6 +78,79 @@ type Daemon struct {
 	activeSess       *grpcclient.Session
 	cancelMu         sync.Mutex
 	cancel           context.CancelFunc
+	jobCancelMu      sync.Mutex
+	jobCancels       map[string]context.CancelFunc
+}
+
+// outputBatcher 合并 ACP token 事件，减少 Outbox 与 gRPC 事件数量。
+type outputBatcher struct {
+	daemon           *Daemon
+	jobID            string
+	session          string
+	employee         string
+	mu               sync.Mutex
+	buffer           strings.Builder
+	sequence         atomic.Uint64
+	activitySequence atomic.Uint64
+	timer            *time.Timer
+}
+
+func (b *outputBatcher) Add(text string) {
+	if text == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buffer.WriteString(text)
+	if b.buffer.Len() >= 512 {
+		b.flushLocked()
+		return
+	}
+	if b.timer == nil {
+		b.timer = time.AfterFunc(350*time.Millisecond, func() {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			b.flushLocked()
+		})
+	}
+}
+
+func (b *outputBatcher) Flush() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.flushLocked()
+}
+
+func (b *outputBatcher) AddActivity(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	if runes := []rune(text); len(runes) > 600 {
+		text = string(runes[:600]) + "…"
+	}
+	payload, _ := json.Marshal(map[string]string{
+		"kind": "agent_activity", "activity_sequence": strconv.FormatUint(b.activitySequence.Add(1), 10), "text": text,
+	})
+	_ = b.daemon.Outbox.Enqueue(b.daemon.newEvent(b.jobID, b.session, b.employee,
+		aiev1.EventType_EVENT_TYPE_JOB_PROGRESS, string(payload)))
+}
+
+func (b *outputBatcher) flushLocked() {
+	if b.timer != nil {
+		b.timer.Stop()
+		b.timer = nil
+	}
+	if b.buffer.Len() == 0 {
+		return
+	}
+	text := b.buffer.String()
+	b.buffer.Reset()
+	payload, _ := json.Marshal(map[string]string{
+		"kind": "agent_delta", "delta_sequence": strconv.FormatUint(b.sequence.Add(1), 10), "text": text,
+	})
+	_ = b.daemon.Outbox.Enqueue(b.daemon.newEvent(b.jobID, b.session, b.employee,
+		aiev1.EventType_EVENT_TYPE_JOB_PROGRESS, string(payload)))
 }
 
 // New 组装 Daemon。
@@ -122,14 +195,15 @@ func New(opts Options) *Daemon {
 	// 本地 runtime 状态不走 CP Outbox：否则会污染事件序号，导致 JOB_* 被 EventStore 拒绝。
 	rt.Sink = nil
 	d := &Daemon{
-		Opts:     opts,
-		Runtime:  rt,
-		Proc:     proc,
-		Registry: reg,
-		Recovery: &recovery.Manager{Runtime: rt, Proc: proc},
-		Monitor:  &monitor.Sampler{},
-		Outbox:   ob,
-		Backoff:  reconnect.NewBackoff(60 * time.Second),
+		Opts:       opts,
+		Runtime:    rt,
+		Proc:       proc,
+		Registry:   reg,
+		Recovery:   &recovery.Manager{Runtime: rt, Proc: proc},
+		Monitor:    &monitor.Sampler{},
+		Outbox:     ob,
+		Backoff:    reconnect.NewBackoff(60 * time.Second),
+		jobCancels: make(map[string]context.CancelFunc),
 	}
 	artRoot := opts.Paths.DataDir()
 	if artRoot == "" {
@@ -176,6 +250,23 @@ func (d *Daemon) newEvent(jobID, sessionID, employeeID string, typ aiev1.EventTy
 		},
 		PayloadJson: payload,
 	}
+}
+
+// stopRunningJob 先取消任务上下文，再关闭 Agent 进程以确保不会在后台继续执行。
+func (d *Daemon) stopRunningJob(ctx context.Context, jobID string) error {
+	d.jobCancelMu.Lock()
+	cancel := d.jobCancels[jobID]
+	d.jobCancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	if err := d.Runtime.CancelJob(stopCtx, jobID); err != nil && err != runtime.ErrNotFound {
+		return err
+	}
+	_ = ctx
+	return nil
 }
 
 func (d *Daemon) newJobEvent(jobID string, typ aiev1.EventType, payload string) *aiev1.Event {
@@ -250,7 +341,7 @@ func (d *Daemon) maintainControlPlane(ctx context.Context) {
 		sess := grpcclient.NewSession(cli, d.Opts.Journal)
 		sess.Outbox = &outbox.Dispatcher{Store: d.Outbox}
 		sess.HeartbeatInterval = 5 * time.Second
-		// 连上控制面（注册/重连）后上报一次模型，不放进周期心跳。
+		// 连上控制面（注册/重连）后上报一次运行时模型，不写服务端持久缓存。
 		sess.OnConnected = func() {
 			go d.reportModels(context.Background())
 		}
@@ -405,8 +496,19 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 
 		go func() {
 			jobCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			localJob, reply, rerr := d.Runtime.RunJob(jobCtx, jobID, empID, sessID, promptWithMarkdownDefault(payload.Prompt))
+			d.jobCancelMu.Lock()
+			d.jobCancels[jobID] = cancel
+			d.jobCancelMu.Unlock()
+			defer func() {
+				d.jobCancelMu.Lock()
+				delete(d.jobCancels, jobID)
+				d.jobCancelMu.Unlock()
+				cancel()
+			}()
+			output := &outputBatcher{daemon: d, jobID: jobID, session: sessID, employee: empID}
+			localJob, reply, rerr := d.Runtime.RunJobWithEvents(jobCtx, jobID, empID, sessID,
+				promptWithMarkdownDefault(payload.Prompt), output.Add, output.AddActivity)
+			output.Flush()
 			usage := map[string]string{
 				"session_id":    sessID,
 				"reply":         reply,
@@ -468,8 +570,7 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 		return nil
 
 	case aiev1.CommandType_COMMAND_TYPE_STOP_JOB:
-		d.Runtime.MarkUnknown("", cmd.GetJobId())
-		return nil
+		return d.stopRunningJob(ctx, cmd.GetJobId())
 
 	case aiev1.CommandType_COMMAND_TYPE_RESOLVE_INQUIRY:
 		var p struct {

@@ -44,6 +44,13 @@ type MetaStore interface {
 	Delete(ctx context.Context, id string) error
 }
 
+// ModelCacheStore 持久化工作站上报的模型列表，避免服务重启后再次等待工作站同步。
+type ModelCacheStore interface {
+	SaveModelCache(context.Context, string, map[string][]ModelOption) error
+	LoadModelCache(context.Context, string) (map[string][]ModelOption, time.Time, error)
+	ModelCacheUpdatedAt(context.Context, string) (time.Time, error)
+}
+
 // WorkerCommander 接口支持向工作站下发指令并管理长连接生命周期。
 type WorkerCommander interface {
 	PushCommand(wsID string, typ aiev1.CommandType, employeeID, jobID, payloadJSON string) (*aiev1.Command, error)
@@ -52,10 +59,12 @@ type WorkerCommander interface {
 
 // Service Workstation 只读 + 吊销。
 type Service struct {
-	CA        *certca.Authority
-	Presence  *reliability.Presence
-	Meta      MetaStore
-	Commander WorkerCommander
+	CA             *certca.Authority
+	Presence       *reliability.Presence
+	Meta           MetaStore
+	Commander      WorkerCommander
+	modelMu        sync.Mutex
+	refreshPending map[string]bool
 }
 
 // NewService 创建。
@@ -63,7 +72,7 @@ func NewService(ca *certca.Authority, presence *reliability.Presence, meta MetaS
 	if meta == nil {
 		meta = NewMemoryMeta()
 	}
-	return &Service{CA: ca, Presence: presence, Meta: meta}
+	return &Service{CA: ca, Presence: presence, Meta: meta, refreshPending: make(map[string]bool)}
 }
 
 // SetCommander 绑定命令与连接管理器。
@@ -111,6 +120,11 @@ func (s *Service) Get(ctx context.Context, id string) View {
 			return v
 		}
 	}
+	if cache, ok := s.Meta.(ModelCacheStore); ok {
+		if models, _, err := cache.LoadModelCache(ctx, id); err == nil && len(models) > 0 {
+			v.Models = models
+		}
+	}
 	if s.Presence != nil {
 		st, last, cpu, mem, disk, _, ok := s.Presence.ResourceSnapshot(id)
 		if ok {
@@ -138,10 +152,42 @@ func (s *Service) Get(ctx context.Context, id string) View {
 
 // ModelsUpdatedAt 返回最近一次模型上报时间。
 func (s *Service) ModelsUpdatedAt(wsID string) time.Time {
-	if s.Presence == nil {
-		return time.Time{}
+	var updated time.Time
+	if s.Presence != nil {
+		updated = s.Presence.ModelsUpdatedAt(wsID)
 	}
-	return s.Presence.ModelsUpdatedAt(wsID)
+	if cache, ok := s.Meta.(ModelCacheStore); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if cachedAt, err := cache.ModelCacheUpdatedAt(ctx, wsID); err == nil && cachedAt.After(updated) {
+			updated = cachedAt
+		}
+	}
+	return updated
+}
+
+// CacheModels 保存工作站最新上报的模型清单。
+func (s *Service) CacheModels(ctx context.Context, wsID string, models map[string][]ModelOption) error {
+	if len(models) == 0 {
+		return nil
+	}
+	cache, ok := s.Meta.(ModelCacheStore)
+	if !ok {
+		return nil
+	}
+	return cache.SaveModelCache(ctx, wsID, models)
+}
+
+// CacheModelsOnRefresh 仅在有用户主动刷新请求等待时落库；普通连接上报只更新 Presence。
+func (s *Service) CacheModelsOnRefresh(ctx context.Context, wsID string, models map[string][]ModelOption) error {
+	s.modelMu.Lock()
+	if !s.refreshPending[wsID] {
+		s.modelMu.Unlock()
+		return nil
+	}
+	delete(s.refreshPending, wsID)
+	s.modelMu.Unlock()
+	return s.CacheModels(ctx, wsID, models)
 }
 
 // RequestModelRefresh 让在线工作站重新查询并上报模型列表。
@@ -152,7 +198,18 @@ func (s *Service) RequestModelRefresh(wsID string) error {
 	if s.Presence == nil || s.Presence.StatusOf(wsID) != reliability.StatusOnline {
 		return errors.New("工作站离线，无法拉取模型列表")
 	}
+	s.modelMu.Lock()
+	if s.refreshPending == nil {
+		s.refreshPending = make(map[string]bool)
+	}
+	s.refreshPending[wsID] = true
+	s.modelMu.Unlock()
 	_, err := s.Commander.PushCommand(wsID, aiev1.CommandType_COMMAND_TYPE_UPDATE_WORKSTATION, "", "", `{"op":"refresh_models"}`)
+	if err != nil {
+		s.modelMu.Lock()
+		delete(s.refreshPending, wsID)
+		s.modelMu.Unlock()
+	}
 	return err
 }
 
@@ -187,12 +244,49 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 
 // MemoryMeta 元数据。
 type MemoryMeta struct {
-	mu    sync.RWMutex
-	names map[string]string
+	mu       sync.RWMutex
+	names    map[string]string
+	models   map[string]map[string][]ModelOption
+	modelsAt map[string]time.Time
 }
 
 func NewMemoryMeta() *MemoryMeta {
-	return &MemoryMeta{names: map[string]string{}}
+	return &MemoryMeta{names: map[string]string{}, models: map[string]map[string][]ModelOption{}, modelsAt: map[string]time.Time{}}
+}
+
+func (m *MemoryMeta) SaveModelCache(_ context.Context, id string, models map[string][]ModelOption) error {
+	if len(models) == 0 {
+		return nil
+	}
+	copyModels := make(map[string][]ModelOption, len(models))
+	for provider, list := range models {
+		copyModels[provider] = append([]ModelOption(nil), list...)
+	}
+	m.mu.Lock()
+	m.models[id] = copyModels
+	m.modelsAt[id] = time.Now().UTC()
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *MemoryMeta) LoadModelCache(_ context.Context, id string) (map[string][]ModelOption, time.Time, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	models := m.models[id]
+	if len(models) == 0 {
+		return nil, m.modelsAt[id], nil
+	}
+	copyModels := make(map[string][]ModelOption, len(models))
+	for provider, list := range models {
+		copyModels[provider] = append([]ModelOption(nil), list...)
+	}
+	return copyModels, m.modelsAt[id], nil
+}
+
+func (m *MemoryMeta) ModelCacheUpdatedAt(_ context.Context, id string) (time.Time, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.modelsAt[id], nil
 }
 
 func (m *MemoryMeta) Upsert(_ context.Context, id, name string) error {
@@ -222,5 +316,7 @@ func (m *MemoryMeta) Delete(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.names, id)
+	delete(m.models, id)
+	delete(m.modelsAt, id)
 	return nil
 }

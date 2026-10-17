@@ -296,6 +296,40 @@ func (s *appServerSession) read(out io.Reader) {
 }
 
 func (s *appServerSession) onNotify(msg rpcMsg) {
+	// 转发面向用户的回复增量，并把工具阶段压缩成不含参数/输出的状态摘要。
+	if msg.Method == "item/agentMessage/delta" || msg.Method == "item/agent_message/delta" {
+		var p struct {
+			Delta string `json:"delta"`
+			Text  string `json:"text"`
+		}
+		if json.Unmarshal(msg.Params, &p) == nil {
+			text := p.Delta
+			if text == "" {
+				text = p.Text
+			}
+			if text != "" {
+				select {
+				case s.events <- acp.Event{Type: "assistant_delta", Payload: []byte(text)}:
+				default:
+				}
+			}
+		}
+	}
+	if msg.Method == "item/started" || msg.Method == "item/completed" {
+		var p struct {
+			Item struct {
+				Type string `json:"type"`
+			} `json:"item"`
+		}
+		if json.Unmarshal(msg.Params, &p) == nil {
+			if text := codexActivity(p.Item.Type, msg.Method == "item/started"); text != "" {
+				select {
+				case s.events <- acp.Event{Type: "agent_activity", Payload: []byte(text)}:
+				default:
+				}
+			}
+		}
+	}
 	switch msg.Method {
 	case "item/completed":
 		var p struct {
@@ -379,6 +413,28 @@ func (s *appServerSession) onNotify(msg rpcMsg) {
 		}
 		s.mu.Unlock()
 	}
+}
+
+func codexActivity(itemType string, started bool) string {
+	var label string
+	switch itemType {
+	case "commandExecution":
+		label = "终端命令"
+	case "fileChange":
+		label = "文件修改"
+	case "mcpToolCall":
+		label = "工具调用"
+	case "webSearch":
+		label = "网页搜索"
+	case "imageGeneration":
+		label = "图像生成"
+	default:
+		return ""
+	}
+	if started {
+		return "正在进行" + label
+	}
+	return label + "已完成"
 }
 
 // applyThreadTokenUsage 读取本回合用量。Codex app-server v2 放在 tokenUsage.last，旧事件则是顶层字段。

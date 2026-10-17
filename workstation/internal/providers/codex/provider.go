@@ -185,6 +185,7 @@ type agentSession struct {
 }
 
 func (a *agentSession) Start(ctx context.Context) error { return a.acp.Start(ctx) }
+func (a *agentSession) Events() <-chan acp.Event        { return a.acp.Events() }
 func (a *agentSession) Send(ctx context.Context, input []byte) (string, error) {
 	a.p.mu.Lock()
 	a.p.state = StateBusy

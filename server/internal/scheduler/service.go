@@ -240,6 +240,25 @@ func (s *Service) Release(wsID string) {
 	}
 }
 
+// CancelJob 取消 Job，并在已分配工作站时下发 STOP_JOB。
+func (s *Service) CancelJob(ctx context.Context, jobID, actorID, ip string) (*job.Job, error) {
+	j, err := s.Jobs.Cancel(ctx, jobID, actorID, ip)
+	if err != nil {
+		return nil, err
+	}
+	if j.WorkstationID != "" {
+		payload, _ := json.Marshal(map[string]string{"reason": "user_cancel"})
+		if s.Pusher != nil {
+			if _, pushErr := s.Pusher.PushCommand(j.WorkstationID, aiev1.CommandType_COMMAND_TYPE_STOP_JOB,
+				j.EmployeeID, j.ID, string(payload)); pushErr != nil {
+				fmt.Printf("[Scheduler] STOP_JOB 入队失败 (job=%s, ws=%s): %v\n", j.ID, j.WorkstationID, pushErr)
+			}
+		}
+		s.Release(j.WorkstationID)
+	}
+	return j, nil
+}
+
 // Tick 扫描 CREATED/QUEUED Job 尝试调度，并扫描超时卡死在 STARTING 的 Job。
 func (s *Service) Tick(ctx context.Context) (scheduled int) {
 	list, err := s.Jobs.List(ctx)

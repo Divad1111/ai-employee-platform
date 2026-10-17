@@ -507,7 +507,7 @@ export function EmployeeDetailPage() {
         <div className="panel-header">
           <div>
             <h2>核心配置与资源绑定</h2>
-            <p>先选工作站和驱动引擎。打开模型列表时会向该工作站要一份最新模型</p>
+            <p>模型列表优先使用服务端缓存；缓存为空时自动同步，也可以手动刷新</p>
           </div>
         </div>
         <form className="inline-form" onSubmit={onSaveBindings}>
@@ -553,7 +553,19 @@ export function EmployeeDetailPage() {
             />
           </label>
           <label style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.82rem', fontWeight: 600 }}>
-            模型 (Model)
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
+              <span>模型 (Model)</span>
+              <button
+                type="button"
+                className="btn-ghost btn-sm"
+                style={{ padding: '0.1rem 0.4rem', fontSize: '0.72rem', height: 'auto' }}
+                onClick={() => void refreshModelsFromWorkstation()}
+                disabled={!wsId || !provider || modelsLoading}
+                title="从当前工作站重新同步模型列表"
+              >
+                {modelsLoading ? '刷新中…' : '刷新模型列表'}
+              </button>
+            </div>
             <SearchableSelect
               value={model}
               onChange={setModel}
@@ -566,8 +578,13 @@ export function EmployeeDetailPage() {
                     : '选择模型或输入自定义模型名称…'
               }
               allowCustom
-              disabled={!provider || modelsLoading}
-              onOpen={() => void refreshModelsFromWorkstation()}
+              disabled={!provider}
+              onOpen={() => {
+                const ws = workstations.find((w) => w.id === wsId)
+                if (!ws?.models?.[provider]?.length && !modelsLoading) {
+                  void refreshModelsFromWorkstation()
+                }
+              }}
               style={{ minWidth: 280 }}
             />
           </label>

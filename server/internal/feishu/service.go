@@ -78,6 +78,39 @@ type SendResult struct {
 	SentAt    time.Time `json:"sent_at"`
 }
 
+// TaskConversationStart 是由飞书新消息创建的一轮任务会话。
+type TaskConversationStart struct {
+	JobID, EmployeeID, EmployeeName string
+	OwnerUserID, OwnerOpenID        string
+	ChatID, Prompt                  string
+}
+
+// TaskConversationFollowUp 描述用户从任务卡片提交的后续轮次。
+type TaskConversationFollowUp struct {
+	ConversationID, ParentJobID     string
+	EmployeeID, OwnerUserID         string
+	OwnerOpenID, ChatID             string
+	Prompt, Context, IdempotencyKey string
+}
+
+// TaskConversationStarter 持久化一轮对话并绑定飞书卡片。
+type TaskConversationStarter interface {
+	Start(ctx context.Context, in TaskConversationStart) (conversationID string, err error)
+	AttachTurn(ctx context.Context, conversationID, jobID, prompt string) error
+	ManagesJob(ctx context.Context, jobID string) bool
+}
+
+// TaskConversationHandler 处理飞书任务会话卡片交互。
+type TaskConversationHandler interface {
+	HandleCardAction(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error)
+	ManagesJob(ctx context.Context, jobID string) bool
+}
+
+// TaskFollowUpCreator 在任务会话中创建后续 Job。
+type TaskFollowUpCreator interface {
+	CreateFollowUp(ctx context.Context, in TaskConversationFollowUp) (jobID string, err error)
+}
+
 // StatusResult 飞书集成整体运行状态
 type StatusResult struct {
 	Configured     bool      `json:"configured"`
@@ -132,8 +165,9 @@ type Service struct {
 	cachedStatus    *StatusResult
 	lastStatusCheck time.Time
 
-	userNameCache sync.Map // open_id (string) -> user_name (string)
-	Inquiry       InquiryHandler
+	userNameCache     sync.Map // open_id (string) -> user_name (string)
+	Inquiry           InquiryHandler
+	TaskConversations TaskConversationHandler
 }
 
 // InquiryHandler 外部决策请示交互门面
@@ -147,6 +181,44 @@ func (s *Service) SetInquiryHandler(h InquiryHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Inquiry = h
+}
+
+// SetTaskConversationHandler 设置任务会话卡片的停止/续聊处理器。
+func (s *Service) SetTaskConversationHandler(h TaskConversationHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.TaskConversations = h
+}
+
+// PatchMessageCard 更新机器人之前发送的交互式卡片。
+func (s *Service) PatchMessageCard(ctx context.Context, messageID, content string) error {
+	s.mu.RLock()
+	client := s.larkClient
+	cfg := s.cfg
+	s.mu.RUnlock()
+	if messageID == "" || content == "" {
+		return errors.New("message_id 和卡片内容不能为空")
+	}
+	if cfg.AppID == "" || cfg.AppSecretRef == "" || !cfg.Enabled {
+		return errors.New("飞书应用未配置或未启用")
+	}
+	if client == nil {
+		secretVal, err := s.GetAppSecret()
+		if err != nil {
+			return fmt.Errorf("读取 App Secret 失败: %w", err)
+		}
+		client = lark.NewClient(cfg.AppID, secretVal, lark.WithLogLevel(larkcore.LogLevelInfo))
+	}
+	req := larkim.NewPatchMessageReqBuilder().MessageId(messageID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().Content(content).Build()).Build()
+	resp, err := client.Im.Message.Patch(ctx, req)
+	if err != nil {
+		return fmt.Errorf("更新飞书卡片失败: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("飞书卡片更新失败 [%d]: %s", resp.Code, resp.Msg)
+	}
+	return nil
 }
 
 // NewService 创建飞书集成服务
@@ -421,7 +493,14 @@ func (s *Service) rebuildLarkLocked() {
 		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 			s.mu.RLock()
 			inq := s.Inquiry
+			taskConversations := s.TaskConversations
 			s.mu.RUnlock()
+			if taskConversations != nil {
+				response, err := taskConversations.HandleCardAction(ctx, event)
+				if response != nil || err != nil {
+					return response, err
+				}
+			}
 			if inq != nil {
 				return inq.HandleCardAction(ctx, event)
 			}
@@ -1271,6 +1350,12 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 			_ = s.Sender.Send(ctx, Reply{ChatID: ev.ChatID, Content: card.MustJSON()})
 		}
 		return "", false, err
+	}
+	s.mu.RLock()
+	taskConversations := s.TaskConversations
+	s.mu.RUnlock()
+	if taskConversations != nil && taskConversations.ManagesJob(ctx, jobID) {
+		return jobID, false, nil
 	}
 
 	// 任务创建成功即时回复应答
