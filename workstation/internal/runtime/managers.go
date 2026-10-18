@@ -4,10 +4,14 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/ai-employee-platform/workstation/internal/acp"
@@ -56,13 +60,14 @@ type Workspace struct {
 
 // Session 本地会话。
 type Session struct {
-	ID          string
-	EmployeeID  string
-	WorkspaceID string
-	Provider    string
-	Model       string
-	Status      string
-	PID         int
+	ID             string
+	EmployeeID     string
+	WorkspaceID    string
+	Provider       string
+	Model          string
+	MCPFingerprint string
+	Status         string
+	PID            int
 }
 
 // Job 本地任务。
@@ -199,7 +204,7 @@ func (m *Managers) StartSessionWithMCP(ctx context.Context, sessID, employeeID, 
 	}
 	s := &Session{
 		ID: sessID, EmployeeID: employeeID, WorkspaceID: workspaceID,
-		Provider: provider, Model: model, Status: SessStarting,
+		Provider: provider, Model: model, MCPFingerprint: FingerprintMCPServers(mcpServers), Status: SessStarting,
 	}
 	m.sessions[sessID] = s
 	m.mu.Unlock()
@@ -224,6 +229,44 @@ func (m *Managers) StartSessionWithMCP(ctx context.Context, sessID, employeeID, 
 	m.mu.Unlock()
 	m.emit("session.status", map[string]string{"session_id": sessID, "status": SessReady})
 	return s, nil
+}
+
+// FingerprintMCPServers identifies the effective server configuration passed
+// to ACP. Only the digest is retained; the built-in employee-scoped token is
+// normalized because it may be reissued after a control-plane restart.
+func FingerprintMCPServers(servers []any) string {
+	if len(servers) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(servers)
+	if err != nil {
+		return ""
+	}
+	var normalized []map[string]any
+	if json.Unmarshal(raw, &normalized) == nil {
+		for _, server := range normalized {
+			name, _ := server["name"].(string)
+			if !strings.EqualFold(name, "workflow-mcp") {
+				continue
+			}
+			headers, _ := server["headers"].(map[string]any)
+			if headers == nil {
+				headers = map[string]any{}
+				server["headers"] = headers
+			}
+			for key := range headers {
+				if strings.EqualFold(key, "authorization") {
+					headers[key] = "<employee-session-token>"
+				}
+			}
+			headers["Authorization"] = "<employee-session-token>"
+		}
+		if normalizedBytes, marshalErr := json.Marshal(normalized); marshalErr == nil {
+			raw = normalizedBytes
+		}
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }
 
 // FindActiveSession 查找员工当前活跃 Session。

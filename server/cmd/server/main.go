@@ -272,6 +272,9 @@ func main() {
 		taskConversationStore = taskconversation.NewPostgresStore(pgSQL)
 	}
 	taskConversationSvc := taskconversation.NewService(taskConversationStore, feishuSvc, jobSvc, sched)
+	taskConversationSvc.Employees = empSvc
+	taskConversationSvc.Workstations = wsNodeSvc
+	sched.SetTaskQueue(taskConversationSvc)
 	feishuSvc.SetTaskConversationHandler(taskConversationSvc)
 	notifySvc.SetConversationLookup(taskConversationSvc.ManagesJob)
 	notifySvc.SetConversationStatusUpdater(taskConversationSvc.OnJobStatus)
@@ -362,6 +365,8 @@ func main() {
 
 		case aiev1.EventType_EVENT_TYPE_JOB_STARTED:
 			if jobID != "" {
+				sessionGeneration, _ := strconv.ParseInt(payload["session_generation"], 10, 64)
+				taskConversationSvc.OnAgentSession(ctx, jobID, payload["provider"], payload["model"], sessionGeneration)
 				if sessID != "" {
 					_ = jobSvc.BindSession(ctx, jobID, sessID)
 					_, _ = sessSvc.ReportFromWorkstation(ctx, sessID, empID, wsID, payload["workspace_id"], sessionProvider, session.StatusBusy)
@@ -482,7 +487,6 @@ func main() {
 			return u.Roles
 		},
 	}
-	taskConversationSvc.SetFollowUpCreator(bridge)
 	bridge.Wire()
 
 	mcpURL := getenv("AIE_MCP_PUBLIC_URL", "http://127.0.0.1"+cfg.HTTPAddr+"/mcp")

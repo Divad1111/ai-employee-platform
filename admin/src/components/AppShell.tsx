@@ -89,8 +89,7 @@ const navSections: NavSection[] = [
   {
     title: '安全治理与系统',
     items: [
-      // 策略引擎 / 系统配置属于运维写操作，需 system.write（VIEWER 仅有 system.read 不应进入）
-      { to: '/permissions', label: '权限策略引擎', icon: IconShield, perm: 'system.write', allScope: true },
+      // 策略引擎管理页面暂时屏蔽；后端策略与审批决策仍在使用。
       { to: '/secrets', label: '机密凭证保管箱', icon: IconKey, perm: 'secret.read' },
       { to: '/backups', label: '备份与容灾恢复', icon: IconServer, perm: 'backup.view', allScope: true },
       { to: '/audit', label: '操作审计日志', icon: IconFileText, perm: 'audit.read' },

@@ -12,7 +12,7 @@ type PostgresStore struct{ db *sql.DB }
 
 func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
 
-func (s *PostgresStore) Create(ctx context.Context, c *Conversation) error {
+func (s *PostgresStore) CreateTask(ctx context.Context, c *Conversation, prompt string, generation int64) error {
 	now := time.Now().UTC()
 	if c.CreatedAt.IsZero() {
 		c.CreatedAt = now
@@ -20,22 +20,53 @@ func (s *PostgresStore) Create(ctx context.Context, c *Conversation) error {
 	if c.UpdatedAt.IsZero() {
 		c.UpdatedAt = c.CreatedAt
 	}
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO task_conversations
-		(id, employee_id, employee_name, owner_user_id, owner_open_id, chat_id, current_job_id, card_message_id, status, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11)
+		(id, employee_id, employee_name, owner_user_id, owner_open_id, chat_id, current_job_id, card_message_id, status, active_provider, active_model, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (id) DO NOTHING`, c.ID, c.EmployeeID, c.EmployeeName, c.OwnerUserID,
-		c.OwnerOpenID, c.ChatID, c.CurrentJobID, c.CardMessageID, c.Status, c.CreatedAt, c.UpdatedAt)
-	return err
+		c.OwnerOpenID, c.ChatID, c.CurrentJobID, c.CardMessageID, c.Status, c.Provider, c.Model, c.CreatedAt, c.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO task_conversation_turns
+		(conversation_id,job_id,turn_no,status,session_generation,created_at)
+		VALUES ($1,$2,1,'CREATED',$3,$4) ON CONFLICT(job_id) DO NOTHING`, c.ID, c.CurrentJobID, generation, now)
+	if err != nil {
+		return err
+	}
+	var existingConversationID string
+	if err := tx.QueryRowContext(ctx, `SELECT conversation_id FROM task_conversation_turns WHERE job_id=$1`, c.CurrentJobID).Scan(&existingConversationID); err != nil {
+		return err
+	}
+	if existingConversationID != c.ID {
+		return ErrExists
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO task_conversation_messages
+		(conversation_id,job_id,role,content,status,created_at)
+		VALUES ($1,$2,'user',$3,'DONE',$4),($1,$2,'assistant','','RUNNING',$4)
+		ON CONFLICT(job_id,role) DO NOTHING`, c.ID, c.CurrentJobID, prompt, now)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
 }
 
 const conversationCols = `id, employee_id, employee_name, owner_user_id, owner_open_id, chat_id,
-	COALESCE(current_job_id,''), COALESCE(card_message_id,''), status, created_at, updated_at`
+	COALESCE(current_job_id,''), COALESCE(card_message_id,''), status, active_provider, active_model, created_at, updated_at`
 
 func scanConversation(row interface{ Scan(...any) error }) (*Conversation, error) {
 	var c Conversation
 	err := row.Scan(&c.ID, &c.EmployeeID, &c.EmployeeName, &c.OwnerUserID, &c.OwnerOpenID, &c.ChatID,
-		&c.CurrentJobID, &c.CardMessageID, &c.Status, &c.CreatedAt, &c.UpdatedAt)
+		&c.CurrentJobID, &c.CardMessageID, &c.Status, &c.Provider, &c.Model, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -49,16 +80,23 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (*Conversation, erro
 func (s *PostgresStore) FindByJob(ctx context.Context, jobID string) (*Conversation, error) {
 	return scanConversation(s.db.QueryRowContext(ctx, `
 		SELECT c.id,c.employee_id,c.employee_name,c.owner_user_id,c.owner_open_id,c.chat_id,
-			COALESCE(c.current_job_id,''),COALESCE(c.card_message_id,''),c.status,c.created_at,c.updated_at
+			COALESCE(c.current_job_id,''),COALESCE(c.card_message_id,''),c.status,c.active_provider,c.active_model,c.created_at,c.updated_at
 		FROM task_conversations c
-		JOIN task_conversation_turns t ON t.conversation_id=c.id WHERE t.job_id=$1`, jobID))
+		JOIN task_conversation_turns t ON t.conversation_id=c.id WHERE t.job_id=$1 AND c.merged_into_id IS NULL`, jobID))
 }
 
 func (s *PostgresStore) ListIDs(ctx context.Context, limit int) ([]string, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
+	query := `SELECT id FROM task_conversations WHERE merged_into_id IS NULL ORDER BY updated_at DESC`
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		if limit > 500 {
+			limit = 500
+		}
+		rows, err = s.db.QueryContext(ctx, query+` LIMIT $1`, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, query)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM task_conversations ORDER BY updated_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -74,40 +112,92 @@ func (s *PostgresStore) ListIDs(ctx context.Context, limit int) ([]string, error
 	return ids, rows.Err()
 }
 
-func (s *PostgresStore) AttachTurn(ctx context.Context, conversationID, jobID, prompt string) error {
+func (s *PostgresStore) ListEmployeeIDs(ctx context.Context, employeeID string, limit int) ([]string, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM task_conversations
+		WHERE employee_id=$1 AND merged_into_id IS NULL ORDER BY updated_at DESC LIMIT $2`, employeeID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) SessionJobIDs(ctx context.Context, employeeID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT t.job_id FROM task_conversation_turns t
+		JOIN task_conversations c ON c.id=t.conversation_id
+		WHERE c.employee_id=$1 AND c.merged_into_id IS NULL ORDER BY t.created_at,t.job_id`, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var jobID string
+		if err := rows.Scan(&jobID); err != nil {
+			return nil, err
+		}
+		out = append(out, jobID)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) SessionMessages(ctx context.Context, employeeID string, generation int64) ([]Message, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT m.conversation_id,m.job_id,t.turn_no,t.session_generation,m.role,m.content,m.status,m.created_at
+		FROM task_conversation_messages m
+		JOIN task_conversation_turns t ON t.job_id=m.job_id
+		JOIN task_conversations c ON c.id=t.conversation_id
+		WHERE c.employee_id=$1 AND c.merged_into_id IS NULL AND t.session_generation=$2
+		ORDER BY t.created_at, CASE m.role WHEN 'user' THEN 0 ELSE 1 END,m.id`, employeeID, generation)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ConversationID, &m.JobID, &m.TurnNo, &m.SessionGeneration, &m.Role, &m.Content, &m.Status, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) SetRuntime(ctx context.Context, jobID, provider, model string, generation int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO task_conversation_turns(conversation_id,job_id,turn_no,status)
-		SELECT $1,$2,COALESCE(MAX(turn_no),0)+1,'CREATED'
-		FROM task_conversation_turns WHERE conversation_id=$1
-		ON CONFLICT(job_id) DO NOTHING`, conversationID, jobID)
+	res, err := tx.ExecContext(ctx, `UPDATE task_conversation_turns SET session_generation=$2 WHERE job_id=$1`, jobID, generation)
 	if err != nil {
 		return err
 	}
-	var turnNo int
-	if err := tx.QueryRowContext(ctx, `SELECT turn_no FROM task_conversation_turns WHERE job_id=$1`, jobID).Scan(&turnNo); err != nil {
-		return err
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
 	}
-	now := time.Now().UTC()
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO task_conversation_messages(conversation_id,job_id,role,content,status,created_at)
-		VALUES ($1,$2,'user',$3,'DONE',$4) ON CONFLICT(job_id,role) DO NOTHING`, conversationID, jobID, prompt, now)
+	res, err = tx.ExecContext(ctx, `UPDATE task_conversations c
+		SET active_provider=$2, active_model=$3, updated_at=NOW()
+		FROM task_conversation_turns t
+		WHERE t.job_id=$1 AND c.id=t.conversation_id AND c.merged_into_id IS NULL`, jobID, provider, model)
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO task_conversation_messages(conversation_id,job_id,role,content,status,created_at)
-		VALUES ($1,$2,'assistant','','RUNNING',$3) ON CONFLICT(job_id,role) DO NOTHING`, conversationID, jobID, now)
-	if err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `UPDATE task_conversations SET current_job_id=$2,status='CREATED',updated_at=$3 WHERE id=$1`, conversationID, jobID, now)
-	if err != nil {
-		return err
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
 	}
 	return tx.Commit()
 }
@@ -242,7 +332,7 @@ func (s *PostgresStore) SetAssistantFinal(ctx context.Context, jobID, content, s
 
 func (s *PostgresStore) Messages(ctx context.Context, conversationID string) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT m.conversation_id,m.job_id,t.turn_no,m.role,m.content,m.status,m.created_at
+		SELECT m.conversation_id,m.job_id,t.turn_no,t.session_generation,m.role,m.content,m.status,m.created_at
 		FROM task_conversation_messages m
 		JOIN task_conversation_turns t ON t.job_id=m.job_id
 		WHERE m.conversation_id=$1
@@ -254,7 +344,7 @@ func (s *PostgresStore) Messages(ctx context.Context, conversationID string) ([]
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ConversationID, &m.JobID, &m.TurnNo, &m.Role, &m.Content, &m.Status, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ConversationID, &m.JobID, &m.TurnNo, &m.SessionGeneration, &m.Role, &m.Content, &m.Status, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -264,7 +354,7 @@ func (s *PostgresStore) Messages(ctx context.Context, conversationID string) ([]
 
 func (s *PostgresStore) Activities(ctx context.Context, conversationID, jobID string, limit int) ([]Activity, error) {
 	if limit <= 0 || limit > 20 {
-		limit = 4
+		limit = 10
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT job_id,sequence,content,created_at FROM task_conversation_activities

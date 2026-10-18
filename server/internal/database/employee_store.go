@@ -15,18 +15,39 @@ type PostgresEmployeeStore struct {
 	db *DB
 }
 
+func (s *PostgresEmployeeStore) StartNewSessionGeneration(ctx context.Context, id string) (int64, error) {
+	var generation int64
+	err := s.db.SQL.QueryRowContext(ctx, `UPDATE employees
+		SET session_generation = session_generation + 1,
+		    session_context_reset_generation = session_generation + 1,
+		    updated_at = NOW()
+		WHERE id = $1 RETURNING session_generation`, id).Scan(&generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, employee.ErrNotFound
+	}
+	return generation, err
+}
+
+func (s *PostgresEmployeeStore) ConsumeSessionContextReset(ctx context.Context, id string, generation int64) error {
+	_, err := s.db.SQL.ExecContext(ctx, `UPDATE employees SET session_context_reset_generation=-1, updated_at=NOW()
+		WHERE id=$1 AND session_context_reset_generation=$2`, id, generation)
+	return err
+}
+
 func (s *PostgresEmployeeStore) Save(ctx context.Context, e *employee.Employee) error {
 	query := `
 		INSERT INTO employees (
 			id, name, description, role_summary, default_provider, default_model,
-			workstation_id, workspace_id, permission_profile, status, owner_user_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), $9, $10, NULLIF($11, '')::uuid, $12, $13)
+			session_generation, session_context_reset_generation, workstation_id, workspace_id, permission_profile, status, owner_user_id, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), NULLIF($10, ''), $11, $12, NULLIF($13, '')::uuid, $14, $15)
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
 			description = EXCLUDED.description,
 			role_summary = EXCLUDED.role_summary,
 			default_provider = EXCLUDED.default_provider,
 			default_model = EXCLUDED.default_model,
+			session_generation = EXCLUDED.session_generation,
+			session_context_reset_generation = EXCLUDED.session_context_reset_generation,
 			workstation_id = EXCLUDED.workstation_id,
 			workspace_id = EXCLUDED.workspace_id,
 			permission_profile = EXCLUDED.permission_profile,
@@ -40,8 +61,8 @@ func (s *PostgresEmployeeStore) Save(ctx context.Context, e *employee.Employee) 
 	}
 	e.UpdatedAt = now
 	_, err := s.db.SQL.ExecContext(ctx, query,
-		e.ID, e.Name, e.Description, e.RoleSummary, e.DefaultProvider, e.DefaultModel,
-		e.WorkstationID, e.WorkspaceID, e.PermissionProfile, e.Status, e.OwnerUserID, e.CreatedAt, e.UpdatedAt,
+		e.ID, e.Name, e.Description, e.RoleSummary, e.DefaultProvider, e.DefaultModel, e.SessionGeneration,
+		e.SessionContextResetGeneration, e.WorkstationID, e.WorkspaceID, e.PermissionProfile, e.Status, e.OwnerUserID, e.CreatedAt, e.UpdatedAt,
 	)
 	if err != nil {
 		// 兼容未迁移 owner_user_id
@@ -63,12 +84,12 @@ func (s *PostgresEmployeeStore) Save(ctx context.Context, e *employee.Employee) 
 
 func (s *PostgresEmployeeStore) Get(ctx context.Context, id string) (*employee.Employee, error) {
 	row := s.db.SQL.QueryRowContext(ctx, `
-		SELECT id, name, description, role_summary, default_provider, COALESCE(default_model, ''),
+		SELECT id, name, description, role_summary, default_provider, COALESCE(default_model, ''), COALESCE(session_generation, 0), COALESCE(session_context_reset_generation, -1),
 		       COALESCE(workstation_id, ''), COALESCE(workspace_id, ''),
 		       permission_profile, status, COALESCE(owner_user_id::text, ''), created_at, updated_at
 		FROM employees WHERE id = $1`, id)
 	var e employee.Employee
-	if err := row.Scan(&e.ID, &e.Name, &e.Description, &e.RoleSummary, &e.DefaultProvider, &e.DefaultModel,
+	if err := row.Scan(&e.ID, &e.Name, &e.Description, &e.RoleSummary, &e.DefaultProvider, &e.DefaultModel, &e.SessionGeneration, &e.SessionContextResetGeneration,
 		&e.WorkstationID, &e.WorkspaceID, &e.PermissionProfile, &e.Status, &e.OwnerUserID, &e.CreatedAt, &e.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, employee.ErrNotFound
@@ -92,7 +113,7 @@ func (s *PostgresEmployeeStore) Get(ctx context.Context, id string) (*employee.E
 
 func (s *PostgresEmployeeStore) List(ctx context.Context) ([]*employee.Employee, error) {
 	rows, err := s.db.SQL.QueryContext(ctx, `
-		SELECT id, name, description, role_summary, default_provider, COALESCE(default_model, ''),
+		SELECT id, name, description, role_summary, default_provider, COALESCE(default_model, ''), COALESCE(session_generation, 0), COALESCE(session_context_reset_generation, -1),
 		       COALESCE(workstation_id, ''), COALESCE(workspace_id, ''),
 		       permission_profile, status, COALESCE(owner_user_id::text, ''), created_at, updated_at
 		FROM employees ORDER BY created_at ASC`)
@@ -103,7 +124,7 @@ func (s *PostgresEmployeeStore) List(ctx context.Context) ([]*employee.Employee,
 	var list []*employee.Employee
 	for rows.Next() {
 		var e employee.Employee
-		if err := rows.Scan(&e.ID, &e.Name, &e.Description, &e.RoleSummary, &e.DefaultProvider, &e.DefaultModel,
+		if err := rows.Scan(&e.ID, &e.Name, &e.Description, &e.RoleSummary, &e.DefaultProvider, &e.DefaultModel, &e.SessionGeneration, &e.SessionContextResetGeneration,
 			&e.WorkstationID, &e.WorkspaceID, &e.PermissionProfile, &e.Status, &e.OwnerUserID, &e.CreatedAt, &e.UpdatedAt); err != nil {
 			return nil, err
 		}

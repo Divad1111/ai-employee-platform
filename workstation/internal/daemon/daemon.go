@@ -398,14 +398,19 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 	case aiev1.CommandType_COMMAND_TYPE_START_JOB:
 		jobID := cmd.GetJobId()
 		empID := cmd.GetEmployeeId()
+		fmt.Printf("[Daemon] 收到 START_JOB command=%s job=%s employee=%s seq=%d\n", cmd.GetCommandId(), jobID, empID, cmd.GetMeta().GetSequence())
 		if jobID == "" || empID == "" {
 			return nil
 		}
 		var payload struct {
-			Prompt        string `json:"prompt"`
-			WorkspaceID   string `json:"workspace_id"`
-			WorkspacePath string `json:"workspace_path"`
-			Model         string `json:"model"`
+			Prompt              string `json:"prompt"`
+			WorkspaceID         string `json:"workspace_id"`
+			WorkspacePath       string `json:"workspace_path"`
+			Model               string `json:"model"`
+			Provider            string `json:"provider"`
+			SessionGeneration   int64  `json:"session_generation"`
+			ConversationContext string `json:"conversation_context"`
+			ResetSessionContext bool   `json:"reset_session_context"`
 		}
 		if pJSON := cmd.GetPayloadJson(); pJSON != "" {
 			_ = json.Unmarshal([]byte(pJSON), &payload)
@@ -427,6 +432,9 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 
 		// 确保本地员工视图，驱动引擎来自中心下发的员工配置
 		provider := "cursor"
+		if payload.Provider != "" {
+			provider = payload.Provider
+		}
 		if startJob != nil && startJob.GetProvider() != "" {
 			provider = startJob.GetProvider()
 		}
@@ -467,14 +475,21 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 
 		// 会话复用或按需创建；MCP 变化时需重建
 		var sessID string
+		restoreContext := false
 		activeSess := d.Runtime.FindActiveSession(empID)
-		if activeSess != nil && len(mcpServers) == 0 && activeSess.Provider == provider && activeSess.Model == payload.Model {
+		targetSessionID := "ses-" + empID
+		if payload.SessionGeneration > 0 {
+			targetSessionID += "-" + strconv.FormatInt(payload.SessionGeneration, 10)
+		}
+		mcpFingerprint := runtime.FingerprintMCPServers(mcpServers)
+		if activeSess != nil && activeSess.ID == targetSessionID && activeSess.Provider == provider && activeSess.Model == payload.Model && activeSess.MCPFingerprint == mcpFingerprint {
 			sessID = activeSess.ID
 		} else {
+			restoreContext = true
 			if activeSess != nil {
 				_ = d.Runtime.StopSession(ctx, activeSess.ID)
 			}
-			sessID = "ses-" + empID
+			sessID = targetSessionID
 			_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_STARTED,
 				fmt.Sprintf(`{"status":"STARTING","provider":%q,"workspace_id":%q}`, provider, wsID)))
 			startCtx, startCancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -492,7 +507,7 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 		}
 
 		_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_STARTED,
-			fmt.Sprintf(`{"status":"running","session_id":%q,"provider":%q}`, sessID, provider)))
+			fmt.Sprintf(`{"status":"running","session_id":%q,"provider":%q,"model":%q,"session_generation":%d}`, sessID, provider, payload.Model, payload.SessionGeneration)))
 
 		go func() {
 			jobCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -506,8 +521,13 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 				cancel()
 			}()
 			output := &outputBatcher{daemon: d, jobID: jobID, session: sessID, employee: empID}
+			effectivePrompt := promptWithMarkdownDefault(payload.Prompt)
+			if restoreContext && !payload.ResetSessionContext && payload.ConversationContext != "" {
+				effectivePrompt = "【此前同一会话的消息，仅用于理解背景；不要重复执行历史任务】\n" + payload.ConversationContext +
+					"\n【本轮用户任务】\n" + effectivePrompt
+			}
 			localJob, reply, rerr := d.Runtime.RunJobWithEvents(jobCtx, jobID, empID, sessID,
-				promptWithMarkdownDefault(payload.Prompt), output.Add, output.AddActivity)
+				effectivePrompt, output.Add, output.AddActivity)
 			output.Flush()
 			usage := map[string]string{
 				"session_id":    sessID,

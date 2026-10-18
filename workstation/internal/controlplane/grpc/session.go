@@ -2,6 +2,7 @@ package grpcclient
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -105,6 +106,23 @@ func (s *Session) Run(ctx context.Context) error {
 }
 
 func (s *Session) runOnce(ctx context.Context) error {
+	// The command sequence is kept by the control plane in memory. After a
+	// control-plane restart it starts from zero, while this long-lived worker
+	// still has the previous sequence in its Journal/Validator. Probe the
+	// server before opening the stream so sequence reuse (especially old=1,
+	// new=1) does not make the first command look like a duplicate/old command.
+	if ping, err := s.Client.Ping(ctx, fmt.Sprintf("resume-%d", time.Now().UnixNano())); err == nil {
+		serverSeq := ping.GetCurrentCommandSequence()
+		localSeq := s.Validator.LastSequence()
+		if serverSeq < localSeq {
+			fmt.Printf("[Workstation] 检测到 Control Plane 命令序号重置: local=%d server=%d，恢复游标\n", localSeq, serverSeq)
+			s.Validator.SetLastSequence(serverSeq)
+		}
+	} else {
+		// Ping 只用于恢复游标。兼容只支持 Connect 的旧服务端，继续尝试建立流。
+		fmt.Printf("[Workstation] 查询 Control Plane 命令序号失败，将继续连接: %v\n", err)
+	}
+
 	stream, err := s.Client.worker.Connect(ctx)
 	if err != nil {
 		return err
@@ -149,13 +167,27 @@ func (s *Session) runOnce(ctx context.Context) error {
 		}
 		if cmd := msg.GetCommand(); cmd != nil {
 			ackMsg, should, err := s.Handler.Process(cmd)
-			if err != nil || !should {
+			if err != nil {
+				fmt.Printf("[Workstation] 命令处理失败 command=%s job=%s seq=%d: %v\n", cmd.GetCommandId(), cmd.GetJobId(), cmd.GetMeta().GetSequence(), err)
 				continue // COMMIT 失败不 ACK
 			}
-			_ = s.send(ctx, &aiev1.WorkerToServer{Body: &aiev1.WorkerToServer_CommandAck{CommandAck: ackMsg}})
+			if !should {
+				continue // COMMIT 失败不 ACK
+			}
+			if err := s.send(ctx, &aiev1.WorkerToServer{Body: &aiev1.WorkerToServer_CommandAck{CommandAck: ackMsg}}); err != nil {
+				fmt.Printf("[Workstation] 发送命令 ACK 失败 command=%s job=%s seq=%d: %v\n", cmd.GetCommandId(), cmd.GetJobId(), cmd.GetMeta().GetSequence(), err)
+				return err
+			}
+			if !ackMsg.GetAccepted() {
+				fmt.Printf("[Workstation] 拒绝命令 command=%s type=%s job=%s seq=%d: %s\n", cmd.GetCommandId(), cmd.GetType(), cmd.GetJobId(), cmd.GetMeta().GetSequence(), ackMsg.GetErrorMessage())
+			} else {
+				fmt.Printf("[Workstation] 已确认命令 command=%s type=%s job=%s seq=%d\n", cmd.GetCommandId(), cmd.GetType(), cmd.GetJobId(), cmd.GetMeta().GetSequence())
+			}
 			if s.OnCommand != nil && ackMsg.Accepted {
 				go func(c *aiev1.Command) {
-					_ = s.OnCommand(ctx, c)
+					if err := s.OnCommand(ctx, c); err != nil {
+						fmt.Printf("[Workstation] 命令执行处理失败 command=%s type=%s job=%s: %v\n", c.GetCommandId(), c.GetType(), c.GetJobId(), err)
+					}
 				}(cmd)
 			}
 		}

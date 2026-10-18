@@ -31,7 +31,7 @@ func (s *Service) SetConversationStatusUpdater(update func(context.Context, stri
 	s.mu.Unlock()
 }
 
-// SetConversationLookup 让任务卡片复用其会话卡片作为终态回执，避免额外发送一张结果卡。
+// SetConversationLookup 让任务卡片作为终态回执，避免发送重复结果消息。
 func (s *Service) SetConversationLookup(lookup func(context.Context, string) bool) {
 	s.mu.Lock()
 	s.conversationManaged = lookup

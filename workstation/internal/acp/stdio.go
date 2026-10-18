@@ -63,6 +63,13 @@ type Inquiry struct {
 
 // DefaultOptionID 获取默认选项ID
 func (inq Inquiry) DefaultOptionID() string {
+	// Permission prompts fail closed when the user does not answer.
+	for _, option := range inq.Options {
+		id := strings.ToLower(strings.TrimSpace(option.OptionID))
+		if id == "deny" || id == "decline" || id == "cancel" || id == "reject" || strings.Contains(id, "deny") || strings.Contains(id, "reject") {
+			return option.OptionID
+		}
+	}
 	if len(inq.Options) > 0 && inq.Options[0].OptionID != "" {
 		return inq.Options[0].OptionID
 	}

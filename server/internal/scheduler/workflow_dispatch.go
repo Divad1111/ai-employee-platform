@@ -200,18 +200,52 @@ func (s *Service) buildStartJobPayload(ctx context.Context, employeeID, prompt, 
 
 	// 若绑定了 workflow-mcp（或兜底）：下发系统内置 workflow-mcp，携带员工动态 Token
 	if hasWorkflowMCP && s.MCPPublicURL != "" && s.MCPAuth != nil {
-		res, err := s.MCPAuth.Issue(ctx, mcpauth.SubjectEmployee, employeeID,
-			mcpauth.ScopeRead, "job-runtime", "scheduler", 24*time.Hour)
-		if err == nil && res != nil {
+		secret, err := s.sessionMCPSecret(ctx, employeeID)
+		if err == nil && secret != "" {
 			start.McpServers = append(start.McpServers, &aiev1.MCPServerSpec{
 				Name: "workflow-mcp",
 				Type: "http",
 				Url:  s.MCPPublicURL,
 				Headers: map[string]string{
-					"Authorization": "Bearer " + res.Secret,
+					"Authorization": "Bearer " + secret,
 				},
 			})
 		}
 	}
 	return start, nil
+}
+
+// sessionMCPSecret keeps MCP configuration stable for one employee session.
+// ACP sessions receive MCP servers only at session creation, so issuing a new
+// credential for every job would otherwise discard the agent context.
+func (s *Service) sessionMCPSecret(ctx context.Context, employeeID string) (string, error) {
+	if s.MCPAuth == nil {
+		return "", fmt.Errorf("MCP token service is unavailable")
+	}
+	generation := int64(0)
+	if s.Employees != nil {
+		if e, err := s.Employees.Get(ctx, employeeID); err == nil && e != nil {
+			generation = e.SessionGeneration
+		}
+	}
+	key := fmt.Sprintf("%s:%d", employeeID, generation)
+	s.mcpTokenMu.Lock()
+	defer s.mcpTokenMu.Unlock()
+	if cached, ok := s.mcpTokens[key]; ok && (cached.expiresAt.IsZero() || time.Until(cached.expiresAt) > time.Hour) {
+		return cached.secret, nil
+	}
+	// The read-only token is deliberately non-expiring. ACP accepts MCP headers
+	// only when the session starts; session generation changes rotate it, and
+	// the token remains explicitly revocable through MCP token management.
+	issued, err := s.MCPAuth.Issue(ctx, mcpauth.SubjectEmployee, employeeID,
+		mcpauth.ScopeRead, "employee-session", "scheduler", 0)
+	if err != nil || issued == nil {
+		return "", err
+	}
+	var expiresAt time.Time
+	if issued.Token != nil && issued.Token.ExpiresAt != nil {
+		expiresAt = *issued.Token.ExpiresAt
+	}
+	s.mcpTokens[key] = sessionMCPToken{secret: issued.Secret, expiresAt: expiresAt}
+	return issued.Secret, nil
 }

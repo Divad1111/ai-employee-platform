@@ -3,14 +3,17 @@ package taskconversation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/feishu"
 	"github.com/ai-employee-platform/server/internal/idgen"
 	"github.com/ai-employee-platform/server/internal/job"
+	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 )
 
@@ -19,13 +22,14 @@ type JobCanceller interface {
 	CancelJob(ctx context.Context, jobID, actorID, ip string) (*job.Job, error)
 }
 
-// Service 协调任务消息历史、Job 状态和同一张飞书共享卡片。
+// Service 协调每个 Job 独立的飞书卡片，以及员工级 ACP 会话上下文。
 type Service struct {
-	Store    Store
-	Feishu   *feishu.Service
-	Jobs     *job.Service
-	Canceler JobCanceller
-	FollowUp feishu.TaskFollowUpCreator
+	Store        Store
+	Feishu       *feishu.Service
+	Jobs         *job.Service
+	Canceler     JobCanceller
+	Employees    *employee.Service
+	Workstations *workstation.Service
 
 	mu    sync.Mutex
 	dirty map[string]time.Time
@@ -35,43 +39,32 @@ func NewService(store Store, fs *feishu.Service, jobs *job.Service, canceler Job
 	return &Service{Store: store, Feishu: fs, Jobs: jobs, Canceler: canceler, dirty: make(map[string]time.Time)}
 }
 
-func (s *Service) SetFollowUpCreator(creator feishu.TaskFollowUpCreator) { s.FollowUp = creator }
-
-// Start 创建一张用户任务会话卡片并落下首轮用户消息。
+// Start 为每个 Job 建立独立飞书卡片；员工的 ACP 会话由 session generation 复用。
 func (s *Service) Start(ctx context.Context, in feishu.TaskConversationStart) (string, error) {
 	if s.Store == nil || in.JobID == "" || in.EmployeeID == "" {
 		return "", fmt.Errorf("任务会话参数不完整")
 	}
-	// 飞书事件可能重投；同一个 Job 只能对应一张任务会话卡片。
+	// 飞书事件可能重投；同一个 Job 只能对应一张卡片。
 	if existing, err := s.Store.FindByJob(ctx, in.JobID); err == nil {
 		s.markDirty(existing.ID, 0)
 		return existing.ID, nil
 	}
-	id := idgen.New("TC")
 	now := time.Now().UTC()
 	c := &Conversation{
-		ID: id, EmployeeID: in.EmployeeID, EmployeeName: in.EmployeeName,
+		ID: idgen.New("TC"), EmployeeID: in.EmployeeID, EmployeeName: in.EmployeeName,
 		OwnerUserID: in.OwnerUserID, OwnerOpenID: in.OwnerOpenID,
 		ChatID: in.ChatID, CurrentJobID: in.JobID, Status: job.StatusCreated,
 		CreatedAt: now, UpdatedAt: now,
 	}
-	if err := s.Store.Create(ctx, c); err != nil {
+	if err := s.Store.CreateTask(ctx, c, in.Prompt, in.SessionGeneration); err != nil {
+		if existing, findErr := s.Store.FindByJob(ctx, in.JobID); findErr == nil {
+			s.markDirty(existing.ID, 0)
+			return existing.ID, nil
+		}
 		return "", err
 	}
-	if err := s.Store.AttachTurn(ctx, id, in.JobID, in.Prompt); err != nil {
-		return "", err
-	}
-	s.markDirty(id, 0)
-	return id, nil
-}
-
-// AttachTurn 把后续 Job 的输入追加到同一任务会话。
-func (s *Service) AttachTurn(ctx context.Context, conversationID, jobID, prompt string) error {
-	if err := s.Store.AttachTurn(ctx, conversationID, jobID, prompt); err != nil {
-		return err
-	}
-	s.markDirty(conversationID, 0)
-	return nil
+	s.markDirty(c.ID, 0)
+	return c.ID, nil
 }
 
 func (s *Service) ManagesJob(ctx context.Context, jobID string) bool {
@@ -80,6 +73,212 @@ func (s *Service) ManagesJob(ctx context.Context, jobID string) bool {
 	}
 	_, err := s.Store.FindByJob(ctx, jobID)
 	return err == nil
+}
+
+// CanScheduleJob serializes queued turns so one ACP session is never used by
+// two jobs at once. Unmanaged jobs pass through unchanged.
+func (s *Service) CanScheduleJob(ctx context.Context, jobID string) (bool, error) {
+	c, err := s.Store.FindByJob(ctx, jobID)
+	if errors.Is(err, ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	ids, err := s.Store.SessionJobIDs(ctx, c.EmployeeID)
+	if err != nil {
+		return false, err
+	}
+	for _, id := range ids {
+		turn, err := s.Jobs.Get(ctx, id)
+		if err != nil {
+			continue
+		}
+		if isTerminal(turn.Status) {
+			continue
+		}
+		return id == jobID, nil
+	}
+	return false, nil
+}
+
+// ConversationContext returns recent messages from the same explicit session
+// generation, for restoring ACP context after a workstation process restart.
+func (s *Service) ConversationContext(ctx context.Context, jobID string) (string, error) {
+	c, err := s.Store.FindByJob(ctx, jobID)
+	if err != nil {
+		return "", err
+	}
+	messages, err := s.Store.Messages(ctx, c.ID)
+	if err != nil {
+		return "", err
+	}
+	var generation int64
+	found := false
+	for _, message := range messages {
+		if message.JobID == jobID {
+			generation, found = message.SessionGeneration, true
+			break
+		}
+	}
+	if !found {
+		return "", nil
+	}
+	messages, err = s.Store.SessionMessages(ctx, c.EmployeeID, generation)
+	if err != nil {
+		return "", err
+	}
+	var prior []Message
+	for _, message := range messages {
+		if message.JobID != jobID && message.SessionGeneration == generation && message.Content != "" {
+			prior = append(prior, message)
+		}
+	}
+	if len(prior) > 20 {
+		prior = prior[len(prior)-20:]
+	}
+	var b strings.Builder
+	b.WriteString("【此前同一会话的消息，仅用于理解背景；不要重复执行历史任务】\n")
+	for _, message := range prior {
+		label := "用户"
+		if message.Role == "assistant" {
+			label = "AI 员工"
+		}
+		b.WriteString(label + "：" + truncateRunes(message.Content, 1600) + "\n")
+	}
+	return truncateRunes(b.String(), 12000), nil
+}
+
+// HandleEmployeeCommand consumes employee-scoped Feishu controls. The user
+// must address an employee explicitly, just like when submitting a task.
+func (s *Service) HandleEmployeeCommand(ctx context.Context, employeeID, command, senderOpenID string) (string, bool) {
+	kind, args, ok := parseEmployeeCommand(command)
+	if !ok {
+		return "", false
+	}
+	e, err := s.Employees.Get(ctx, employeeID)
+	if err != nil || e == nil {
+		return "找不到该 AI 员工。", true
+	}
+	if s.Feishu == nil || !s.Feishu.EmployeeHasOpenID(employeeID, senderOpenID) {
+		return "当前飞书账号未绑定该 AI 员工，不能修改会话或模型。", true
+	}
+	switch kind {
+	case "new_session":
+		updated, err := s.Employees.StartNewSession(ctx, employeeID, e.OwnerUserID, senderOpenID)
+		if err != nil {
+			return "创建新会话失败：" + err.Error(), true
+		}
+		s.RefreshEmployee(ctx, employeeID)
+		return fmt.Sprintf("已为 %s 创建新的会话代数（%d）。从下一条任务开始使用新会话。", e.Name, updated.SessionGeneration), true
+	case "switch_model":
+		return s.switchEmployeeModel(ctx, e, args, senderOpenID), true
+	default:
+		return "不支持的员工命令。", true
+	}
+}
+
+func (s *Service) RefreshEmployee(ctx context.Context, employeeID string) {
+	if ids, err := s.Store.ListEmployeeIDs(ctx, employeeID, 100); err == nil {
+		for _, id := range ids {
+			s.markDirty(id, 0)
+		}
+	}
+}
+
+func (s *Service) switchEmployeeModel(ctx context.Context, e *employee.Employee, args, actor string) string {
+	if s.Workstations == nil || e.WorkstationID == "" {
+		return "无法读取工作站的 Provider 和模型列表。"
+	}
+	parts := strings.Fields(args)
+	if len(parts) == 0 {
+		return "用法：切换模型 <模型>，或切换模型 <Provider> <模型>。"
+	}
+	provider := e.DefaultProvider
+	model := strings.Join(parts, " ")
+	if len(parts) > 1 {
+		candidate := strings.ToLower(parts[0])
+		view := s.Workstations.Get(ctx, e.WorkstationID)
+		for _, available := range view.Providers {
+			if strings.EqualFold(candidate, available) {
+				provider = available
+				model = strings.Join(parts[1:], " ")
+				break
+			}
+		}
+		if provider == e.DefaultProvider && len(view.Providers) == 0 {
+			for available := range view.Models {
+				if strings.EqualFold(candidate, available) {
+					provider = available
+					model = strings.Join(parts[1:], " ")
+					break
+				}
+			}
+		}
+	}
+	if provider == "" {
+		return "请指定 Provider，例如：切换模型 codex gpt-5.6-terra。"
+	}
+	view := s.Workstations.Get(ctx, e.WorkstationID)
+	providerFound := false
+	for _, available := range view.Providers {
+		if strings.EqualFold(provider, available) {
+			provider, providerFound = available, true
+			break
+		}
+	}
+	if !providerFound {
+		for available := range view.Models {
+			if strings.EqualFold(provider, available) {
+				provider, providerFound = available, true
+				break
+			}
+		}
+	}
+	if !providerFound {
+		return "工作站未安装 Provider：" + provider
+	}
+	options := view.Models[provider]
+	if len(options) == 0 {
+		return fmt.Sprintf("工作站尚未上报 Provider %s 的模型列表，请先确认工作站在线并完成模型同步。", provider)
+	}
+	modelFound := false
+	for _, option := range options {
+		if strings.EqualFold(model, option.ID) || (option.Label != "" && strings.EqualFold(model, option.Label)) {
+			model, modelFound = option.ID, true
+			break
+		}
+	}
+	if !modelFound {
+		return fmt.Sprintf("Provider %s 没有可用模型 %q；请使用工作站上报的模型 ID 或名称。", provider, model)
+	}
+	updated, err := s.Employees.Update(ctx, e.ID, employee.UpdateInput{DefaultProvider: &provider, DefaultModel: &model}, e.OwnerUserID, actor)
+	if err != nil {
+		return "切换模型失败：" + err.Error()
+	}
+	s.RefreshEmployee(ctx, e.ID)
+	return fmt.Sprintf("已切换到 Provider %s，模型 %s。后续任务会使用新配置。", updated.DefaultProvider, updated.DefaultModel)
+}
+
+func parseEmployeeCommand(input string) (kind, args string, ok bool) {
+	text := strings.TrimSpace(input)
+	lower := strings.ToLower(text)
+	for _, prefix := range []string{"新建一个会话", "新建会话", "新起一个会话", "新开会话", "新会话", "/new-session", "/new_session"} {
+		if lower == strings.ToLower(prefix) || strings.HasPrefix(lower, strings.ToLower(prefix)+" ") {
+			return "new_session", "", true
+		}
+	}
+	for _, prefix := range []string{"切换模型", "切换到模型", "更换模型", "/model"} {
+		p := strings.ToLower(prefix)
+		if strings.HasPrefix(lower, p) {
+			args = strings.TrimSpace(text[len(prefix):])
+			for _, leading := range []string{"到", "为", "使用"} {
+				args = strings.TrimSpace(strings.TrimPrefix(args, leading))
+			}
+			return "switch_model", args, true
+		}
+	}
+	return "", "", false
 }
 
 // OnAgentDelta 持久化一个有序、幂等的面向用户的 Agent 回复片段。
@@ -141,9 +340,24 @@ func (s *Service) OnJobStatus(ctx context.Context, jobID, status, reply string) 
 	s.markDirty(c.ID, 0)
 }
 
+func (s *Service) OnAgentSession(ctx context.Context, jobID, provider, model string, generation int64) {
+	if s.Store == nil {
+		return
+	}
+	c, err := s.Store.FindByJob(ctx, jobID)
+	if err != nil {
+		return
+	}
+	if err := s.Store.SetRuntime(ctx, jobID, provider, model, generation); err != nil {
+		fmt.Printf("[TaskConversation] 更新 Provider/模型失败 (job=%s): %v\n", jobID, err)
+		return
+	}
+	s.markDirty(c.ID, 0)
+}
+
 // Run 合并卡片更新，并在服务重启后刷新最近的任务卡片。
 func (s *Service) Run(ctx context.Context) {
-	ids, err := s.Store.ListIDs(ctx, 100)
+	ids, err := s.Store.ListIDs(ctx, 0)
 	if err == nil {
 		for _, id := range ids {
 			s.markDirty(id, 0)
@@ -204,9 +418,15 @@ func (s *Service) refreshCard(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	activities, err := s.Store.Activities(ctx, id, c.CurrentJobID, 4)
+	activities, err := s.Store.Activities(ctx, id, c.CurrentJobID, 10)
 	if err != nil {
 		return err
+	}
+	if s.Employees != nil {
+		if e, employeeErr := s.Employees.Get(ctx, c.EmployeeID); employeeErr == nil && e != nil {
+			c.DefaultProvider = e.DefaultProvider
+			c.DefaultModel = e.DefaultModel
+		}
 	}
 	content := BuildCard(c, messages, activities).MustJSON()
 	if c.CardMessageID == "" {
@@ -222,7 +442,7 @@ func (s *Service) refreshCard(ctx context.Context, id string) error {
 	return s.Feishu.PatchMessageCard(ctx, c.CardMessageID, content)
 }
 
-// HandleCardAction 处理停止按钮和表单续聊。
+// HandleCardAction 只处理正在执行任务的停止按钮。
 func (s *Service) HandleCardAction(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 	if event == nil || event.Event == nil || event.Event.Action == nil {
 		return nil, nil
@@ -233,7 +453,7 @@ func (s *Service) HandleCardAction(ctx context.Context, event *callback.CardActi
 		return nil, nil
 	}
 	name, _ := value["action"].(string)
-	if name != "task_stop" && name != "task_continue" {
+	if name != "task_stop" {
 		return nil, nil
 	}
 	conversationID, _ := value["conversation_id"].(string)
@@ -252,76 +472,18 @@ func (s *Service) HandleCardAction(ctx context.Context, event *callback.CardActi
 	if err != nil {
 		return taskToast("warning", "找不到当前任务"), nil
 	}
-	switch name {
-	case "task_stop":
-		if isTerminal(current.Status) {
-			return taskToast("warning", "当前任务已经结束"), nil
-		}
-		if s.Canceler == nil {
-			return taskToast("warning", "任务停止服务暂不可用"), nil
-		}
-		_, err := s.Canceler.CancelJob(ctx, current.ID, c.OwnerUserID, "feishu-card")
-		if err != nil {
-			return taskToast("warning", "停止任务失败："+err.Error()), nil
-		}
-		s.OnJobStatus(ctx, current.ID, job.StatusCancelled, current.Result)
-		return taskToast("success", "已发送停止指令"), nil
-	case "task_continue":
-		if !isTerminal(current.Status) {
-			return taskToast("warning", "当前轮次仍在执行，请等待完成后继续"), nil
-		}
-		prompt, _ := action.FormValue["prompt"].(string)
-		prompt = strings.TrimSpace(prompt)
-		if prompt == "" {
-			return taskToast("warning", "请输入要继续的内容"), nil
-		}
-		if len([]rune(prompt)) > 1000 {
-			return taskToast("warning", "续聊内容不能超过 1000 个字符"), nil
-		}
-		if s.FollowUp == nil {
-			return taskToast("warning", "续聊服务暂不可用"), nil
-		}
-		eventID := ""
-		if event.EventV2Base != nil && event.EventV2Base.Header != nil {
-			eventID = event.EventV2Base.Header.EventID
-		}
-		if eventID == "" {
-			eventID = fmt.Sprintf("%d", time.Now().UnixNano())
-		}
-		conversationContext := ""
-		if current.Status == job.StatusCancelled {
-			if messages, messageErr := s.Store.Messages(ctx, c.ID); messageErr == nil {
-				conversationContext = formatContext(messages)
-			}
-		}
-		_, err := s.FollowUp.CreateFollowUp(ctx, feishu.TaskConversationFollowUp{
-			ConversationID: c.ID, ParentJobID: current.ID, EmployeeID: c.EmployeeID,
-			OwnerUserID: c.OwnerUserID, OwnerOpenID: c.OwnerOpenID, ChatID: c.ChatID,
-			Prompt: prompt, Context: conversationContext,
-			IdempotencyKey: "feishu-task:" + c.ID + ":" + eventID,
-		})
-		if err != nil {
-			return taskToast("warning", "创建续聊任务失败："+err.Error()), nil
-		}
-		return taskToast("success", "已提交续聊任务"), nil
+	if isTerminal(current.Status) {
+		return taskToast("warning", "当前任务已经结束"), nil
 	}
-	return nil, nil
-}
-
-func formatContext(messages []Message) string {
-	if len(messages) > 12 {
-		messages = messages[len(messages)-12:]
+	if s.Canceler == nil {
+		return taskToast("warning", "任务停止服务暂不可用"), nil
 	}
-	var b strings.Builder
-	b.WriteString("【此前任务对话】\n")
-	for _, m := range messages {
-		name := "用户"
-		if m.Role == "assistant" {
-			name = "AI 员工"
-		}
-		b.WriteString(name + "：" + truncateRunes(m.Content, 1200) + "\n")
+	_, err = s.Canceler.CancelJob(ctx, current.ID, c.OwnerUserID, "feishu-card")
+	if err != nil {
+		return taskToast("warning", "停止任务失败："+err.Error()), nil
 	}
-	return truncateRunes(b.String(), 8000)
+	s.OnJobStatus(ctx, current.ID, job.StatusCancelled, current.Result)
+	return taskToast("success", "已发送停止指令"), nil
 }
 
 func taskToast(kind, content string) *callback.CardActionTriggerResponse {

@@ -16,7 +16,6 @@ import { JobDetailPage, JobsPage } from '../pages/JobsPage'
 import { AutomationsPage } from '../pages/AutomationsPage'
 import { LoginPage } from '../pages/LoginPage'
 import { SetupPage } from '../pages/SetupPage'
-import { PermissionsPage } from '../pages/PermissionsPage'
 import { SessionsPage } from '../pages/SessionsPage'
 import { McpServersPage } from '../pages/mcp/McpServersPage'
 import { WorkflowMcpPage } from '../pages/workflow/WorkflowMcpPage'
@@ -66,7 +65,7 @@ export function AppRouter() {
             <Route path="/workflows" element={<Navigate to="/mcp-servers/workflow-mcp" replace />} />
             <Route path="/skills" element={<Navigate to="/mcp-servers/workflow-mcp" replace />} />
             <Route path="/knowledge" element={<Navigate to="/mcp-servers/workflow-mcp" replace />} />
-            <Route path="/permissions" element={<PermissionsPage />} />
+            <Route path="/permissions" element={<Navigate to="/" replace />} />
             <Route path="/users" element={<UsersPage />} />
             <Route path="/users/:id" element={<UserDetailPage />} />
             <Route path="/roles" element={<RolesPage />} />

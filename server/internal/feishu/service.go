@@ -83,32 +83,20 @@ type TaskConversationStart struct {
 	JobID, EmployeeID, EmployeeName string
 	OwnerUserID, OwnerOpenID        string
 	ChatID, Prompt                  string
+	SessionGeneration               int64
 }
 
-// TaskConversationFollowUp 描述用户从任务卡片提交的后续轮次。
-type TaskConversationFollowUp struct {
-	ConversationID, ParentJobID     string
-	EmployeeID, OwnerUserID         string
-	OwnerOpenID, ChatID             string
-	Prompt, Context, IdempotencyKey string
-}
-
-// TaskConversationStarter 持久化一轮对话并绑定飞书卡片。
+// TaskConversationStarter 为每个 Job 持久化一轮对话并绑定独立任务卡片。
 type TaskConversationStarter interface {
 	Start(ctx context.Context, in TaskConversationStart) (conversationID string, err error)
-	AttachTurn(ctx context.Context, conversationID, jobID, prompt string) error
 	ManagesJob(ctx context.Context, jobID string) bool
 }
 
 // TaskConversationHandler 处理飞书任务会话卡片交互。
 type TaskConversationHandler interface {
 	HandleCardAction(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error)
+	HandleEmployeeCommand(ctx context.Context, employeeID, command, senderOpenID string) (reply string, handled bool)
 	ManagesJob(ctx context.Context, jobID string) bool
-}
-
-// TaskFollowUpCreator 在任务会话中创建后续 Job。
-type TaskFollowUpCreator interface {
-	CreateFollowUp(ctx context.Context, in TaskConversationFollowUp) (jobID string, err error)
 }
 
 // StatusResult 飞书集成整体运行状态
@@ -183,7 +171,7 @@ func (s *Service) SetInquiryHandler(h InquiryHandler) {
 	s.Inquiry = h
 }
 
-// SetTaskConversationHandler 设置任务会话卡片的停止/续聊处理器。
+// SetTaskConversationHandler 设置任务卡片交互与员工级命令处理器。
 func (s *Service) SetTaskConversationHandler(h TaskConversationHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1340,6 +1328,17 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 	}
 	group := !isP2PChat(ev.ChatType)
 	notice := FormatIdentityNotice(s.AutoBindFromMention(empID, ev.SenderOpenID, ev.ChatID, group))
+	s.mu.RLock()
+	taskConversations := s.TaskConversations
+	s.mu.RUnlock()
+	if taskConversations != nil {
+		if reply, handled := taskConversations.HandleEmployeeCommand(ctx, empID, prompt, ev.SenderOpenID); handled {
+			if s.Sender != nil && ev.ChatID != "" {
+				_ = s.Sender.Send(ctx, Reply{ChatID: ev.ChatID, Content: reply})
+			}
+			return "", false, nil
+		}
+	}
 	if s.Jobs == nil {
 		return "", false, errors.New("未配置 JobCreator")
 	}
@@ -1351,10 +1350,8 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 		}
 		return "", false, err
 	}
-	s.mu.RLock()
-	taskConversations := s.TaskConversations
-	s.mu.RUnlock()
 	if taskConversations != nil && taskConversations.ManagesJob(ctx, jobID) {
+		// The task conversation service creates and updates this Job's own card.
 		return jobID, false, nil
 	}
 

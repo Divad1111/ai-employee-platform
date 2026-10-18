@@ -24,9 +24,24 @@ import (
 
 // 错误。
 var (
-	ErrNoWorkstation = errors.New("无可用 Workstation（需 ONLINE）")
-	ErrNotAssignable = errors.New("Employee 不可调度")
+	ErrNoWorkstation      = errors.New("无可用 Workstation（需 ONLINE）")
+	ErrNotAssignable      = errors.New("Employee 不可调度")
+	ErrEmployeeBusy       = errors.New("Employee 已有任务正在执行")
+	ErrConversationQueued = errors.New("员工会话中有更早的任务等待执行")
 )
+
+type taskQueueGate interface {
+	CanScheduleJob(context.Context, string) (bool, error)
+}
+
+type taskQueueContext interface {
+	ConversationContext(context.Context, string) (string, error)
+}
+
+type sessionMCPToken struct {
+	secret    string
+	expiresAt time.Time
+}
 
 // CommandPusher 下发命令。
 type CommandPusher interface {
@@ -36,6 +51,9 @@ type CommandPusher interface {
 // Service 调度器。
 type Service struct {
 	mu           sync.Mutex
+	scheduleMu   sync.Mutex
+	mcpTokenMu   sync.Mutex
+	mcpTokens    map[string]sessionMCPToken
 	Jobs         *job.Service
 	Employees    *employee.Service
 	Workstations *workstation.Service
@@ -43,6 +61,7 @@ type Service struct {
 	Presence     *reliability.Presence
 	Pusher       CommandPusher
 	FullPusher   FullCommandPusher
+	TaskQueue    taskQueueGate
 	// OnTerminal 调度器自行把任务打到终态时回调，用于向飞书回执失败。
 	OnTerminal         func(ctx context.Context, j *job.Job)
 	WorkflowMCP        *workflowmcp.Service
@@ -67,17 +86,43 @@ func New(jobs *job.Service, emps *employee.Service, wss *workstation.Service, pr
 		MaxSessionsPerWS:   8,
 		runningOnWS:        map[string]int{},
 		lastRejectReason:   map[string]string{},
+		mcpTokens:          map[string]sessionMCPToken{},
 	}
 }
 
 // SetWorkspaces 注入工作区查询（下发 path）。
 func (s *Service) SetWorkspaces(ws *workspace.Service) { s.Workspaces = ws }
 
+func (s *Service) SetTaskQueue(gate taskQueueGate) { s.TaskQueue = gate }
+
 // ScheduleJob 将 CREATED/QUEUED Job 分配到可用 WS 并下发 START_JOB。
 func (s *Service) ScheduleJob(ctx context.Context, jobID string) (*job.Job, error) {
+	s.scheduleMu.Lock()
+	defer s.scheduleMu.Unlock()
 	j, err := s.Jobs.Get(ctx, jobID)
 	if err != nil {
 		return nil, err
+	}
+	if s.TaskQueue != nil {
+		allowed, gateErr := s.TaskQueue.CanScheduleJob(ctx, jobID)
+		if gateErr != nil {
+			return nil, gateErr
+		}
+		if !allowed {
+			return nil, ErrConversationQueued
+		}
+	}
+	jobs, listErr := s.Jobs.List(ctx)
+	if listErr == nil {
+		for _, other := range jobs {
+			if other.ID == jobID || other.EmployeeID != j.EmployeeID {
+				continue
+			}
+			switch other.Status {
+			case job.StatusAssigned, job.StatusStarting, job.StatusRunning, job.StatusBlocked, job.StatusWaitingApproval, job.StatusUnknown:
+				return nil, ErrEmployeeBusy
+			}
+		}
 	}
 	emp, err := s.Employees.Get(ctx, j.EmployeeID)
 	if err != nil {
@@ -133,13 +178,23 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (*job.Job, erro
 
 	if s.Pusher != nil {
 		payload := map[string]string{
-			"prompt":       j.Prompt,
-			"workspace_id": j.WorkspaceID,
+			"prompt":                j.Prompt,
+			"workspace_id":          j.WorkspaceID,
+			"provider":              emp.DefaultProvider,
+			"session_generation":    fmt.Sprintf("%d", emp.SessionGeneration),
+			"reset_session_context": fmt.Sprintf("%t", emp.SessionContextResetGeneration == emp.SessionGeneration),
 		}
-		if s.Employees != nil && j.EmployeeID != "" {
-			if e, err := s.Employees.Get(ctx, j.EmployeeID); err == nil && e != nil && e.DefaultModel != "" {
-				payload["model"] = e.DefaultModel
+		if ctxProvider, ok := s.TaskQueue.(taskQueueContext); ok {
+			conversationContext, contextErr := ctxProvider.ConversationContext(ctx, j.ID)
+			if contextErr != nil {
+				return j, fmt.Errorf("读取员工会话上下文失败: %w", contextErr)
 			}
+			if conversationContext != "" {
+				payload["conversation_context"] = conversationContext
+			}
+		}
+		if emp.DefaultModel != "" {
+			payload["model"] = emp.DefaultModel
 		}
 		workspacePath := ""
 		if s.Workspaces != nil && j.WorkspaceID != "" {
@@ -176,6 +231,9 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (*job.Job, erro
 			}
 		} else if _, err := s.Pusher.PushCommand(wsID, aiev1.CommandType_COMMAND_TYPE_START_JOB, j.EmployeeID, j.ID, string(payloadJSON)); err != nil {
 			return j, err
+		}
+		if emp.SessionContextResetGeneration == emp.SessionGeneration {
+			s.Employees.ConsumeSessionContextReset(ctx, emp.ID, emp.SessionGeneration)
 		}
 	}
 	s.mu.Lock()
@@ -294,7 +352,7 @@ func (s *Service) Tick(ctx context.Context) (scheduled int) {
 		if j.Status == job.StatusCreated || j.Status == job.StatusQueued {
 			if _, err := s.ScheduleJob(ctx, j.ID); err == nil {
 				scheduled++
-			} else {
+			} else if !errors.Is(err, ErrConversationQueued) && !errors.Is(err, ErrEmployeeBusy) {
 				fmt.Printf("[Scheduler] ScheduleJob(%s) 失败: %v (wsID=%s online=%v)\n", j.ID, err, j.WorkstationID, func() bool {
 					if j.WorkstationID != "" {
 						return s.isOnline(j.WorkstationID)

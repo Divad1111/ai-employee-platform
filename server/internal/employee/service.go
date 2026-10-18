@@ -5,6 +5,7 @@ package employee
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -30,19 +31,21 @@ var (
 
 // Employee 领域对象。
 type Employee struct {
-	ID                string    `json:"id"`
-	Name              string    `json:"name"`
-	Description       string    `json:"description"`
-	RoleSummary       string    `json:"role_summary"`
-	DefaultProvider   string    `json:"default_provider"`
-	DefaultModel      string    `json:"default_model"`
-	WorkstationID     string    `json:"workstation_id"`
-	WorkspaceID       string    `json:"workspace_id"`
-	PermissionProfile string    `json:"permission_profile"`
-	OwnerUserID       string    `json:"owner_user_id,omitempty"`
-	Status            string    `json:"status"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                            string    `json:"id"`
+	Name                          string    `json:"name"`
+	Description                   string    `json:"description"`
+	RoleSummary                   string    `json:"role_summary"`
+	DefaultProvider               string    `json:"default_provider"`
+	DefaultModel                  string    `json:"default_model"`
+	SessionGeneration             int64     `json:"session_generation"`
+	SessionContextResetGeneration int64     `json:"-"`
+	WorkstationID                 string    `json:"workstation_id"`
+	WorkspaceID                   string    `json:"workspace_id"`
+	PermissionProfile             string    `json:"permission_profile"`
+	OwnerUserID                   string    `json:"owner_user_id,omitempty"`
+	Status                        string    `json:"status"`
+	CreatedAt                     time.Time `json:"created_at"`
+	UpdatedAt                     time.Time `json:"updated_at"`
 }
 
 // CreateInput 创建参数。
@@ -65,6 +68,7 @@ type UpdateInput struct {
 	RoleSummary       *string
 	DefaultProvider   *string
 	DefaultModel      *string
+	SessionGeneration *int64
 	WorkstationID     *string
 	WorkspaceID       *string
 	PermissionProfile *string
@@ -109,19 +113,20 @@ func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string
 	}
 	now := time.Now().UTC()
 	e := &Employee{
-		ID:                idgen.New("EMP"),
-		Name:              in.Name,
-		Description:       in.Description,
-		RoleSummary:       in.RoleSummary,
-		DefaultProvider:   in.DefaultProvider,
-		DefaultModel:      in.DefaultModel,
-		WorkstationID:     in.WorkstationID,
-		WorkspaceID:       in.WorkspaceID,
-		PermissionProfile: in.PermissionProfile,
-		OwnerUserID:       in.OwnerUserID,
-		Status:            StatusStopped,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:                            idgen.New("EMP"),
+		Name:                          in.Name,
+		Description:                   in.Description,
+		RoleSummary:                   in.RoleSummary,
+		DefaultProvider:               in.DefaultProvider,
+		DefaultModel:                  in.DefaultModel,
+		SessionContextResetGeneration: -1,
+		WorkstationID:                 in.WorkstationID,
+		WorkspaceID:                   in.WorkspaceID,
+		PermissionProfile:             in.PermissionProfile,
+		OwnerUserID:                   in.OwnerUserID,
+		Status:                        StatusStopped,
+		CreatedAt:                     now,
+		UpdatedAt:                     now,
 	}
 	if err := s.store.Save(ctx, e); err != nil {
 		return nil, err
@@ -163,6 +168,9 @@ func (s *Service) Update(ctx context.Context, id string, in UpdateInput, actorID
 	if in.DefaultModel != nil {
 		e.DefaultModel = *in.DefaultModel
 	}
+	if in.SessionGeneration != nil {
+		e.SessionGeneration = *in.SessionGeneration
+	}
 	if in.WorkstationID != nil {
 		e.WorkstationID = *in.WorkstationID
 	}
@@ -184,6 +192,55 @@ func (s *Service) Update(ctx context.Context, id string, in UpdateInput, actorID
 	})
 	s.publish(ctx, id, "update")
 	return e, nil
+}
+
+// StartNewSession advances the durable generation used by the workstation to
+// start a fresh ACP session on the next task.
+func (s *Service) StartNewSession(ctx context.Context, id, actorID, ip string) (*Employee, error) {
+	e, err := s.store.Get(ctx, id)
+	if err != nil || e == nil {
+		return nil, ErrNotFound
+	}
+	if store, ok := s.store.(interface {
+		StartNewSessionGeneration(context.Context, string) (int64, error)
+	}); ok {
+		e.SessionGeneration, err = store.StartNewSessionGeneration(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		e.SessionContextResetGeneration = e.SessionGeneration
+		e.UpdatedAt = time.Now().UTC()
+	} else {
+		e.SessionGeneration++
+		e.SessionContextResetGeneration = e.SessionGeneration
+		e.UpdatedAt = time.Now().UTC()
+		if err := s.store.Save(ctx, e); err != nil {
+			return nil, err
+		}
+	}
+	s.audit.Log(ctx, "USER", actorID, "employee.session.new", "success", ip, map[string]string{
+		"id": id, "generation": fmt.Sprint(e.SessionGeneration),
+	})
+	s.publish(ctx, id, "session")
+	return e, nil
+}
+
+// ConsumeSessionContextReset marks an explicit new-session request as applied
+// once its first task has been sent to a workstation.
+func (s *Service) ConsumeSessionContextReset(ctx context.Context, id string, generation int64) {
+	if store, ok := s.store.(interface {
+		ConsumeSessionContextReset(context.Context, string, int64) error
+	}); ok {
+		_ = store.ConsumeSessionContextReset(ctx, id, generation)
+		return
+	}
+	e, err := s.store.Get(ctx, id)
+	if err != nil || e == nil || e.SessionContextResetGeneration != generation {
+		return
+	}
+	e.SessionContextResetGeneration = -1
+	e.UpdatedAt = time.Now().UTC()
+	_ = s.store.Save(ctx, e)
 }
 
 // Disable 停用。
@@ -236,6 +293,33 @@ func (s *Service) publish(ctx context.Context, id, action string) {
 type MemoryStore struct {
 	mu   sync.RWMutex
 	byID map[string]*Employee
+}
+
+func (m *MemoryStore) StartNewSessionGeneration(_ context.Context, id string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.byID[id]
+	if !ok {
+		return 0, ErrNotFound
+	}
+	e.SessionGeneration++
+	e.SessionContextResetGeneration = e.SessionGeneration
+	e.UpdatedAt = time.Now().UTC()
+	return e.SessionGeneration, nil
+}
+
+func (m *MemoryStore) ConsumeSessionContextReset(_ context.Context, id string, generation int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.byID[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if e.SessionContextResetGeneration == generation {
+		e.SessionContextResetGeneration = -1
+		e.UpdatedAt = time.Now().UTC()
+	}
+	return nil
 }
 
 // NewMemoryStore 创建。

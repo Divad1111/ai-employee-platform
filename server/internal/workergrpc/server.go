@@ -143,6 +143,7 @@ func (s *Server) Connect(stream aiev1.WorkerService_ConnectServer) error {
 		if err := stream.Send(&aiev1.ServerToWorker{Body: &aiev1.ServerToWorker_Command{Command: cmd}}); err != nil {
 			return err
 		}
+		fmt.Printf("[Worker] Resume 重发命令 ws=%s command=%s type=%s job=%s seq=%d\n", wsID, cmd.GetCommandId(), cmd.GetType(), cmd.GetJobId(), cmd.GetMeta().GetSequence())
 	}
 
 	for {
@@ -218,6 +219,8 @@ func (s *Server) handleUpstream(wsID string, stream aiev1.WorkerService_ConnectS
 		res := s.Events.Accept(ev)
 		if !res.Accepted && res.Error != "" {
 			fmt.Printf("event rejected ws=%s id=%s seq=%d: %s\n", wsID, ev.GetEventId(), ev.GetMeta().GetSequence(), res.Error)
+		} else if res.Accepted && !res.Duplicate && ev.GetType() != aiev1.EventType_EVENT_TYPE_JOB_PROGRESS {
+			fmt.Printf("[Worker] 收到事件 ws=%s type=%s job=%s seq=%d\n", wsID, ev.GetType(), ev.GetJobId(), ev.GetMeta().GetSequence())
 		}
 		if s.OnEvent != nil && res.Accepted && !res.Duplicate {
 			go s.OnEvent(wsID, ev)
@@ -234,12 +237,15 @@ func (s *Server) handleUpstream(wsID string, stream aiev1.WorkerService_ConnectS
 		ack := body.CommandAck
 		// 拒绝的确认不能销掉命令，否则启动命令丢失，任务会一直停在 STARTING。
 		if !ack.GetAccepted() {
+			fmt.Printf("[Worker] 工作站拒绝命令 ws=%s command=%s seq=%d: %s\n", wsID, ack.GetCommandId(), ack.GetSequence(), ack.GetErrorMessage())
 			return nil
 		}
 		err := s.Commands.Ack(wsID, ack.GetCommandId(), ack.GetSequence())
 		if err != nil {
+			fmt.Printf("[Worker] 命令 ACK 无法匹配 ws=%s command=%s seq=%d: %v\n", wsID, ack.GetCommandId(), ack.GetSequence(), err)
 			return err
 		}
+		fmt.Printf("[Worker] 工作站已确认命令 ws=%s command=%s seq=%d\n", wsID, ack.GetCommandId(), ack.GetSequence())
 		return nil
 	case *aiev1.WorkerToServer_Hello:
 		return status.Error(codes.FailedPrecondition, "重复 Hello")
@@ -266,8 +272,10 @@ func (s *Server) PushCommandFull(wsID string, typ aiev1.CommandType, employeeID,
 		return cmd, nil // 入队，等 Resume
 	}
 	if err := sess.stream.Send(&aiev1.ServerToWorker{Body: &aiev1.ServerToWorker_Command{Command: cmd}}); err != nil {
+		fmt.Printf("[Worker] 命令发送失败 ws=%s command=%s job=%s seq=%d: %v\n", wsID, cmd.GetCommandId(), jobID, cmd.GetMeta().GetSequence(), err)
 		return cmd, fmt.Errorf("下发失败（已入队）: %w", err)
 	}
+	fmt.Printf("[Worker] 命令已发送 ws=%s command=%s type=%s job=%s seq=%d\n", wsID, cmd.GetCommandId(), cmd.GetType(), jobID, cmd.GetMeta().GetSequence())
 	return cmd, nil
 }
 

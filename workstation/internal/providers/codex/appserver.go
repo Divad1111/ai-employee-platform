@@ -25,20 +25,22 @@ type appServerSession struct {
 	model     string
 	mcp       []any
 
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	events chan acp.Event
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	events  chan acp.Event
+	writeMu sync.Mutex
 
-	mu         sync.Mutex
-	ready      bool
-	nextID     int
-	pending    map[int]chan rpcMsg
-	threadID   string
-	reply      strings.Builder
-	turnErr    string
-	turnDone   chan struct{}
-	activeTurn string
-	lastUsage  tokenusage.TokenUsage
+	mu             sync.Mutex
+	ready          bool
+	nextID         int
+	pending        map[int]chan rpcMsg
+	threadID       string
+	reply          strings.Builder
+	turnErr        string
+	turnDone       chan struct{}
+	activeTurn     string
+	lastUsage      tokenusage.TokenUsage
+	inquiryHandler acp.InquiryHandler
 }
 
 type rpcMsg struct {
@@ -68,6 +70,14 @@ func (s *appServerSession) Ready() bool {
 }
 
 func (s *appServerSession) Events() <-chan acp.Event { return s.events }
+
+// SetInquiryHandler connects Codex app-server approval requests to the
+// workstation's Feishu inquiry flow.
+func (s *appServerSession) SetInquiryHandler(h acp.InquiryHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inquiryHandler = h
+}
 
 func (s *appServerSession) LastUsage() (int64, int64, string, string) {
 	u := s.LastTokenUsage()
@@ -144,7 +154,7 @@ func (s *appServerSession) Send(ctx context.Context, input []byte) (string, erro
 		s.mu.Unlock()
 		params := map[string]any{
 			"cwd":            s.workspace,
-			"approvalPolicy": "never",
+			"approvalPolicy": "on-request",
 			"sandbox":        "workspace-write",
 		}
 		if s.model != "" {
@@ -258,6 +268,8 @@ func (s *appServerSession) notify(method string, params any) error {
 }
 
 func (s *appServerSession) write(v any) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -291,8 +303,210 @@ func (s *appServerSession) read(out io.Reader) {
 			}
 			continue
 		}
+		if msg.ID != 0 && isCodexApprovalRequest(msg.Method) {
+			go s.handleApprovalRequest(msg)
+			continue
+		}
 		s.onNotify(msg)
 	}
+}
+
+func isCodexApprovalRequest(method string) bool {
+	switch method {
+	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *appServerSession) handleApprovalRequest(msg rpcMsg) {
+	inq, ok := codexApprovalInquiry(s.id, msg.Method, msg.Params)
+	if !ok {
+		result := map[string]any{"decision": "cancel"}
+		if msg.Method == "item/permissions/requestApproval" {
+			result = map[string]any{"permissions": map[string]any{}, "scope": "turn"}
+		}
+		_ = s.write(map[string]any{"id": msg.ID, "result": result})
+		return
+	}
+
+	s.mu.Lock()
+	handler := s.inquiryHandler
+	s.mu.Unlock()
+	selectedID := safeDefaultOption(inq)
+	if handler != nil {
+		selected, err := handler(context.Background(), inq)
+		if err == nil && containsInquiryOption(inq.Options, selected) {
+			selectedID = selected
+		}
+	}
+
+	result := codexApprovalResponse(msg.Method, msg.Params, inq, selectedID)
+	if err := s.write(map[string]any{"id": msg.ID, "result": result}); err != nil {
+		fmt.Printf("[Codex] 回复权限请求失败 (method=%s, id=%d): %v\n", msg.Method, msg.ID, err)
+	}
+}
+
+func codexApprovalInquiry(sessionID, method string, raw json.RawMessage) (acp.Inquiry, bool) {
+	var params struct {
+		Reason                string            `json:"reason"`
+		Command               json.RawMessage   `json:"command"`
+		CWD                   string            `json:"cwd"`
+		GrantRoot             string            `json:"grantRoot"`
+		AvailableDecisions    []json.RawMessage `json:"availableDecisions"`
+		Permissions           json.RawMessage   `json:"permissions"`
+		AdditionalPermissions json.RawMessage   `json:"additionalPermissions"`
+	}
+	if json.Unmarshal(raw, &params) != nil {
+		return acp.Inquiry{}, false
+	}
+
+	message := "Codex 请求授权继续执行。"
+	switch method {
+	case "item/commandExecution/requestApproval":
+		message = "Codex 请求授权执行命令。"
+	case "item/fileChange/requestApproval":
+		message = "Codex 请求授权应用文件修改。"
+	case "item/permissions/requestApproval":
+		message = "Codex 请求扩大本回合或会话的工作区权限。"
+	}
+	var details []string
+	if params.Reason != "" {
+		details = append(details, "原因："+compactApprovalDetail(params.Reason, 600))
+	}
+	if command := commandApprovalText(params.Command); command != "" {
+		details = append(details, "命令："+compactApprovalDetail(command, 900))
+	}
+	if params.CWD != "" {
+		details = append(details, "工作目录："+compactApprovalDetail(params.CWD, 300))
+	}
+	if params.GrantRoot != "" {
+		details = append(details, "请求写入目录："+compactApprovalDetail(params.GrantRoot, 300))
+	}
+	permissions := params.Permissions
+	if len(permissions) == 0 || string(permissions) == "null" {
+		permissions = params.AdditionalPermissions
+	}
+	if len(permissions) > 0 && string(permissions) != "null" {
+		details = append(details, "请求权限："+compactApprovalDetail(string(permissions), 900))
+	}
+	if len(details) > 0 {
+		message += "\n" + strings.Join(details, "\n")
+	}
+
+	options := approvalOptions(params.AvailableDecisions)
+	if method == "item/permissions/requestApproval" {
+		options = []acp.InquiryOption{
+			{OptionID: "grant-turn", Name: "仅本回合授权"},
+			{OptionID: "deny", Name: "拒绝授权"},
+		}
+	}
+	return acp.Inquiry{
+		SessionID: sessionID,
+		Method:    method,
+		Message:   message,
+		Options:   options,
+	}, true
+}
+
+func approvalOptions(available []json.RawMessage) []acp.InquiryOption {
+	allowed := map[string]bool{}
+	for _, raw := range available {
+		var decision string
+		if json.Unmarshal(raw, &decision) == nil {
+			allowed[decision] = true
+		}
+	}
+	if len(allowed) == 0 {
+		allowed["accept"] = true
+		allowed["cancel"] = true
+	}
+
+	options := make([]acp.InquiryOption, 0, 3)
+	if allowed["accept"] {
+		options = append(options, acp.InquiryOption{OptionID: "accept", Name: "允许本次操作"})
+	}
+	if allowed["decline"] {
+		options = append(options, acp.InquiryOption{OptionID: "decline", Name: "拒绝本次操作"})
+	} else if allowed["cancel"] {
+		options = append(options, acp.InquiryOption{OptionID: "cancel", Name: "拒绝并停止本次操作"})
+	}
+	if len(options) == 0 {
+		options = []acp.InquiryOption{
+			{OptionID: "accept", Name: "允许本次操作"},
+			{OptionID: "cancel", Name: "拒绝并停止本次操作"},
+		}
+	}
+	return options
+}
+
+func codexApprovalResponse(method string, raw json.RawMessage, inq acp.Inquiry, selected string) map[string]any {
+	if method != "item/permissions/requestApproval" {
+		if !containsInquiryOption(inq.Options, selected) {
+			selected = safeDefaultOption(inq)
+		}
+		return map[string]any{"decision": selected}
+	}
+
+	var params struct {
+		Permissions json.RawMessage `json:"permissions"`
+	}
+	_ = json.Unmarshal(raw, &params)
+	granted := any(map[string]any{})
+	scope := "turn"
+	switch selected {
+	case "grant-turn":
+		if len(params.Permissions) > 0 && string(params.Permissions) != "null" {
+			granted = json.RawMessage(params.Permissions)
+		}
+	}
+	return map[string]any{"permissions": granted, "scope": scope}
+}
+
+func safeDefaultOption(inq acp.Inquiry) string {
+	for _, opt := range inq.Options {
+		id := strings.ToLower(strings.TrimSpace(opt.OptionID))
+		if id == "decline" || id == "deny" || id == "cancel" || strings.Contains(id, "reject") || strings.Contains(id, "deny") {
+			return opt.OptionID
+		}
+	}
+	// Codex accepts cancel as a decline decision even if an older server omitted
+	// it from availableDecisions. Never default to an approval.
+	return "cancel"
+}
+
+func containsInquiryOption(options []acp.InquiryOption, id string) bool {
+	for _, opt := range options {
+		if opt.OptionID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func commandApprovalText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var command string
+	if json.Unmarshal(raw, &command) == nil {
+		return command
+	}
+	var parts []string
+	if json.Unmarshal(raw, &parts) == nil {
+		return strings.Join(parts, " ")
+	}
+	return string(raw)
+}
+
+func compactApprovalDetail(value string, maxRunes int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "…"
+	}
+	return value
 }
 
 func (s *appServerSession) onNotify(msg rpcMsg) {
