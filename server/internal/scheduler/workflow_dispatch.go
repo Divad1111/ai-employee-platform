@@ -89,43 +89,42 @@ func (s *Service) buildStartJobPayload(ctx context.Context, employeeID, prompt, 
 			start.Provider = e.DefaultProvider
 		}
 	}
-	if s.WorkflowMCP == nil {
-		return start, nil
-	}
-	scope, err := s.WorkflowMCP.ResolveScope(ctx, employeeID)
-	if err != nil {
-		return start, nil
-	}
-	if workflowID != "" {
-		if !scope.InScopeWorkflow(workflowID) {
-			return nil, fmt.Errorf("员工未授权工作流 %s", workflowID)
-		}
-		wf, err := s.WorkflowMCP.GetWorkflow(ctx, workflowID)
+	if s.WorkflowMCP != nil {
+		scope, err := s.WorkflowMCP.ResolveScope(ctx, employeeID)
 		if err != nil {
 			return nil, err
 		}
-		yamlOut, _ := workflowmcp.WorkflowToYAML(wf)
-		start.WorkflowId = wf.ID
-		start.WorkflowVersion = wf.Version
-		start.WorkflowYaml = yamlOut
-	}
-	// 技能包
-	for _, sid := range scope.SkillIDs {
-		sp, md, err := s.WorkflowMCP.ExportSkill(ctx, sid)
-		if err != nil {
-			continue
+		if workflowID != "" {
+			if !scope.InScopeWorkflow(workflowID) {
+				return nil, fmt.Errorf("员工未授权工作流 %s", workflowID)
+			}
+			wf, err := s.WorkflowMCP.GetWorkflow(ctx, workflowID)
+			if err != nil {
+				return nil, err
+			}
+			yamlOut, _ := workflowmcp.WorkflowToYAML(wf)
+			start.WorkflowId = wf.ID
+			start.WorkflowVersion = wf.Version
+			start.WorkflowYaml = yamlOut
 		}
-		start.SkillCursorNames = append(start.SkillCursorNames, sp.CursorName)
-		pkg := &aiev1.SkillPackage{
-			Id: sp.ID, CursorName: sp.CursorName, Version: sp.Version,
-			SkillMd: md, ContentHash: sp.ContentHash,
+		// 技能包
+		for _, sid := range scope.SkillIDs {
+			sp, md, err := s.WorkflowMCP.ExportSkill(ctx, sid)
+			if err != nil {
+				continue
+			}
+			start.SkillCursorNames = append(start.SkillCursorNames, sp.CursorName)
+			pkg := &aiev1.SkillPackage{
+				Id: sp.ID, CursorName: sp.CursorName, Version: sp.Version,
+				SkillMd: md, ContentHash: sp.ContentHash,
+			}
+			for _, f := range sp.Files {
+				pkg.Files = append(pkg.Files, &aiev1.SkillFile{
+					Path: f.Path, Content: f.Content, Sha256: f.SHA256,
+				})
+			}
+			start.SkillPackages = append(start.SkillPackages, pkg)
 		}
-		for _, f := range sp.Files {
-			pkg.Files = append(pkg.Files, &aiev1.SkillFile{
-				Path: f.Path, Content: f.Content, Sha256: f.SHA256,
-			})
-		}
-		start.SkillPackages = append(start.SkillPackages, pkg)
 	}
 	// 多用户 MCP 绑定下发：查询当前员工启用的所有 MCP 绑定 (§7, §30)
 	hasWorkflowMCP := false
@@ -184,8 +183,21 @@ func (s *Service) buildStartJobPayload(ctx context.Context, employeeID, prompt, 
 				}
 				// 注入已绑定的身份凭证（若有）
 				if b.CredentialID != "" {
-					if secretVal, err := s.MCP.ResolveSecretValue(ctx, b.CredentialID); err == nil && secretVal != "" {
-						spec.Headers["Authorization"] = "Bearer " + secretVal
+					authn, err := s.MCP.ResolveAuthentication(ctx, b.CredentialID, spec.Type)
+					if err != nil {
+						return nil, fmt.Errorf("MCP 服务 %s 的凭证不可用: %w", srv.Name, err)
+					}
+					for key, value := range authn.Headers {
+						// 请求头不区分大小写，避免旧配置与绑定凭证同时携带两份认证。
+						for existing := range spec.Headers {
+							if strings.EqualFold(existing, key) {
+								delete(spec.Headers, existing)
+							}
+						}
+						spec.Headers[key] = value
+					}
+					for key, value := range authn.Env {
+						spec.Env[key] = value
 					}
 				}
 				start.McpServers = append(start.McpServers, spec)

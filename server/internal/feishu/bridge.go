@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	input "github.com/ai-employee-platform/gen/jobinput"
 
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/job"
 	"github.com/ai-employee-platform/server/internal/message"
 	"github.com/ai-employee-platform/server/internal/quota"
 	"github.com/ai-employee-platform/server/internal/scheduler"
+	"github.com/ai-employee-platform/server/internal/workstation"
 )
 
 // ChatBinder 记录 Job 与飞书会话（由 notification 实现，避免包循环）。
@@ -36,6 +38,7 @@ type Bridge struct {
 	Quota         *quota.Service
 	Roles         UserRoles
 	Workspaces    WorkspaceResolver
+	Workstations  *workstation.Service
 	Conversations TaskConversationStarter
 }
 
@@ -75,6 +78,10 @@ func (b *Bridge) GetEmployeeName(ctx context.Context, employeeID string) string 
 
 // CreateFromFeishu 实现 JobCreator：写 Message → 建 Job → 尝试调度。
 func (b *Bridge) CreateFromFeishu(ctx context.Context, employeeID, prompt, idempotencyKey, chatID, messageID, senderOpenID string) (string, error) {
+	return b.CreateFromFeishuWithAttachments(ctx, employeeID, prompt, idempotencyKey, chatID, messageID, senderOpenID, nil)
+}
+
+func (b *Bridge) CreateFromFeishuWithAttachments(ctx context.Context, employeeID, prompt, idempotencyKey, chatID, messageID, senderOpenID string, files []input.File) (string, error) {
 	_, _ = b.Messages.Send(ctx, message.SendInput{
 		SenderType: message.TypeUser, SenderID: "feishu:" + messageID,
 		ReceiverType: message.TypeEmployee, ReceiverID: employeeID,
@@ -121,14 +128,15 @@ func (b *Bridge) CreateFromFeishu(ctx context.Context, employeeID, prompt, idemp
 		}
 	}
 	j, _, err := b.Jobs.Create(ctx, job.CreateInput{
-		EmployeeID:     employeeID,
-		WorkspaceID:    wsID,
-		WorkstationID:  e.WorkstationID,
-		Prompt:         prompt,
-		IdempotencyKey: idempotencyKey,
-		TimeoutSec:     600,
-		CreatedBy:      userID,
-		Source:         job.SourceFeishu,
+		EmployeeID:       employeeID,
+		WorkspaceID:      wsID,
+		WorkstationID:    e.WorkstationID,
+		Prompt:           prompt,
+		InputAttachments: files,
+		IdempotencyKey:   idempotencyKey,
+		TimeoutSec:       600,
+		CreatedBy:        userID,
+		Source:           job.SourceFeishu,
 	}, userID, clientIP)
 	if err != nil {
 		return "", err
@@ -181,4 +189,5 @@ func (b *Bridge) feishuUserID(ctx context.Context, senderOpenID string, target *
 func (b *Bridge) Wire() {
 	b.Feishu.Employees = b
 	b.Feishu.Jobs = b
+	b.Feishu.Commands = b
 }

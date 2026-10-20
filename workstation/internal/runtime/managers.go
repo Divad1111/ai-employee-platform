@@ -275,10 +275,29 @@ func (m *Managers) FindActiveSession(employeeID string) *Session {
 	defer m.mu.Unlock()
 	for _, s := range m.sessions {
 		if s.EmployeeID == employeeID && s.Status != SessStopped && s.Status != SessUnknown {
-			return s
+			cp := *s
+			return &cp
 		}
 	}
 	return nil
+}
+
+// SessionReady requires both the lifecycle state and a live runtime binding.
+func (m *Managers) SessionReady(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.sessions[id]
+	return s != nil && s.Status == SessReady && agentReady(m.agentSess[id])
+}
+
+func agentReady(agent providers.AgentSession) bool {
+	if agent == nil {
+		return false
+	}
+	if state, ok := agent.(interface{ Ready() bool }); ok {
+		return state.Ready()
+	}
+	return true
 }
 
 func (m *Managers) markSession(id, status string) {
@@ -306,16 +325,15 @@ func (m *Managers) RunJobWithEvents(ctx context.Context, jobID, employeeID, sess
 	j := &Job{ID: jobID, EmployeeID: employeeID, SessionID: sessionID, Prompt: prompt, Status: JobRunning}
 	m.jobs[jobID] = j
 	agent := m.agentSess[sessionID]
-	if s, ok := m.sessions[sessionID]; ok {
-		s.Status = SessBusy
-	}
-	m.mu.Unlock()
-	m.emit("job.status", map[string]string{"job_id": jobID, "status": JobRunning})
-
-	if agent == nil {
-		m.setJob(jobID, JobFailed)
+	session := m.sessions[sessionID]
+	if !agentReady(agent) || session == nil || session.EmployeeID != employeeID || session.Status != SessReady {
+		j.Status = JobFailed
+		m.mu.Unlock()
 		return j, "", fmt.Errorf("session 未就绪")
 	}
+	session.Status = SessBusy
+	m.mu.Unlock()
+	m.emit("job.status", map[string]string{"job_id": jobID, "status": JobRunning})
 
 	m.mu.Lock()
 	cb := m.inquiryCallback
@@ -434,14 +452,18 @@ func (m *Managers) RunJobWithEvents(ctx context.Context, jobID, employeeID, sess
 		cur.TokenUsage = usage
 		cur.UsageSummary = summary
 	}
+	// A cancelled/stopped turn can finish after StopSession, or after a new
+	// session with the same ID starts. Only this still-active instance may
+	// transition back to READY; late completion must not resurrect it.
+	if m.sessions[sessionID] == session && session.Status == SessBusy && m.agentSess[sessionID] != nil {
+		session.Status = SessReady
+	}
 	m.mu.Unlock()
 	if err != nil {
 		m.setJob(jobID, JobFailed)
-		m.markSession(sessionID, SessReady)
 		return j, reply, err
 	}
 	m.setJob(jobID, JobSuccess)
-	m.markSession(sessionID, SessReady)
 	m.emit("job.status", map[string]string{"job_id": jobID, "status": JobSuccess})
 	return j, reply, nil
 }

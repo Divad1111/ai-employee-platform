@@ -198,3 +198,38 @@ func TestJobSourceAndAuditExecute(t *testing.T) {
 	}
 }
 
+
+func TestSchedulingBlockTimelineDeduplicatesAndKeepsRetryable(t *testing.T) {
+	ctx := context.Background()
+	svc := job.NewService(job.NewMemoryStore(), audit.NewMemory(), eventbus.New(10))
+	j, _, err := svc.Create(ctx, job.CreateInput{EmployeeID: "E", Prompt: "p", IdempotencyKey: "scheduling-block"}, "u", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, reason := range []string{"凭证不可用", "凭证不可用", "无可用工作站"} {
+		if err := svc.ReportSchedulingBlock(ctx, j.ID, reason); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := svc.Timeline(ctx, j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || events[1].Payload["reason"] != "凭证不可用" || events[2].Payload["reason"] != "无可用工作站" {
+		t.Fatal("expected creation plus two distinct scheduling reasons")
+	}
+	current, err := svc.Get(ctx, j.ID)
+	if err != nil || current.Status != job.StatusCreated {
+		t.Fatal("reporting a block must not consume the assignment")
+	}
+	if _, err := svc.Cancel(ctx, j.ID, "u", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ReportSchedulingBlock(ctx, j.ID, "late error"); err != nil {
+		t.Fatal(err)
+	}
+	events, _ = svc.Timeline(ctx, j.ID)
+	if events[len(events)-1].EventType == "SCHEDULING_BLOCKED" {
+		t.Fatal("terminal jobs must not receive new scheduling blocks")
+	}
+}

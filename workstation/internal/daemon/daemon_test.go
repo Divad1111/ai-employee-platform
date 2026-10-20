@@ -58,11 +58,15 @@ func TestDaemonIPCPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = cli.Call(context.Background(), "session.start", map[string]string{
-		"ID": "SES-1", "EmployeeID": "EMP-1", "WorkspaceID": "W1", "Provider": "cursor",
+	raw, err = cli.Call(context.Background(), "session.start", map[string]string{
+		"ID": "SES-1", "EmployeeID": "EMP-1", "WorkspaceID": "W1", "Provider": "cursor", "Model": "test-model",
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	var startedSession struct{ Model string }
+	if err := json.Unmarshal(raw, &startedSession); err != nil || startedSession.Model != "test-model" {
+		t.Fatalf("local diagnostic session lost the requested model: %s, %v", raw, err)
 	}
 	raw, err = cli.Call(context.Background(), "job.run", map[string]string{
 		"ID": "JOB-1", "EmployeeID": "EMP-1", "SessionID": "SES-1", "Prompt": "hi",

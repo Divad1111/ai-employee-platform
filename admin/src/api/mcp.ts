@@ -19,7 +19,7 @@ export type Credential = {
   owner_type: 'USER' | 'ORGANIZATION' | 'SERVICE_ACCOUNT'
   owner_id: string
   provider: string
-  auth_type: 'oauth' | 'api_key' | 'bearer' | 'pat' | 'basic'
+  auth_type: 'oauth' | 'api_key' | 'bearer' | 'token' | 'pat' | 'basic'
   credential_name: string
   secret_ref?: string
   masked_value: string
@@ -129,6 +129,7 @@ type CreateCredentialInput = {
   auth_type: string
   secret_value?: string
   expires_at?: string
+  metadata?: Record<string, any>
 }
 
 // ---------- Employee MCP Bindings API ----------

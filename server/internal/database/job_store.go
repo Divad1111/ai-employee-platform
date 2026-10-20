@@ -44,9 +44,9 @@ func (s *PostgresJobStore) Save(ctx context.Context, j *job.Job) error {
 			created_at, started_at, completed_at,
 			input_tokens, output_tokens, cached_input_tokens, cache_write_input_tokens,
 			cache_read_input_tokens, reasoning_output_tokens, total_tokens,
-			agent, token_source, token_usage_status, source
+			agent, token_source, token_usage_status, source, input_attachments
 		) VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), $6, NULLIF($7, ''), $8, $9, $10, $11, $12, $13, $14, $15,
-			$16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+			$16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 		ON CONFLICT (id) DO UPDATE SET
 			workspace_id = EXCLUDED.workspace_id,
 			session_id = EXCLUDED.session_id,
@@ -69,16 +69,23 @@ func (s *PostgresJobStore) Save(ctx context.Context, j *job.Job) error {
 			source = EXCLUDED.source
 	`
 	source := j.Source
+	attachments, err := json.Marshal(j.InputAttachments)
+	if err != nil {
+		return err
+	}
+	if len(j.InputAttachments) == 0 {
+		attachments = []byte("[]")
+	}
 	if source == "" {
 		source = "web"
 	}
-	_, err := s.db.SQL.ExecContext(ctx, query,
+	_, err = s.db.SQL.ExecContext(ctx, query,
 		j.ID, j.EmployeeID, j.WorkspaceID, j.SessionID, j.WorkstationID,
 		j.Prompt, j.ParentJobID, j.CreatedBy, j.Status, j.Result, j.IdempotencyKey, j.TimeoutSec,
 		j.CreatedAt, startedAt, completedAt,
 		j.InputTokens, j.OutputTokens, j.CachedInputTokens, j.CacheWriteInputTokens,
 		j.CacheReadInputTokens, j.ReasoningOutputTokens, j.TotalTokens,
-		j.Agent, j.TokenSource, j.TokenUsageStatus, source,
+		j.Agent, j.TokenSource, j.TokenUsageStatus, source, attachments,
 	)
 	return friendlyJobWriteErr(err)
 }
@@ -101,13 +108,14 @@ const jobSelectCols = `id, employee_id, COALESCE(workspace_id, ''), COALESCE(ses
 		       COALESCE(cached_input_tokens, 0), COALESCE(cache_write_input_tokens, 0),
 		       COALESCE(cache_read_input_tokens, 0), COALESCE(reasoning_output_tokens, 0),
 		       COALESCE(total_tokens, 0),
-		       COALESCE(agent, ''), COALESCE(token_source, ''), COALESCE(token_usage_status, ''), COALESCE(source, 'web')`
+		       COALESCE(agent, ''), COALESCE(token_source, ''), COALESCE(token_usage_status, ''), COALESCE(source, 'web'), input_attachments`
 
 func scanJob(sc interface {
 	Scan(dest ...any) error
 }) (*job.Job, error) {
 	var j job.Job
 	var startedAt, completedAt sql.NullTime
+	var attachments []byte
 	if err := sc.Scan(&j.ID, &j.EmployeeID, &j.WorkspaceID, &j.SessionID, &j.WorkstationID,
 		&j.Prompt, &j.ParentJobID, &j.CreatedBy, &j.Status, &j.Result, &j.IdempotencyKey, &j.TimeoutSec,
 		&j.CreatedAt, &startedAt, &completedAt,
@@ -115,7 +123,10 @@ func scanJob(sc interface {
 		&j.CachedInputTokens, &j.CacheWriteInputTokens,
 		&j.CacheReadInputTokens, &j.ReasoningOutputTokens,
 		&j.TotalTokens,
-		&j.Agent, &j.TokenSource, &j.TokenUsageStatus, &j.Source); err != nil {
+		&j.Agent, &j.TokenSource, &j.TokenUsageStatus, &j.Source, &attachments); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(attachments, &j.InputAttachments); err != nil {
 		return nil, err
 	}
 	if startedAt.Valid {

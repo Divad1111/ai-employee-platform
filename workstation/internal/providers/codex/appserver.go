@@ -32,6 +32,7 @@ type appServerSession struct {
 
 	mu             sync.Mutex
 	ready          bool
+	closed         bool
 	nextID         int
 	pending        map[int]chan rpcMsg
 	threadID       string
@@ -61,7 +62,7 @@ func newAppServerSession(id, bin, workspace, model string) *appServerSession {
 	}
 }
 
-func (s *appServerSession) SetMCPServers(servers []any) { s.mcp = servers }
+func (s *appServerSession) SetMCPServers(servers []any) { s.mcp = append([]any{}, servers...) }
 
 func (s *appServerSession) Ready() bool {
 	s.mu.Lock()
@@ -110,8 +111,13 @@ func (s *appServerSession) LastTokenUsage() *tokenusage.TokenUsage {
 }
 
 func (s *appServerSession) Start(ctx context.Context) error {
-	_ = ctx
+	if _, err := codexMCPConfig(s.mcp); err != nil {
+		return err
+	}
 	cmd := exec.Command(s.bin, "app-server", "--listen", "stdio://")
+	// Windows services otherwise inherit System32. The app-server process and
+	// its sandbox helpers must start from the same workspace as thread/start.
+	cmd.Dir = s.workspace
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -140,6 +146,11 @@ func (s *appServerSession) Start(ctx context.Context) error {
 		return err
 	}
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = s.Stop(context.Background())
+		return errors.New("Codex 握手期间连接已关闭")
+	}
 	s.ready = true
 	s.mu.Unlock()
 	return nil
@@ -159,6 +170,13 @@ func (s *appServerSession) Send(ctx context.Context, input []byte) (string, erro
 		}
 		if s.model != "" {
 			params["model"] = s.model
+		}
+		if len(s.mcp) > 0 {
+			mcpConfig, err := codexMCPConfig(s.mcp)
+			if err != nil {
+				return "", err
+			}
+			params["config"] = map[string]any{"mcp_servers": mcpConfig}
 		}
 		res, err := s.request(ctx, "thread/start", params)
 		if err != nil {
@@ -189,7 +207,7 @@ func (s *appServerSession) Send(ctx context.Context, input []byte) (string, erro
 
 	res, err := s.request(ctx, "turn/start", map[string]any{
 		"threadId": tid,
-		"input":    []map[string]any{{"type": "text", "text": string(input)}},
+		"input":    turnInput(ctx, string(input)),
 	})
 	if err != nil {
 		return "", err
@@ -226,6 +244,7 @@ func (s *appServerSession) Stop(_ context.Context) error {
 	in := s.stdin
 	cmd := s.cmd
 	s.mu.Unlock()
+	s.failWaiters("Codex 会话已停止")
 	if in != nil {
 		_ = in.Close()
 	}
@@ -236,8 +255,34 @@ func (s *appServerSession) Stop(_ context.Context) error {
 	return nil
 }
 
+// Stopping or losing the app-server must release both RPC and turn waiters.
+func (s *appServerSession) failWaiters(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ready = false
+	s.closed = true
+	if s.turnDone != nil {
+		select {
+		case <-s.turnDone:
+		default:
+			s.turnErr = reason
+			close(s.turnDone)
+		}
+	}
+	for id, ch := range s.pending {
+		ch <- rpcMsg{Error: &struct {
+			Message string `json:"message"`
+		}{Message: reason}}
+		delete(s.pending, id)
+	}
+}
+
 func (s *appServerSession) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, errors.New("Codex 会话已关闭")
+	}
 	s.nextID++
 	id := s.nextID
 	ch := make(chan rpcMsg, 1)
@@ -286,6 +331,7 @@ func (s *appServerSession) write(v any) error {
 }
 
 func (s *appServerSession) read(out io.Reader) {
+	defer s.failWaiters("Codex 连接已断开")
 	sc := bufio.NewScanner(out)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
@@ -303,7 +349,7 @@ func (s *appServerSession) read(out io.Reader) {
 			}
 			continue
 		}
-		if msg.ID != 0 && isCodexApprovalRequest(msg.Method) {
+		if isCodexApprovalRequest(msg.Method) {
 			go s.handleApprovalRequest(msg)
 			continue
 		}
@@ -532,11 +578,17 @@ func (s *appServerSession) onNotify(msg rpcMsg) {
 	if msg.Method == "item/started" || msg.Method == "item/completed" {
 		var p struct {
 			Item struct {
-				Type string `json:"type"`
+				Type     string `json:"type"`
+				Status   string `json:"status"`
+				Success  *bool  `json:"success"`
+				ExitCode *int   `json:"exitCode"`
 			} `json:"item"`
 		}
 		if json.Unmarshal(msg.Params, &p) == nil {
 			if text := codexActivity(p.Item.Type, msg.Method == "item/started"); text != "" {
+				if msg.Method == "item/completed" && (p.Item.Status == "failed" || p.Item.Status == "declined" || p.Item.Success != nil && !*p.Item.Success || p.Item.ExitCode != nil && *p.Item.ExitCode != 0) {
+					text = strings.TrimSuffix(text, "已完成") + "失败"
+				}
 				select {
 				case s.events <- acp.Event{Type: "agent_activity", Payload: []byte(text)}:
 				default:

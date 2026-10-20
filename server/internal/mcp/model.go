@@ -17,6 +17,7 @@ const (
 	AuthTypeOAuth  = "oauth"
 	AuthTypeAPIKey = "api_key"
 	AuthTypeBearer = "bearer"
+	AuthTypeToken  = "token"
 	AuthTypePAT    = "pat"
 	AuthTypeBasic  = "basic"
 

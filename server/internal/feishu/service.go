@@ -13,10 +13,12 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ai-employee-platform/server/internal/jobinput"
 	"github.com/ai-employee-platform/server/internal/secret"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -63,6 +65,11 @@ type IncomingEvent struct {
 	Text          string
 	QuotedContent string
 	RawType       string
+	MessageType   string // text / post / image / file ...; empty for legacy callers
+	HasMentions   bool   // Non-text messages may carry mentions outside their content.
+	Attachments   []Attachment
+	ContextError  string
+	ContextLoaded bool
 }
 
 // Reply 出站回复
@@ -134,15 +141,18 @@ type EmployeeChecker interface {
 
 // Service 飞书统一集成服务
 type Service struct {
-	mu        sync.RWMutex
-	cfg       Config
-	vault     secret.Store
-	bindings  map[string]Binding  // alias(lower) → binding
-	byOpenID  map[string][]string // open_id → 可绑定多个数字员工
-	seenEvent map[string]time.Time
-	Sender    Sender
-	Jobs      JobCreator
-	Employees EmployeeChecker
+	mu           sync.RWMutex
+	cfg          Config
+	vault        secret.Store
+	bindings     map[string]Binding  // alias(lower) → binding
+	byOpenID     map[string][]string // open_id → 可绑定多个数字员工
+	seenEvent    map[string]time.Time
+	Sender       Sender
+	Jobs         JobCreator
+	Employees    EmployeeChecker
+	Commands     CommandDirectory
+	InputFiles   *jobinput.Store
+	pendingFiles map[string]pendingAttachments
 
 	// 官方 SDK 核心驱动组件
 	larkClient     *lark.Client
@@ -356,7 +366,11 @@ func (s *Service) rebuildLarkLocked() {
 			msg := event.Event.Message
 			rawText := ""
 			if msg.Content != nil {
-				rawText = extractTextContent(*msg.Content)
+				msgType := ""
+				if msg.MessageType != nil {
+					msgType = *msg.MessageType
+				}
+				rawText = ParseMessageBody(msgType, *msg.Content)
 			}
 			openID := ""
 			if event.Event.Sender != nil && event.Event.Sender.SenderId != nil && event.Event.Sender.SenderId.OpenId != nil {
@@ -388,11 +402,15 @@ func (s *Service) rebuildLarkLocked() {
 
 			// 2. 如果存在引用/回复父消息，拉取父消息内容作为上下文
 			quotedContent := ""
+			var quotedFiles []Attachment
+			contextError := ""
 			if parentID != "" {
-				if qc, err := s.FetchMessageContent(ctx, parentID); err == nil && qc != "" {
+				if qc, files, err := s.FetchMessageContext(ctx, parentID, chatID); err == nil {
 					quotedContent = qc
+					quotedFiles = files
 					fmt.Printf("[Feishu] 📎 提取到引用/回复父消息上下文 (parentID=%s): %s\n", parentID, truncateStr(qc, 100))
 				} else if err != nil {
+					contextError = "引用消息读取失败, 请重新发送附件或确认机器人有读取消息权限。"
 					fmt.Printf("[Feishu] ⚠️ 获取引用父消息失败 (parentID=%s): %v\n", parentID, err)
 				}
 			}
@@ -407,7 +425,17 @@ func (s *Service) rebuildLarkLocked() {
 				Text:          text,
 				QuotedContent: quotedContent,
 				RawType:       "im.message.receive_v1",
+				HasMentions:   len(msg.Mentions) > 0,
+				ContextError:  contextError,
+				ContextLoaded: parentID != "",
 			}
+			if msg.MessageType != nil {
+				incoming.MessageType = *msg.MessageType
+				if msg.Content != nil {
+					incoming.Attachments = ParseAttachments(*msg.MessageType, *msg.Content, msgID)
+				}
+			}
+			incoming.Attachments = uniqueAttachments(append(incoming.Attachments, quotedFiles...))
 			fmt.Printf("[Feishu] 📩 收到消息事件: sender=%s, chat=%s, chatType=%s, msgID=%s, text=%q, parentID=%s\n", openID, chatID, chatType, msgID, text, parentID)
 			jobID, dup, err := s.HandleMessage(ctx, incoming)
 			if err != nil {
@@ -628,6 +656,12 @@ func (s *Service) cacheStatus(res *StatusResult) {
 // SendMessage 基于官方 SDK 发送消息至飞书用户或群聊
 // content 可以是纯文本字符串，也可以是消息卡片 JSON（自动检测）
 func (s *Service) SendMessage(ctx context.Context, receiveIDType, receiveID, content string) (*SendResult, error) {
+	return s.SendMessageWithKey(ctx, receiveIDType, receiveID, content, "")
+}
+
+// SendMessageWithKey uses Feishu's message UUID to avoid duplicate receipts
+// when a successful create response is lost and the card worker retries.
+func (s *Service) SendMessageWithKey(ctx context.Context, receiveIDType, receiveID, content, key string) (*SendResult, error) {
 	s.mu.RLock()
 	client := s.larkClient
 	cfg := s.cfg
@@ -678,14 +712,14 @@ func (s *Service) SendMessage(ctx context.Context, receiveIDType, receiveID, con
 		contentPayload = string(contentBytes)
 	}
 
-	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(receiveIDType).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(receiveID).
-			MsgType(msgType).
-			Content(contentPayload).
-			Build()).
-		Build()
+	body := larkim.NewCreateMessageReqBodyBuilder().
+		ReceiveId(receiveID).
+		MsgType(msgType).
+		Content(contentPayload)
+	if key != "" {
+		body.Uuid(key)
+	}
+	req := larkim.NewCreateMessageReqBuilder().ReceiveIdType(receiveIDType).Body(body.Build()).Build()
 
 	resp, err := client.Im.Message.Create(ctx, req)
 	if err != nil {
@@ -1081,11 +1115,7 @@ var (
 // CleanPrompt 剔除开头的全部 @提及 标记（例如 "@AI员工 @合并"），返回纯净的任务指令
 func (s *Service) CleanPrompt(text string) string {
 	text = strings.TrimSpace(text)
-	cleaned := strings.TrimSpace(reLeadingMentions.ReplaceAllString(text, ""))
-	if cleaned != "" {
-		return cleaned
-	}
-	return text
+	return strings.TrimSpace(reLeadingMentions.ReplaceAllString(text, ""))
 }
 
 // ResolveMentions 将飞书文本中的 @_user_x 占位符还原为真实姓名/别名
@@ -1126,7 +1156,7 @@ func (s *Service) ParseTarget(text string) (employeeID, prompt string, err error
 		key := m[1]
 		prompt = s.CleanPrompt(m[2])
 		if strings.HasPrefix(strings.ToUpper(key), "EMP-") {
-			return strings.ToUpper(key), prompt, nil
+			return s.canonicalEmployeeID(key), prompt, nil
 		}
 		s.mu.RLock()
 		b, ok := s.bindings[strings.ToLower(key)]
@@ -1137,7 +1167,7 @@ func (s *Service) ParseTarget(text string) (employeeID, prompt string, err error
 		return b.EmployeeID, prompt, nil
 	}
 	if m := reEmpID.FindStringSubmatch(body); len(m) == 2 {
-		id := strings.ToUpper(m[1])
+		id := s.canonicalEmployeeID(m[1])
 		p := strings.TrimSpace(reEmpID.ReplaceAllString(text, ""))
 		prompt = s.CleanPrompt(p)
 		return id, prompt, nil
@@ -1234,6 +1264,7 @@ func (s *Service) boundAliases() []string {
 		seen[key] = struct{}{}
 		out = append(out, alias)
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -1276,6 +1307,22 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 	if s.Dedupe(ev.EventID) {
 		return "", true, nil
 	}
+	if len(ev.Attachments) > 0 && (ev.MessageType == "image" || ev.MessageType == "file") {
+		stageErr := s.stageAttachments(ev)
+		if !isP2PChat(ev.ChatType) && !ev.HasMentions {
+			return "", false, stageErr
+		}
+		if stageErr != nil {
+			return "", false, s.sendCommandReply(ctx, ev.ChatID, stageErr.Error())
+		}
+		return "", false, s.sendCommandReply(ctx, ev.ChatID, "已收到附件, 暂存 15 分钟。请在当前会话发送 `@员工 任务需求` 或 `/emp 员工 任务需求`, 也可以回复原附件消息并派单。\n每条任务最多 10 个附件, 单个 32 MiB, 合计 64 MiB。\n`/files` 查看待派单附件, `/clear files` 清空。")
+	}
+	if ev.MessageType != "" && ev.MessageType != "text" && ev.MessageType != "post" {
+		if isP2PChat(ev.ChatType) || ev.HasMentions || looksLikeEmployeeAddress(ev.Text) {
+			return "", false, s.sendCommandReply(ctx, ev.ChatID, "暂不支持该消息格式或消息缺少附件资源, 请使用文本、图片、文件或富文本消息。\n\n"+mentionGuidance(s.boundAliases()))
+		}
+		return "", false, nil
+	}
 
 	// 优先检查是否为针对待确认决策/安全选项的直接文本回复
 	s.mu.RLock()
@@ -1287,9 +1334,17 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 			return "", false, inqErr
 		}
 	}
+	if handled, commandErr := s.handleChatCommand(ctx, ev); handled {
+		return "", false, commandErr
+	}
 
 	empID, prompt, err := s.ParseTarget(ev.Text)
 	if err != nil || empID == "" {
+		if len(ev.Attachments) > 0 {
+			if stageErr := s.stageAttachments(ev); stageErr != nil {
+				return "", false, s.sendCommandReply(ctx, ev.ChatID, stageErr.Error())
+			}
+		}
 		shouldHint := isP2PChat(ev.ChatType) || looksLikeEmployeeAddress(ev.Text)
 		if shouldHint && s.Sender != nil && ev.ChatID != "" {
 			card := BuildMentionRequiredCard(s.boundAliases())
@@ -1300,12 +1355,32 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		prompt = s.CleanPrompt(ev.Text)
+		if len(ev.Attachments) > 0 {
+			if stageErr := s.stageAttachments(ev); stageErr != nil {
+				return "", false, s.sendCommandReply(ctx, ev.ChatID, stageErr.Error())
+			}
+		}
+		return "", false, s.sendCommandReply(ctx, ev.ChatID, "请在目标员工后填写任务需求。\n\n"+mentionGuidance(s.boundAliases()))
 	}
-	if prompt == "" {
-		prompt = ev.Text
+	// Legacy natural-language controls use the same pre-existing binding check
+	// as slash commands, before assignability and automatic task binding.
+	s.mu.RLock()
+	taskConversations := s.TaskConversations
+	s.mu.RUnlock()
+	if taskConversations != nil {
+		if reply, handled := taskConversations.HandleEmployeeCommand(ctx, empID, prompt, ev.SenderOpenID); handled {
+			return "", false, s.sendCommandReply(ctx, ev.ChatID, reply)
+		}
 	}
 
+	if ev.ParentID != "" && !ev.ContextLoaded && ev.QuotedContent == "" {
+		quoted, files, quoteErr := s.FetchMessageContext(ctx, ev.ParentID, ev.ChatID)
+		if quoteErr != nil {
+			return "", false, s.sendCommandReply(ctx, ev.ChatID, "引用消息读取失败, 请重新发送附件或确认机器人有读取消息权限。")
+		}
+		ev.QuotedContent = quoted
+		ev.Attachments = uniqueAttachments(append(ev.Attachments, files...))
+	}
 	// 组装最终派发给工作站的完整 prompt（注入引用/上下文）
 	fullPrompt := prompt
 	if ev.QuotedContent != "" {
@@ -1328,21 +1403,26 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 	}
 	group := !isP2PChat(ev.ChatType)
 	notice := FormatIdentityNotice(s.AutoBindFromMention(empID, ev.SenderOpenID, ev.ChatID, group))
-	s.mu.RLock()
-	taskConversations := s.TaskConversations
-	s.mu.RUnlock()
-	if taskConversations != nil {
-		if reply, handled := taskConversations.HandleEmployeeCommand(ctx, empID, prompt, ev.SenderOpenID); handled {
-			if s.Sender != nil && ev.ChatID != "" {
-				_ = s.Sender.Send(ctx, Reply{ChatID: ev.ChatID, Content: reply})
-			}
-			return "", false, nil
-		}
-	}
 	if s.Jobs == nil {
 		return "", false, errors.New("未配置 JobCreator")
 	}
-	jobID, err = s.Jobs.CreateFromFeishu(ctx, empID, fullPrompt, idem, ev.ChatID, ev.MessageID, ev.SenderOpenID)
+	if ev.ContextError != "" {
+		return "", false, s.sendCommandReply(ctx, ev.ChatID, ev.ContextError)
+	}
+	files := s.taskAttachments(ev)
+	if len(files) > 0 {
+		creator, ok := s.Jobs.(AttachmentJobCreator)
+		if !ok {
+			return "", false, s.sendCommandReply(ctx, ev.ChatID, "任务服务尚不支持附件, 请更新服务端后重试。")
+		}
+		stored, downloadErr := s.downloadAttachments(ctx, files)
+		if downloadErr != nil {
+			return "", false, s.sendCommandReply(ctx, ev.ChatID, "附件准备失败: "+downloadErr.Error()+"。未创建任务, 可重试或使用 /clear files 清空暂存。")
+		}
+		jobID, err = creator.CreateFromFeishuWithAttachments(ctx, empID, fullPrompt, idem, ev.ChatID, ev.MessageID, ev.SenderOpenID, stored)
+	} else {
+		jobID, err = s.Jobs.CreateFromFeishu(ctx, empID, fullPrompt, idem, ev.ChatID, ev.MessageID, ev.SenderOpenID)
+	}
 	if err != nil {
 		if s.Sender != nil && ev.ChatID != "" {
 			card := BuildTaskFailedCard(err, notice)
@@ -1350,6 +1430,7 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 		}
 		return "", false, err
 	}
+	s.consumeAttachments(ev, files)
 	if taskConversations != nil && taskConversations.ManagesJob(ctx, jobID) {
 		// The task conversation service creates and updates this Job's own card.
 		return jobID, false, nil
@@ -1489,20 +1570,11 @@ func ParseMessageBody(msgType, raw string) string {
 	// 2. 尝试作为 post 富文本解析
 	var genericMap map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &genericMap); err == nil {
-		// 直接包含 content 字段
-		if _, hasContent := genericMap["content"]; hasContent {
-			if parsed := parsePostContent(genericMap); parsed != "" {
-				return parsed
-			}
-		}
-		// 语言包装，如 zh_cn, en_us 等
-		for _, langData := range genericMap {
-			var langMap map[string]json.RawMessage
-			if err := json.Unmarshal(langData, &langMap); err == nil {
-				if _, hasContent := langMap["content"]; hasContent {
-					if parsed := parsePostContent(langMap); parsed != "" {
-						return parsed
-					}
+		// Use the same deterministic root/locale selection as resource parsing.
+		for _, body := range postResourceContainers(genericMap) {
+			if body["content"] != nil || body["content_v2"] != nil {
+				if parsed := parsePostContent(body); parsed != "" {
+					return parsed
 				}
 			}
 		}
@@ -1522,8 +1594,10 @@ func parsePostContent(m map[string]json.RawMessage) string {
 	}
 
 	var contentRows [][]map[string]interface{}
-	if cRaw, ok := m["content"]; ok {
-		_ = json.Unmarshal(cRaw, &contentRows)
+	for _, field := range []string{"content", "content_v2"} {
+		if json.Unmarshal(m[field], &contentRows) == nil && len(contentRows) > 0 {
+			break
+		}
 	}
 
 	var sb strings.Builder
@@ -1624,11 +1698,13 @@ func ParseWebhookBody(body []byte) (challenge string, token string, ev *Incoming
 		Event struct {
 			Type    string `json:"type"`
 			Message struct {
-				ChatID    string `json:"chat_id"`
-				ChatType  string `json:"chat_type"`
-				MessageID string `json:"message_id"`
-				ParentID  string `json:"parent_id"`
-				Content   string `json:"content"`
+				ChatID      string            `json:"chat_id"`
+				ChatType    string            `json:"chat_type"`
+				MessageID   string            `json:"message_id"`
+				ParentID    string            `json:"parent_id"`
+				Content     string            `json:"content"`
+				MessageType string            `json:"message_type"`
+				Mentions    []json.RawMessage `json:"mentions"`
 			} `json:"message"`
 			Sender struct {
 				SenderID struct {
@@ -1660,7 +1736,7 @@ func ParseWebhookBody(body []byte) (challenge string, token string, ev *Incoming
 
 	// 2. 消息事件 - v2 格式
 	if base.Header.EventType == "im.message.receive_v1" || base.Event.Message.MessageID != "" {
-		text := extractTextContent(base.Event.Message.Content)
+		text := ParseMessageBody(base.Event.Message.MessageType, base.Event.Message.Content)
 		return "", tok, &IncomingEvent{
 			EventID:      base.Header.EventID,
 			MessageID:    base.Event.Message.MessageID,
@@ -1670,6 +1746,9 @@ func ParseWebhookBody(body []byte) (challenge string, token string, ev *Incoming
 			SenderOpenID: base.Event.Sender.SenderID.OpenID,
 			Text:         text,
 			RawType:      base.Header.EventType,
+			MessageType:  base.Event.Message.MessageType,
+			HasMentions:  len(base.Event.Message.Mentions) > 0,
+			Attachments:  ParseAttachments(base.Event.Message.MessageType, base.Event.Message.Content, base.Event.Message.MessageID),
 		}, nil
 	}
 

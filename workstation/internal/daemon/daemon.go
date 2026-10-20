@@ -17,6 +17,7 @@ import (
 	"time"
 
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
+	input "github.com/ai-employee-platform/gen/jobinput"
 	"github.com/ai-employee-platform/workstation/internal/acp"
 	"github.com/ai-employee-platform/workstation/internal/artifactlocal"
 	"github.com/ai-employee-platform/workstation/internal/config"
@@ -403,14 +404,15 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			return nil
 		}
 		var payload struct {
-			Prompt              string `json:"prompt"`
-			WorkspaceID         string `json:"workspace_id"`
-			WorkspacePath       string `json:"workspace_path"`
-			Model               string `json:"model"`
-			Provider            string `json:"provider"`
-			SessionGeneration   int64  `json:"session_generation"`
-			ConversationContext string `json:"conversation_context"`
-			ResetSessionContext bool   `json:"reset_session_context"`
+			Prompt              string       `json:"prompt"`
+			WorkspaceID         string       `json:"workspace_id"`
+			WorkspacePath       string       `json:"workspace_path"`
+			Model               string       `json:"model"`
+			Provider            string       `json:"provider"`
+			SessionGeneration   int64        `json:"session_generation"`
+			ConversationContext string       `json:"conversation_context"`
+			ResetSessionContext bool         `json:"reset_session_context"`
+			InputAttachments    []input.File `json:"input_attachments"`
 		}
 		if pJSON := cmd.GetPayloadJson(); pJSON != "" {
 			_ = json.Unmarshal([]byte(pJSON), &payload)
@@ -482,7 +484,13 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			targetSessionID += "-" + strconv.FormatInt(payload.SessionGeneration, 10)
 		}
 		mcpFingerprint := runtime.FingerprintMCPServers(mcpServers)
-		if activeSess != nil && activeSess.ID == targetSessionID && activeSess.Provider == provider && activeSess.Model == payload.Model && activeSess.MCPFingerprint == mcpFingerprint {
+		if activeSess != nil && activeSess.Status == runtime.SessBusy {
+			err := runtime.ErrActiveSession
+			_ = sess.EnqueueEvent(d.newEvent(jobID, activeSess.ID, empID, aiev1.EventType_EVENT_TYPE_JOB_FAILED,
+				fmt.Sprintf(`{"error":%q,"session_id":%q}`, err.Error(), activeSess.ID)))
+			return err
+		}
+		if activeSess != nil && activeSess.ID == targetSessionID && activeSess.Provider == provider && activeSess.Model == payload.Model && activeSess.MCPFingerprint == mcpFingerprint && d.Runtime.SessionReady(activeSess.ID) {
 			sessID = activeSess.ID
 		} else {
 			restoreContext = true
@@ -495,7 +503,7 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			startCtx, startCancel := context.WithTimeout(ctx, 2*time.Minute)
 			_, err := d.Runtime.StartSessionWithMCP(startCtx, sessID, empID, wsID, provider, mcpServers, payload.Model)
 			startCancel()
-			if err != nil && err != runtime.ErrActiveSession {
+			if err != nil {
 				_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_ERROR,
 					fmt.Sprintf(`{"status":"ERROR","error":%q}`, err.Error())))
 				_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_FAILED,
@@ -522,6 +530,13 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			}()
 			output := &outputBatcher{daemon: d, jobID: jobID, session: sessID, employee: empID}
 			effectivePrompt := promptWithMarkdownDefault(payload.Prompt)
+			files, fileErr := d.ArtUpload.DownloadInputs(jobCtx, jobID, payload.WorkspacePath, payload.InputAttachments)
+			if fileErr != nil {
+				_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_JOB_FAILED, fmt.Sprintf(`{"error":%q,"session_id":%q}`, fileErr.Error(), sessID)))
+				return
+			}
+			effectivePrompt = acp.PromptWithFiles(effectivePrompt, files)
+			jobCtx = acp.WithInputFiles(jobCtx, files)
 			if restoreContext && !payload.ResetSessionContext && payload.ConversationContext != "" {
 				effectivePrompt = "【此前同一会话的消息，仅用于理解背景；不要重复执行历史任务】\n" + payload.ConversationContext +
 					"\n【本轮用户任务】\n" + effectivePrompt
@@ -746,9 +761,9 @@ func (d *Daemon) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 		}
 		return okResult(w)
 	case "session.start":
-		var p struct{ ID, EmployeeID, WorkspaceID, Provider string }
+		var p struct{ ID, EmployeeID, WorkspaceID, Provider, Model string }
 		_ = json.Unmarshal(req.Params, &p)
-		s, err := d.Runtime.StartSession(ctx, p.ID, p.EmployeeID, p.WorkspaceID, p.Provider)
+		s, err := d.Runtime.StartSessionWithMCP(ctx, p.ID, p.EmployeeID, p.WorkspaceID, p.Provider, nil, p.Model)
 		if err != nil {
 			return errResp(err)
 		}

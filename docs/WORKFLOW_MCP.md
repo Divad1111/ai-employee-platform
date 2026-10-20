@@ -39,6 +39,27 @@ MCP tools：`list/get/search/upsert/delete` 覆盖工作流、技能、知识；
 
 侧栏「工作流管理」`/workflows`：三 Tab（工作流 / 技能包 / 知识库）。员工详情：授权工作流、有效技能闭包、MCP Token 签发/吊销。
 
+## 外部 MCP 身份凭证
+
+在「MCP 服务与能力扩展管理」的身份凭证表单中选择认证方式与注入方式，再在员工详情中绑定对应服务和凭证。密钥保存在 SecretManager；`metadata` 仅存放非敏感的注入设置。
+
+- `bearer`、`oauth`、`pat`：默认发送 `Authorization: Bearer <密钥>`。`oauth` 目前仅接收已取得的访问令牌，不自动登录或续期。
+- `token`：发送 `Authorization: Token <密钥>`。
+- `basic`：密钥填写 `用户名:密码`，运行时编码为 `Authorization: Basic <Base64>`。
+- `api_key`：为兼容已有配置，未配置注入设置时仍使用 Bearer。需要 API Key 请求头时填写 `header_name`，如 `X-API-Key`，默认直接发送密钥原值。
+- `metadata.header_prefix`：可指定其它认证前缀；显式空字符串表示不加前缀。
+- STDIO 服务：选择环境变量注入并填写 `metadata.env_name`，密钥原值将传入该变量。此方式不能同时配置请求头。
+
+例如，API Key 凭证的非敏感配置为：
+
+```json
+{"header_name":"X-API-Key","header_prefix":""}
+```
+
+调度时，绑定凭证会覆盖同名请求头（不区分大小写）或同名环境变量，其它配置保留。凭证必须处于 `active` 状态，且 `expires_at` 未到期、密钥可读取；失败时阻止本次任务下发并保留可重试状态。自动续期暂未实现，需要手动更新密钥及有效期。此检查发生在任务下发前，不会主动撤销已运行会话中的上游凭证。
+
+Cursor 通过 ACP `session/new.mcpServers` 接收配置，请求头和环境变量转换为 name/value 列表。Codex 通过 `thread/start.config.mcp_servers` 接收 HTTP 的 `http_headers` 或 STDIO 的 `command/args/env`，不会写入用户全局配置文件。Codex 不支持旧版 SSE 服务，需改为 Streamable HTTP。
+
 ## 导入
 
 `POST /api/workflow-mcp/import`（multipart `file`）：上传 PersonalWorkMCP 的 `data/` zip（`workflows/*.yaml`、`skills/<name>/SKILL.md`、`knowledge/**/*.md`）。

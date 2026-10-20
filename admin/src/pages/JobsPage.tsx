@@ -258,7 +258,43 @@ export function JobsPage() {
     filter === 'active' ? '当前活跃任务' : filter === 'errors' ? '异常与错误任务' : '全部任务'
 
   useEffect(() => {
-    void load().catch((e) => setError(String(e)))
+    let cancelled = false
+    let refreshing = false
+    const refresh = async (initial = false) => {
+      if (cancelled || refreshing || (!initial && document.hidden)) return
+      refreshing = true
+      if (initial) setLoading(true)
+      try {
+        const jobsData = await apiGet<{ items: Job[] }>('/jobs')
+        if (!cancelled) setItems(jobsData.items ?? [])
+        if (initial) {
+          const [empData, wsData] = await Promise.all([
+            apiGet<{ items: Array<{ id: string; name: string }> }>('/employees').catch(() => ({ items: [] })),
+            apiGet<{ items: Array<{ id: string; path?: string; repository?: string }> }>('/workspaces').catch(() => ({ items: [] })),
+          ])
+          if (!cancelled) {
+            setEmployees(empData.items ?? [])
+            setWorkspaces(wsData.items ?? [])
+          }
+        }
+      } catch (e) {
+        if (!cancelled && initial) setError(String(e))
+      } finally {
+        refreshing = false
+        if (!cancelled && initial) setLoading(false)
+      }
+    }
+    const onVisible = () => { void refresh() }
+    const timer = window.setInterval(() => void refresh(), 3000)
+    window.addEventListener('focus', onVisible)
+    document.addEventListener('visibilitychange', onVisible)
+    void refresh(true)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      window.removeEventListener('focus', onVisible)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [])
 
   async function onCreate(e: FormEvent) {
@@ -325,7 +361,7 @@ export function JobsPage() {
       <header className="page-header">
         <div>
           <h1>任务流转中心 (Jobs)</h1>
-          <p>任务由飞书消息或管理后台触发，经由调度器分发至对应的工作站与数字员工执行</p>
+          <p>任务由飞书消息或管理后台触发，列表自动更新任务创建与执行状态</p>
         </div>
         <button type="button" className="btn-ghost" onClick={() => void load()} disabled={loading}>
           <IconRefresh size={15} />
@@ -593,22 +629,43 @@ export function JobDetailPage() {
 
   useEffect(() => {
     if (!id) return
-    void apiGet<Job>(`/jobs/${id}`)
-      .then((jb) => {
+    let cancelled = false
+    let refreshing = false
+    let employeeId = ''
+    // 执行中的任务持续刷新, 使调度阻塞原因和后续状态无需手动刷新即可显示。
+    const refresh = async () => {
+      if (cancelled || refreshing) return
+      refreshing = true
+      try {
+        const [jb, timeline, usage] = await Promise.all([
+          apiGet<Job>(`/jobs/${id}`),
+          apiGet<{ items: JobEvent[] }>(`/jobs/${id}/events`),
+          apiGet<TokenUsageView>(`/jobs/${id}/token-usage`).catch(() => null),
+        ])
+        if (cancelled) return
         setJob(jb)
-        if (jb.employee_id) {
+        setEvents(timeline.items ?? [])
+        setTokenUsage(usage)
+        setError('')
+        if (jb.employee_id && jb.employee_id !== employeeId) {
+          employeeId = jb.employee_id
           void apiGet<{ name: string }>(`/employees/${jb.employee_id}`)
-            .then((e) => setEmpName(e.name))
+            .then((e) => { if (!cancelled) setEmpName(e.name) })
             .catch(() => undefined)
         }
-      })
-      .catch((e: Error) => setError(e.message))
-    void apiGet<{ items: JobEvent[] }>(`/jobs/${id}/events`)
-      .then((d) => setEvents(d.items ?? []))
-      .catch(() => undefined)
-    void apiGet<TokenUsageView>(`/jobs/${id}/token-usage`)
-      .then((u) => setTokenUsage(u))
-      .catch(() => setTokenUsage(null))
+        if (isTerminal(jb.status)) window.clearInterval(timer)
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : '刷新任务失败')
+      } finally {
+        refreshing = false
+      }
+    }
+    const timer = window.setInterval(() => void refresh(), 3000)
+    void refresh()
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
   }, [id])
 
   if (!job) {

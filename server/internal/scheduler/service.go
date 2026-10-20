@@ -96,9 +96,16 @@ func (s *Service) SetWorkspaces(ws *workspace.Service) { s.Workspaces = ws }
 func (s *Service) SetTaskQueue(gate taskQueueGate) { s.TaskQueue = gate }
 
 // ScheduleJob 将 CREATED/QUEUED Job 分配到可用 WS 并下发 START_JOB。
-func (s *Service) ScheduleJob(ctx context.Context, jobID string) (*job.Job, error) {
+func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job.Job, scheduleErr error) {
 	s.scheduleMu.Lock()
 	defer s.scheduleMu.Unlock()
+	defer func() {
+		if scheduleErr != nil && s.Jobs != nil {
+			if err := s.Jobs.ReportSchedulingBlock(ctx, jobID, scheduleErr.Error()); err != nil && !errors.Is(err, job.ErrNotFound) {
+				fmt.Printf("[Scheduler] 记录任务 %s 的阻塞原因失败: %v\n", jobID, err)
+			}
+		}
+	}()
 	j, err := s.Jobs.Get(ctx, jobID)
 	if err != nil {
 		return nil, err
@@ -162,6 +169,20 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (*job.Job, erro
 	if j.WorkspaceID == "" {
 		j.WorkspaceID = emp.WorkspaceID
 	}
+	workspacePath := ""
+	if s.Workspaces != nil && j.WorkspaceID != "" {
+		if wsp, err := s.Workspaces.Get(ctx, j.WorkspaceID); err == nil && wsp != nil {
+			workspacePath = wsp.Path
+		}
+	}
+	// 先校验运行时凭证，失败时保留任务可重试状态，避免卡在 ASSIGNED。
+	var startJob *aiev1.StartJobPayload
+	if s.Pusher != nil && (s.WorkflowMCP != nil || s.MCP != nil) {
+		startJob, err = s.buildStartJobPayload(ctx, j.EmployeeID, j.Prompt, j.WorkspaceID, workspacePath, j.WorkflowID)
+		if err != nil {
+			return j, err
+		}
+	}
 
 	if j.Status == job.StatusCreated {
 		if _, err = s.Jobs.Transition(ctx, jobID, job.StatusQueued, "scheduler", "", nil); err != nil {
@@ -177,12 +198,13 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (*job.Job, erro
 	j, _ = s.Jobs.Get(ctx, jobID)
 
 	if s.Pusher != nil {
-		payload := map[string]string{
+		payload := map[string]any{
 			"prompt":                j.Prompt,
 			"workspace_id":          j.WorkspaceID,
 			"provider":              emp.DefaultProvider,
-			"session_generation":    fmt.Sprintf("%d", emp.SessionGeneration),
-			"reset_session_context": fmt.Sprintf("%t", emp.SessionContextResetGeneration == emp.SessionGeneration),
+			"session_generation":    emp.SessionGeneration,
+			"reset_session_context": emp.SessionContextResetGeneration == emp.SessionGeneration,
+			"input_attachments":     j.InputAttachments,
 		}
 		if ctxProvider, ok := s.TaskQueue.(taskQueueContext); ok {
 			conversationContext, contextErr := ctxProvider.ConversationContext(ctx, j.ID)
@@ -196,30 +218,18 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (*job.Job, erro
 		if emp.DefaultModel != "" {
 			payload["model"] = emp.DefaultModel
 		}
-		workspacePath := ""
-		if s.Workspaces != nil && j.WorkspaceID != "" {
-			if wsp, err := s.Workspaces.Get(ctx, j.WorkspaceID); err == nil && wsp != nil && wsp.Path != "" {
-				payload["workspace_path"] = wsp.Path
-				workspacePath = wsp.Path
-			}
+		if workspacePath != "" {
+			payload["workspace_path"] = workspacePath
 		}
 		payloadJSON, _ := json.Marshal(payload)
 
-		var startJob *aiev1.StartJobPayload
-		if s.WorkflowMCP != nil {
-			var err error
-			startJob, err = s.buildStartJobPayload(ctx, j.EmployeeID, j.Prompt, j.WorkspaceID, workspacePath, j.WorkflowID)
-			if err != nil {
-				return j, err
+		if startJob != nil && startJob.WorkflowId != "" {
+			j.WorkflowID = startJob.WorkflowId
+			j.WorkflowSnapshot = map[string]any{
+				"id": startJob.WorkflowId, "version": startJob.WorkflowVersion,
 			}
-			if startJob != nil && startJob.WorkflowId != "" {
-				j.WorkflowID = startJob.WorkflowId
-				j.WorkflowSnapshot = map[string]any{
-					"id": startJob.WorkflowId, "version": startJob.WorkflowVersion,
-				}
-				if s.Jobs != nil {
-					_ = s.Jobs.SetWorkflowSnapshot(ctx, j.ID, j.WorkflowID, j.WorkflowSnapshot)
-				}
+			if s.Jobs != nil {
+				_ = s.Jobs.SetWorkflowSnapshot(ctx, j.ID, j.WorkflowID, j.WorkflowSnapshot)
 			}
 		}
 

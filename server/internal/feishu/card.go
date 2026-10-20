@@ -204,6 +204,10 @@ func BuildGuideCard(rawText string) *Card {
 
 // BuildMentionRequiredCard 私聊未 @ 员工时的提示卡片：请 @ 对应员工执行。
 func BuildMentionRequiredCard(aliases []string) *Card {
+	return NewMarkdownCard("请@对应员工执行", CardTemplateOrange, mentionGuidance(aliases), "AI Employee 企业员工协同平台")
+}
+
+func mentionGuidance(aliases []string) string {
 	var sb strings.Builder
 	sb.WriteString("请 **@对应员工** 后再发送任务，否则无法派单执行。\n\n")
 	sb.WriteString("**派发格式示例：**\n")
@@ -225,14 +229,9 @@ func BuildMentionRequiredCard(aliases []string) *Card {
 		}
 		sb.WriteString("\n\n")
 	}
-	sb.WriteString("> ℹ️ 群聊中未 @ 数字员工的消息会被忽略；私聊也需要明确 @ 目标员工。")
-
-	return NewMarkdownCard(
-		"请@对应员工执行",
-		CardTemplateOrange,
-		sb.String(),
-		"AI Employee 企业员工协同平台",
-	)
+	sb.WriteString(commandHelpMarkdown())
+	sb.WriteString("\n> ℹ️ 命令可直接发送；派单需要明确目标员工。群聊中普通闲聊会被忽略。")
+	return sb.String()
 }
 
 // BuildNotAssignableCard 构建数字员工不可派单警告卡片

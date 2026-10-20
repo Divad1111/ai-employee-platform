@@ -333,9 +333,10 @@ func runSession(args []string) error {
 		emp := fs.String("employee", "", "")
 		ws := fs.String("workspace", "", "")
 		prov := fs.String("provider", "", "")
+		model := fs.String("model", "", "诊断会话使用的模型; 省略则使用引擎默认值")
 		_ = fs.Parse(args[1:])
 		raw, err := ipcCall("session.start", map[string]string{
-			"ID": *id, "EmployeeID": *emp, "WorkspaceID": *ws, "Provider": *prov,
+			"ID": *id, "EmployeeID": *emp, "WorkspaceID": *ws, "Provider": *prov, "Model": *model,
 		})
 		if err != nil {
 			return err

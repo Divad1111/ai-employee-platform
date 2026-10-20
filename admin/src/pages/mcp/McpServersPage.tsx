@@ -65,6 +65,11 @@ export function McpServersPage() {
   const [credProvider, setCredProvider] = useState('github')
   const [credAuthType, setCredAuthType] = useState('pat')
   const [credSecret, setCredSecret] = useState('')
+  const [credInjection, setCredInjection] = useState<'header' | 'env'>('header')
+  const [credHeaderName, setCredHeaderName] = useState('')
+  const [credHeaderPrefix, setCredHeaderPrefix] = useState('')
+  const [credRawHeader, setCredRawHeader] = useState(false)
+  const [credEnvName, setCredEnvName] = useState('')
 
   const userMap = useMemo(() => {
     const map: Record<string, string> = {}
@@ -179,6 +184,11 @@ export function McpServersPage() {
     setCredProvider('github')
     setCredAuthType('pat')
     setCredSecret('')
+    setCredInjection('header')
+    setCredHeaderName('')
+    setCredHeaderPrefix('')
+    setCredRawHeader(false)
+    setCredEnvName('')
     setShowCredModal(true)
   }
 
@@ -190,6 +200,11 @@ export function McpServersPage() {
     setCredProvider(c.provider)
     setCredAuthType(c.auth_type)
     setCredSecret('')
+    setCredInjection(c.metadata?.env_name ? 'env' : 'header')
+    setCredHeaderName(c.metadata?.header_name || '')
+    setCredHeaderPrefix(c.metadata?.header_prefix || '')
+    setCredRawHeader(c.metadata?.header_prefix === '')
+    setCredEnvName(c.metadata?.env_name || '')
     setShowCredModal(true)
   }
 
@@ -205,6 +220,18 @@ export function McpServersPage() {
     if (credOwnerType === 'ORGANIZATION') {
       effectiveOwnerId = 'ORGANIZATION'
     }
+    // 保留其它扩展元数据，仅替换本表单管理的认证注入设置。
+    const metadata = { ...editingCred?.metadata }
+    delete metadata.header_name
+    delete metadata.header_prefix
+    delete metadata.env_name
+    if (credInjection === 'env') {
+      metadata.env_name = credEnvName.trim()
+    } else {
+      if (credHeaderName.trim()) metadata.header_name = credHeaderName.trim()
+      if (credRawHeader) metadata.header_prefix = ''
+      else if (credHeaderPrefix.trim()) metadata.header_prefix = credHeaderPrefix.trim()
+    }
     try {
       if (editingCred) {
         await updateCredential(editingCred.id, {
@@ -214,6 +241,7 @@ export function McpServersPage() {
           provider: credProvider,
           auth_type: credAuthType,
           secret_value: credSecret || undefined,
+          metadata,
         })
         setMsg(`凭证 [${credName}] 更新成功`)
       } else {
@@ -228,6 +256,7 @@ export function McpServersPage() {
           provider: credProvider,
           auth_type: credAuthType,
           secret_value: credSecret,
+          metadata,
         })
         setMsg(`凭证 [${credName}] 创建成功`)
       }
@@ -767,11 +796,40 @@ export function McpServersPage() {
                       <option value="pat">Personal Access Token (PAT)</option>
                       <option value="api_key">API Key</option>
                       <option value="bearer">Bearer Token</option>
-                      <option value="oauth">OAuth 2.0</option>
+                      <option value="token">Token 请求头</option>
+                      <option value="oauth">OAuth 访问令牌（手动提供）</option>
                       <option value="basic">Basic Auth</option>
                     </select>
                   </div>
                 </div>
+
+                <div className="modal-form-group">
+                  <label><span>凭证注入方式</span></label>
+                  <select value={credInjection} onChange={(e) => setCredInjection(e.target.value as 'header' | 'env')}>
+                    <option value="header">HTTP 请求头</option>
+                    <option value="env">STDIO 环境变量</option>
+                  </select>
+                </div>
+                {credInjection === 'env' ? (
+                  <div className="modal-form-group">
+                    <label><span>环境变量名 <span className="req-star">*</span></span></label>
+                    <input value={credEnvName} onChange={(e) => setCredEnvName(e.target.value)} placeholder="例如 UNITY_MCP_TOKEN" required />
+                    <div className="form-hint">仅用于 STDIO 服务，密钥原值注入指定环境变量。</div>
+                  </div>
+                ) : (
+                  <div className="modal-grid-2">
+                    <div className="modal-form-group">
+                      <label><span>请求头名称</span></label>
+                      <input value={credHeaderName} onChange={(e) => setCredHeaderName(e.target.value)} placeholder="Authorization（默认）或 X-API-Key" />
+                    </div>
+                    <div className="modal-form-group">
+                      <label><span>认证前缀</span></label>
+                      <input value={credHeaderPrefix} onChange={(e) => setCredHeaderPrefix(e.target.value)} disabled={credRawHeader}
+                        placeholder={credHeaderName && credHeaderName.toLowerCase() !== 'authorization' && credAuthType !== 'basic' && credAuthType !== 'token' ? '默认无前缀' : credAuthType === 'basic' ? 'Basic（默认）' : credAuthType === 'token' ? 'Token（默认）' : 'Bearer（默认）'} />
+                      <label><input type="checkbox" checked={credRawHeader} onChange={(e) => setCredRawHeader(e.target.checked)} /> 不添加前缀</label>
+                    </div>
+                  </div>
+                )}
 
                 <div className="modal-grid-2">
                   <div className="modal-form-group">
@@ -875,6 +933,9 @@ export function McpServersPage() {
                     placeholder={editingCred ? '留空保持已有加密密钥不变' : '输入 ghp_xxx 或对应 API Token 明文'}
                     required={!editingCred}
                   />
+                  {credAuthType === 'basic' && credInjection === 'header' ? (
+                    <div className="form-hint">填写 用户名:密码，平台会自动进行 Base64 编码。</div>
+                  ) : null}
                   <div className="form-hint" style={{ color: '#059669', display: 'flex', alignItems: 'center', gap: 4 }}>
                     <span>🔒 凭证提交后将存入加密机密保管箱，在界面中仅脱敏展示，保障访问安全。</span>
                   </div>

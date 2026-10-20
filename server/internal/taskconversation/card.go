@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/ai-employee-platform/server/internal/feishu"
@@ -11,6 +12,10 @@ import (
 
 // BuildCard 构建与单个 Job 对应的飞书卡片。每个正文块都保持在飞书限制以内。
 func BuildCard(c *Conversation, messages []Message, activities []Activity) *feishu.Card {
+	return buildCardAt(c, messages, activities, time.Now())
+}
+
+func buildCardAt(c *Conversation, messages []Message, activities []Activity, now time.Time) *feishu.Card {
 	jobMessages := make([]Message, 0, len(messages))
 	for _, message := range messages {
 		if message.JobID == c.CurrentJobID {
@@ -34,6 +39,13 @@ func BuildCard(c *Conversation, messages []Message, activities []Activity) *feis
 		})
 	}
 	appendText("**状态：** "+statusText, 900)
+	if !isTerminal(c.Status) && !c.CreatedAt.IsZero() {
+		seconds := int64(now.Sub(c.CreatedAt).Seconds())
+		if seconds < 0 {
+			seconds = 0
+		}
+		appendText(fmt.Sprintf("**任务已接收：** %d 秒前。处理中无需重复发送，相同员工的新任务会排队执行。", seconds), 900)
+	}
 	if c.EmployeeName != "" {
 		appendText("**AI 员工：** "+truncateRunes(escapeCardText(c.EmployeeName), 820), 900)
 	}

@@ -2,8 +2,10 @@ package scheduler_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
 	"github.com/ai-employee-platform/server/internal/audit"
@@ -11,9 +13,11 @@ import (
 	"github.com/ai-employee-platform/server/internal/employee"
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/job"
+	"github.com/ai-employee-platform/server/internal/mcp"
 	"github.com/ai-employee-platform/server/internal/mcpauth"
 	"github.com/ai-employee-platform/server/internal/reliability"
 	"github.com/ai-employee-platform/server/internal/scheduler"
+	"github.com/ai-employee-platform/server/internal/secret"
 	"github.com/ai-employee-platform/server/internal/workflowmcp"
 	"github.com/ai-employee-platform/server/internal/workspace"
 	"github.com/ai-employee-platform/server/internal/workstation"
@@ -21,6 +25,88 @@ import (
 
 type fakeFullPusher struct {
 	cmds []*aiev1.Command
+}
+
+func TestExpiredCredentialCanBeCorrectedAndRescheduled(t *testing.T) {
+	ctx := context.Background()
+	aud := audit.NewMemory()
+	bus := eventbus.New(5)
+	wsSvc := workspace.NewService(workspace.NewMemoryStore(), aud)
+	ws, err := wsSvc.Create(ctx, workspace.CreateInput{WorkstationID: "WS-1", Path: "/project"}, "u", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	empSvc := employee.NewService(employee.NewMemoryStore(), aud, bus)
+	e, err := empSvc.Create(ctx, employee.CreateInput{Name: "Alice", WorkstationID: "WS-1", WorkspaceID: ws.ID}, "u", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := certca.NewDevAuthority()
+	if err != nil {
+		t.Fatal(err)
+	}
+	presence := reliability.NewPresence(5, 15)
+	presence.Touch("WS-1", "v", 0, 0, 0, 0, 0)
+	wss := workstation.NewService(ca, presence, nil)
+	wss.EnsureRegistered(ctx, "WS-1", "node-1")
+	pusher := &fakeFullPusher{}
+	jobSvc := job.NewService(job.NewMemoryStore(), aud, bus)
+	sched := scheduler.New(jobSvc, empSvc, wss, presence, pusher)
+	sched.Workspaces = wsSvc
+	sched.SetFullPusher(pusher)
+	vault, err := secret.NewMemoryVault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpSvc := mcp.NewService(mcp.NewMemoryStore(), secret.NewManager(vault, secret.NewMemoryBindings(), nil))
+	sched.SetMCP(mcpSvc)
+	srv, err := mcpSvc.CreateServer(ctx, mcp.CreateServerInput{Name: "jira", Endpoint: "http://localhost/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiry := time.Now().Add(-time.Minute)
+	cred, err := mcpSvc.CreateCredential(ctx, mcp.CreateCredentialInput{CredentialName: "jira", AuthType: mcp.AuthTypeToken, SecretValue: "test-key", ExpiresAt: &expiry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mcpSvc.BindEmployee(ctx, e.ID, mcp.BindEmployeeInput{MCPServerID: srv.ID, CredentialID: cred.ID}); err != nil {
+		t.Fatal(err)
+	}
+	j, _, err := jobSvc.Create(ctx, job.CreateInput{EmployeeID: e.ID, WorkspaceID: ws.ID, Prompt: "query", IdempotencyKey: "expired-retry"}, "u", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sched.ScheduleJob(ctx, j.ID); !errors.Is(err, mcp.ErrCredentialExpired) {
+		t.Fatalf("expected expired credential, got %v", err)
+	}
+	// 定时重试应保留错误原因, 但不能每次重试都刷一条相同的时间线。
+	if _, err := sched.ScheduleJob(ctx, j.ID); !errors.Is(err, mcp.ErrCredentialExpired) {
+		t.Fatalf("expected repeated expired credential, got %v", err)
+	}
+	events, err := jobSvc.Timeline(ctx, j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[1].EventType != "SCHEDULING_BLOCKED" || !strings.Contains(events[1].Payload["reason"], "凭证已过期") {
+		t.Fatal("scheduling error must be visible exactly once in the timeline")
+	}
+	current, err := jobSvc.Get(ctx, j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != job.StatusCreated || len(pusher.cmds) != 0 {
+		t.Fatal("invalid credential consumed the job assignment")
+	}
+	expiry = time.Now().Add(time.Hour)
+	if _, err := mcpSvc.UpdateCredential(ctx, cred.ID, mcp.CreateCredentialInput{ExpiresAt: &expiry}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sched.ScheduleJob(ctx, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(pusher.cmds) != 1 || pusher.cmds[0].GetStartJob().McpServers[0].Headers["Authorization"] != "Token test-key" {
+		t.Fatal("corrected credential was not dispatched")
+	}
 }
 
 func (f *fakeFullPusher) PushCommand(wsID string, typ aiev1.CommandType, employeeID, jobID, payloadJSON string) (*aiev1.Command, error) {

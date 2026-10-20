@@ -231,6 +231,25 @@ func normalizeMCPServers(in []any) []any {
 				cp["env"] = arr
 			}
 		}
+		// ACP 的 HTTP/SSE 头与 STDIO 参数列表为必填字段，不能随空 map 被省略。
+		transport, _ := cp["type"].(string)
+		if transport == "http" || transport == "sse" || transport == "" && cp["url"] != nil {
+			if transport == "" {
+				cp["type"] = "http"
+			}
+			if cp["headers"] == nil {
+				cp["headers"] = []map[string]string{}
+			}
+		} else {
+			// STDIO 的 ACP 结构没有 type 字段。
+			delete(cp, "type")
+			if cp["args"] == nil {
+				cp["args"] = []string{}
+			}
+			if cp["env"] == nil {
+				cp["env"] = []map[string]string{}
+			}
+		}
 		out = append(out, cp)
 	}
 	return out
@@ -255,7 +274,7 @@ func toNameValueList(v any) []map[string]string {
 
 func nameValueFromMap(m map[string]string) []map[string]string {
 	if m == nil {
-		return nil
+		return []map[string]string{}
 	}
 	out := make([]map[string]string, 0, len(m))
 	for k, v := range m {

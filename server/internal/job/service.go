@@ -7,9 +7,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ai-employee-platform/gen/jobinput"
 
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/idgen"
@@ -94,34 +97,35 @@ var (
 
 // Job 领域对象。
 type Job struct {
-	ID                    string         `json:"id"`
-	ParentJobID           string         `json:"parent_job_id,omitempty"`
-	EmployeeID            string         `json:"employee_id"`
-	WorkspaceID           string         `json:"workspace_id"`
-	SessionID             string         `json:"session_id"`
-	WorkstationID         string         `json:"workstation_id"`
-	Prompt                string         `json:"prompt"`
-	CreatedBy             string         `json:"created_by"`
-	Status                string         `json:"status"`
-	Result                string         `json:"result"`
-	InputTokens           int64          `json:"input_tokens"`
-	OutputTokens          int64          `json:"output_tokens"`
-	CachedInputTokens     int64          `json:"cached_input_tokens"`
-	CacheWriteInputTokens int64          `json:"cache_write_input_tokens"`
-	CacheReadInputTokens  int64          `json:"cache_read_input_tokens"`
-	ReasoningOutputTokens int64          `json:"reasoning_output_tokens"`
-	TotalTokens           int64          `json:"total_tokens"`
-	Agent                 string         `json:"agent"`
-	TokenSource           string         `json:"token_source"`
-	TokenUsageStatus      string         `json:"token_usage_status"`
-	Source                string         `json:"source"`
-	IdempotencyKey        string         `json:"idempotency_key"`
-	TimeoutSec            int            `json:"timeout_sec"`
-	WorkflowID            string         `json:"workflow_id,omitempty"`
-	WorkflowSnapshot      map[string]any `json:"workflow_snapshot,omitempty"`
-	CreatedAt             time.Time      `json:"created_at"`
-	StartedAt             time.Time      `json:"started_at,omitempty"`
-	CompletedAt           time.Time      `json:"completed_at,omitempty"`
+	ID                    string          `json:"id"`
+	ParentJobID           string          `json:"parent_job_id,omitempty"`
+	EmployeeID            string          `json:"employee_id"`
+	WorkspaceID           string          `json:"workspace_id"`
+	SessionID             string          `json:"session_id"`
+	WorkstationID         string          `json:"workstation_id"`
+	Prompt                string          `json:"prompt"`
+	InputAttachments      []jobinput.File `json:"input_attachments,omitempty"`
+	CreatedBy             string          `json:"created_by"`
+	Status                string          `json:"status"`
+	Result                string          `json:"result"`
+	InputTokens           int64           `json:"input_tokens"`
+	OutputTokens          int64           `json:"output_tokens"`
+	CachedInputTokens     int64           `json:"cached_input_tokens"`
+	CacheWriteInputTokens int64           `json:"cache_write_input_tokens"`
+	CacheReadInputTokens  int64           `json:"cache_read_input_tokens"`
+	ReasoningOutputTokens int64           `json:"reasoning_output_tokens"`
+	TotalTokens           int64           `json:"total_tokens"`
+	Agent                 string          `json:"agent"`
+	TokenSource           string          `json:"token_source"`
+	TokenUsageStatus      string          `json:"token_usage_status"`
+	Source                string          `json:"source"`
+	IdempotencyKey        string          `json:"idempotency_key"`
+	TimeoutSec            int             `json:"timeout_sec"`
+	WorkflowID            string          `json:"workflow_id,omitempty"`
+	WorkflowSnapshot      map[string]any  `json:"workflow_snapshot,omitempty"`
+	CreatedAt             time.Time       `json:"created_at"`
+	StartedAt             time.Time       `json:"started_at,omitempty"`
+	CompletedAt           time.Time       `json:"completed_at,omitempty"`
 }
 
 // Event Timeline 条目。
@@ -135,17 +139,18 @@ type Event struct {
 
 // CreateInput 创建。
 type CreateInput struct {
-	EmployeeID     string `json:"employee_id"`
-	ParentJobID    string `json:"parent_job_id,omitempty"`
-	WorkspaceID    string `json:"workspace_id"`
-	SessionID      string `json:"session_id"`
-	WorkstationID  string `json:"workstation_id"`
-	Prompt         string `json:"prompt"`
-	IdempotencyKey string `json:"idempotency_key"`
-	TimeoutSec     int    `json:"timeout_sec"`
-	CreatedBy      string `json:"created_by"`
-	Source         string `json:"source"`
-	WorkflowID     string `json:"workflow_id"`
+	EmployeeID       string          `json:"employee_id"`
+	ParentJobID      string          `json:"parent_job_id,omitempty"`
+	WorkspaceID      string          `json:"workspace_id"`
+	SessionID        string          `json:"session_id"`
+	WorkstationID    string          `json:"workstation_id"`
+	Prompt           string          `json:"prompt"`
+	InputAttachments []jobinput.File `json:"-"` // Internal, trusted ingress only; hashes are not public upload grants.
+	IdempotencyKey   string          `json:"idempotency_key"`
+	TimeoutSec       int             `json:"timeout_sec"`
+	CreatedBy        string          `json:"created_by"`
+	Source           string          `json:"source"`
+	WorkflowID       string          `json:"workflow_id"`
 }
 
 // Auditor / Bus。
@@ -181,11 +186,14 @@ func NewService(store Store, audit Auditor, bus Bus) *Service {
 
 // Create 幂等创建：相同 idempotency_key 返回已有 Job。
 func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string) (*Job, bool, error) {
+	if err := jobinput.Validate(in.InputAttachments); err != nil {
+		return nil, false, err
+	}
 	if in.EmployeeID == "" || in.IdempotencyKey == "" {
 		return nil, false, ErrInvalidInput
 	}
 	if existing, _ := s.store.GetByIdempotency(ctx, in.IdempotencyKey); existing != nil {
-		if existing.EmployeeID != in.EmployeeID || existing.Prompt != in.Prompt {
+		if existing.EmployeeID != in.EmployeeID || existing.Prompt != in.Prompt || (len(existing.InputAttachments) != 0 || len(in.InputAttachments) != 0) && !reflect.DeepEqual(existing.InputAttachments, in.InputAttachments) {
 			return nil, false, ErrIdempotencyConflict
 		}
 		return existing, true, nil
@@ -193,20 +201,21 @@ func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string
 	now := time.Now().UTC()
 	src := NormalizeSource(in.Source)
 	j := &Job{
-		ID:             idgen.New("JOB"),
-		ParentJobID:    in.ParentJobID,
-		EmployeeID:     in.EmployeeID,
-		WorkspaceID:    in.WorkspaceID,
-		SessionID:      in.SessionID,
-		WorkstationID:  in.WorkstationID,
-		Prompt:         in.Prompt,
-		CreatedBy:      in.CreatedBy,
-		Status:         StatusCreated,
-		Source:         src,
-		IdempotencyKey: in.IdempotencyKey,
-		TimeoutSec:     in.TimeoutSec,
-		WorkflowID:     in.WorkflowID,
-		CreatedAt:      now,
+		ID:               idgen.New("JOB"),
+		ParentJobID:      in.ParentJobID,
+		EmployeeID:       in.EmployeeID,
+		WorkspaceID:      in.WorkspaceID,
+		SessionID:        in.SessionID,
+		WorkstationID:    in.WorkstationID,
+		Prompt:           in.Prompt,
+		InputAttachments: append([]jobinput.File(nil), in.InputAttachments...),
+		CreatedBy:        in.CreatedBy,
+		Status:           StatusCreated,
+		Source:           src,
+		IdempotencyKey:   in.IdempotencyKey,
+		TimeoutSec:       in.TimeoutSec,
+		WorkflowID:       in.WorkflowID,
+		CreatedAt:        now,
 	}
 	if j.CreatedBy == "" {
 		j.CreatedBy = actorID
@@ -476,6 +485,34 @@ func (s *Service) AppendEvent(ctx context.Context, jobID, eventType string, payl
 	})
 }
 
+// ReportSchedulingBlock 将调度阻塞原因写入时间线, 相同原因的连续重试只记录一次。
+// 保留原任务状态, 配置修正或工作站恢复后仍由调度器自动重试。
+func (s *Service) ReportSchedulingBlock(ctx context.Context, jobID, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, err := s.store.Get(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if terminal[j.Status] || reason == "" {
+		return nil
+	}
+	events, err := s.store.ListEvents(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if len(events) > 0 {
+		last := events[len(events)-1]
+		if last.EventType == "SCHEDULING_BLOCKED" && last.Payload["reason"] == reason {
+			return nil
+		}
+	}
+	return s.store.AppendEvent(ctx, &Event{
+		JobID: jobID, EventType: "SCHEDULING_BLOCKED",
+		Payload: map[string]string{"reason": reason, "status": j.Status}, CreatedAt: time.Now().UTC(),
+	})
+}
+
 // ActiveCount 非终态 Job 数。
 func (s *Service) ActiveCount(ctx context.Context) (int, error) {
 	list, err := s.store.List(ctx)
@@ -519,6 +556,7 @@ func (m *MemoryStore) Save(_ context.Context, j *Job) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cp := *j
+	cp.InputAttachments = append([]jobinput.File(nil), j.InputAttachments...)
 	m.byID[j.ID] = &cp
 	m.byIdem[j.IdempotencyKey] = j.ID
 	return nil
@@ -532,6 +570,7 @@ func (m *MemoryStore) Get(_ context.Context, id string) (*Job, error) {
 		return nil, ErrNotFound
 	}
 	cp := *j
+	cp.InputAttachments = append([]jobinput.File(nil), j.InputAttachments...)
 	return &cp, nil
 }
 
@@ -544,6 +583,7 @@ func (m *MemoryStore) GetByIdempotency(_ context.Context, key string) (*Job, err
 	}
 	j := m.byID[id]
 	cp := *j
+	cp.InputAttachments = append([]jobinput.File(nil), j.InputAttachments...)
 	return &cp, nil
 }
 
@@ -553,6 +593,7 @@ func (m *MemoryStore) List(_ context.Context) ([]*Job, error) {
 	out := make([]*Job, 0, len(m.byID))
 	for _, j := range m.byID {
 		cp := *j
+		cp.InputAttachments = append([]jobinput.File(nil), j.InputAttachments...)
 		out = append(out, &cp)
 	}
 	return out, nil

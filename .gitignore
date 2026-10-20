@@ -37,6 +37,7 @@ go.work.sum
 Thumbs.db
 
 # Logs / local data
+.aie-inputs/
 *.log
 *.db
 *.db-journal
@@ -50,4 +51,3 @@ admin/dist/
 
 # Proto generated（若改为 CI 生成可不提交；当前允许提交时忽略临时文件）
 *.pb.go~
-

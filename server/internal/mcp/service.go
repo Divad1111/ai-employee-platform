@@ -162,6 +162,9 @@ func (s *Service) CreateCredential(ctx context.Context, in CreateCredentialInput
 	if authType == "" {
 		authType = AuthTypeAPIKey
 	}
+	if err := validateAuthConfig(authType, in.Metadata); err != nil {
+		return nil, err
+	}
 
 	secretRef := ""
 	masked := "***"
@@ -220,6 +223,9 @@ func (s *Service) UpdateCredential(ctx context.Context, id string, in CreateCred
 	if in.ExpiresAt != nil {
 		cred.ExpiresAt = in.ExpiresAt
 	}
+	if err := validateAuthConfig(cred.AuthType, cred.Metadata); err != nil {
+		return nil, err
+	}
 	if val := strings.TrimSpace(in.SecretValue); val != "" {
 		cred.MaskedValue = maskSecret(val)
 		if s.secretMgr != nil {
@@ -249,14 +255,11 @@ func (s *Service) ResolveSecretValue(ctx context.Context, credID string) (string
 	if credID == "" {
 		return "", nil
 	}
-	cred, err := s.store.GetCredential(ctx, credID)
+	cred, err := s.usableCredential(ctx, credID)
 	if err != nil {
 		return "", err
 	}
-	if cred.SecretRef == "" || s.secretMgr == nil {
-		return "", nil
-	}
-	return s.secretMgr.Access(ctx, cred.SecretRef, "SYSTEM", "scheduler", "", "mcp_dispatch")
+	return s.credentialSecret(ctx, cred)
 }
 
 // ---------- Employee MCP Binding 业务逻辑 ----------

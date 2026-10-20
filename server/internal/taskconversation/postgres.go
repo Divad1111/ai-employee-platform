@@ -133,6 +133,28 @@ func (s *PostgresStore) ListEmployeeIDs(ctx context.Context, employeeID string, 
 	return out, rows.Err()
 }
 
+func (s *PostgresStore) ListOwnerChatIDs(ctx context.Context, chatID, ownerOpenID string, limit int) ([]string, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM task_conversations
+		WHERE chat_id=$1 AND owner_open_id=$2 AND merged_into_id IS NULL
+		ORDER BY created_at DESC, id DESC LIMIT $3`, chatID, ownerOpenID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *PostgresStore) SessionJobIDs(ctx context.Context, employeeID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT t.job_id FROM task_conversation_turns t
 		JOIN task_conversations c ON c.id=t.conversation_id

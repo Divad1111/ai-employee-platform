@@ -39,6 +39,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/feishu"
 	"github.com/ai-employee-platform/server/internal/inquiry"
 	"github.com/ai-employee-platform/server/internal/job"
+	"github.com/ai-employee-platform/server/internal/jobinput"
 	"github.com/ai-employee-platform/server/internal/mcp"
 	"github.com/ai-employee-platform/server/internal/mcpauth"
 	"github.com/ai-employee-platform/server/internal/mcpserver"
@@ -442,6 +443,8 @@ func main() {
 	_ = os.MkdirAll(artRoot, 0o750)
 	artSvc := artifact.New(artStore, artRoot)
 	artSvc.SetJobLookup(artifactJobLookup{jobs: jobSvc})
+	inputFiles := &jobinput.Store{Root: filepath.Join(artRoot, "inputs")}
+	feishuSvc.InputFiles = inputFiles
 
 	var backupSvc *backup.Service
 	if pgSQL != nil {
@@ -477,6 +480,7 @@ func main() {
 		Employees: empSvc, Jobs: jobSvc, Messages: msgSvc,
 		Scheduler: sched, Notify: notifySvc, Feishu: feishuSvc,
 		Workspaces:    wsSvc,
+		Workstations:  wsNodeSvc,
 		Conversations: taskConversationSvc,
 		Quota:         quotaSvc,
 		Roles: func(ctx context.Context, userID string) []string {
@@ -578,6 +582,7 @@ func main() {
 		PermissionStore: permStore,
 		Approvals:       approvalSvc,
 		Artifacts:       artSvc,
+		InputFiles:      inputFiles,
 		Registry:        regSvc,
 		Metrics:         met,
 		WorkflowMCP:     wfSvc,

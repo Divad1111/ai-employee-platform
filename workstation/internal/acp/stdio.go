@@ -284,9 +284,13 @@ func (s *StdioSession) Send(ctx context.Context, input []byte) (string, error) {
 		s.mu.Unlock()
 	}()
 
+	blocks, err := PromptBlocks(ctx, string(input))
+	if err != nil {
+		return "", err
+	}
 	raw, err := s.call(ctx, "session/prompt", map[string]any{
 		"sessionId": sid,
-		"prompt":    []map[string]any{{"type": "text", "text": string(input)}},
+		"prompt":    blocks,
 	})
 	// 短暂等待尾部 chunk
 	time.Sleep(150 * time.Millisecond)

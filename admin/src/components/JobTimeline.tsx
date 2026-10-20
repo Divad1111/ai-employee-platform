@@ -54,6 +54,8 @@ function eventTone(ev: JobEvent): 'danger' | 'success' | 'warning' | 'info' | 'n
 function eventTitle(ev: JobEvent) {
   const payload = ev.payload || {}
   if (ev.event_type === 'CREATED') return '任务已创建'
+  if (ev.event_type === 'FEISHU_RECEIPT') return '飞书收单卡片已送达'
+  if (ev.event_type === 'SCHEDULING_BLOCKED') return '调度受阻，等待重试'
   if (ev.event_type === 'AGENT_REPLY') return 'Agent 回复'
   if (ev.event_type === 'SESSION') {
     return SESSION_LABEL[payload.event] || '会话事件'

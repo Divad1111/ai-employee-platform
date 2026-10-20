@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,12 +32,16 @@ type Service struct {
 	Employees    *employee.Service
 	Workstations *workstation.Service
 
-	mu    sync.Mutex
-	dirty map[string]time.Time
+	mu             sync.Mutex
+	dirty          map[string]time.Time
+	active         map[string]bool
+	inFlight       map[string]bool
+	refreshSlots   chan struct{}
+	refreshTimeout time.Duration
 }
 
 func NewService(store Store, fs *feishu.Service, jobs *job.Service, canceler JobCanceller) *Service {
-	return &Service{Store: store, Feishu: fs, Jobs: jobs, Canceler: canceler, dirty: make(map[string]time.Time)}
+	return &Service{Store: store, Feishu: fs, Jobs: jobs, Canceler: canceler, dirty: make(map[string]time.Time), active: make(map[string]bool), inFlight: make(map[string]bool), refreshSlots: make(chan struct{}, 4), refreshTimeout: 12 * time.Second}
 }
 
 // Start 为每个 Job 建立独立飞书卡片；员工的 ACP 会话由 session generation 复用。
@@ -64,6 +69,7 @@ func (s *Service) Start(ctx context.Context, in feishu.TaskConversationStart) (s
 		return "", err
 	}
 	s.markDirty(c.ID, 0)
+	s.trackActive(c.ID, true)
 	return c.ID, nil
 }
 
@@ -270,6 +276,9 @@ func parseEmployeeCommand(input string) (kind, args string, ok bool) {
 	}
 	for _, prefix := range []string{"切换模型", "切换到模型", "更换模型", "/model"} {
 		p := strings.ToLower(prefix)
+		if prefix == "/model" && lower != p && !strings.HasPrefix(lower, p+" ") {
+			continue
+		}
 		if strings.HasPrefix(lower, p) {
 			args = strings.TrimSpace(text[len(prefix):])
 			for _, leading := range []string{"到", "为", "使用"} {
@@ -338,6 +347,7 @@ func (s *Service) OnJobStatus(ctx context.Context, jobID, status, reply string) 
 		}
 	}
 	s.markDirty(c.ID, 0)
+	s.trackActive(c.ID, !isTerminal(status))
 }
 
 func (s *Service) OnAgentSession(ctx context.Context, jobID, provider, model string, generation int64) {
@@ -355,22 +365,50 @@ func (s *Service) OnAgentSession(ctx context.Context, jobID, provider, model str
 	s.markDirty(c.ID, 0)
 }
 
-// Run 合并卡片更新，并在服务重启后刷新最近的任务卡片。
+// Run restores cards after restart and refreshes active cards even while the
+// model has no new text. Each network request has its own timeout and slot.
 func (s *Service) Run(ctx context.Context) {
 	ids, err := s.Store.ListIDs(ctx, 0)
 	if err == nil {
 		for _, id := range ids {
-			s.markDirty(id, 0)
+			if c, err := s.Store.Get(ctx, id); err == nil {
+				s.trackActive(id, !isTerminal(c.Status))
+				s.markDirty(id, 0)
+			}
 		}
 	}
 	ticker := time.NewTicker(250 * time.Millisecond)
+	heartbeat := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+	defer heartbeat.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			s.flushDue(ctx)
+		case <-heartbeat.C:
+			s.markActiveDirty()
+		}
+	}
+}
+
+func (s *Service) trackActive(id string, active bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if active {
+		s.active[id] = true
+	} else {
+		delete(s.active, id)
+	}
+}
+
+func (s *Service) markActiveDirty() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id := range s.active {
+		if _, exists := s.dirty[id]; !exists {
+			s.dirty[id] = time.Now()
 		}
 	}
 }
@@ -391,18 +429,45 @@ func (s *Service) flushDue(ctx context.Context) {
 	now := time.Now()
 	s.mu.Lock()
 	var due []string
-	for id, at := range s.dirty {
-		if !now.Before(at) {
+	var candidates []string
+	for id := range s.dirty {
+		candidates = append(candidates, id)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if s.active[candidates[i]] != s.active[candidates[j]] {
+			return s.active[candidates[i]]
+		}
+		return s.dirty[candidates[i]].Before(s.dirty[candidates[j]])
+	})
+	for _, id := range candidates {
+		at := s.dirty[id]
+		if !now.Before(at) && !s.inFlight[id] {
+			select {
+			case s.refreshSlots <- struct{}{}:
+			default:
+				continue
+			}
+			s.inFlight[id] = true
 			due = append(due, id)
 			delete(s.dirty, id)
 		}
 	}
 	s.mu.Unlock()
 	for _, id := range due {
-		if err := s.refreshCard(ctx, id); err != nil {
-			fmt.Printf("[TaskConversation] 刷新飞书卡片失败 (conversation=%s): %v\n", id, err)
-			s.markDirty(id, 3*time.Second)
-		}
+		go func(id string) {
+			defer func() {
+				s.mu.Lock()
+				delete(s.inFlight, id)
+				s.mu.Unlock()
+				<-s.refreshSlots
+			}()
+			requestCtx, cancel := context.WithTimeout(ctx, s.refreshTimeout)
+			defer cancel()
+			if err := s.refreshCard(requestCtx, id); err != nil {
+				fmt.Printf("[TaskConversation] 刷新飞书卡片失败 (conversation=%s): %v\n", id, err)
+				s.markDirty(id, 3*time.Second)
+			}
+		}(id)
 	}
 }
 
@@ -414,6 +479,7 @@ func (s *Service) refreshCard(ctx context.Context, id string) error {
 	if c.ChatID == "" || s.Feishu == nil {
 		return nil
 	}
+	s.trackActive(id, !isTerminal(c.Status))
 	messages, err := s.Store.Messages(ctx, id)
 	if err != nil {
 		return err
@@ -430,14 +496,21 @@ func (s *Service) refreshCard(ctx context.Context, id string) error {
 	}
 	content := BuildCard(c, messages, activities).MustJSON()
 	if c.CardMessageID == "" {
-		result, err := s.Feishu.SendMessage(ctx, "", c.ChatID, content)
+		result, err := s.Feishu.SendMessageWithKey(ctx, "", c.ChatID, content, c.ID)
 		if err != nil {
 			return err
 		}
 		if result == nil || result.MessageID == "" {
 			return fmt.Errorf("飞书未返回卡片 message_id")
 		}
-		return s.Store.SetCardMessageID(ctx, id, result.MessageID)
+		if err := s.Store.SetCardMessageID(ctx, id, result.MessageID); err != nil {
+			return err
+		}
+		fmt.Printf("[TaskConversation] 飞书收单卡片已送达 (job=%s conversation=%s message=%s)\n", c.CurrentJobID, id, result.MessageID)
+		if s.Jobs != nil {
+			_ = s.Jobs.AppendEvent(ctx, c.CurrentJobID, "FEISHU_RECEIPT", map[string]string{"message": "飞书收单卡片已送达", "card_message_id": result.MessageID})
+		}
+		return nil
 	}
 	return s.Feishu.PatchMessageCard(ctx, c.CardMessageID, content)
 }

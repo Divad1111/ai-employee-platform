@@ -60,6 +60,7 @@ type Store interface {
 	FindByJob(context.Context, string) (*Conversation, error)
 	ListIDs(context.Context, int) ([]string, error)
 	ListEmployeeIDs(context.Context, string, int) ([]string, error)
+	ListOwnerChatIDs(context.Context, string, string, int) ([]string, error)
 	SessionJobIDs(context.Context, string) ([]string, error)
 	SessionMessages(context.Context, string, int64) ([]Message, error)
 	SetRuntime(context.Context, string, string, string, int64) error
@@ -179,6 +180,34 @@ func (m *MemoryStore) ListEmployeeIDs(_ context.Context, employeeID string, limi
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].UpdatedAt.After(items[j].UpdatedAt) })
 	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	ids := make([]string, 0, len(items))
+	for _, c := range items {
+		ids = append(ids, c.ID)
+	}
+	return ids, nil
+}
+
+func (m *MemoryStore) ListOwnerChatIDs(_ context.Context, chatID, ownerOpenID string, limit int) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var items []*Conversation
+	for _, c := range m.convs {
+		if c.ChatID == chatID && c.OwnerOpenID == ownerOpenID {
+			items = append(items, c)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].ID > items[j].ID
+		}
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	if len(items) > limit {
 		items = items[:limit]
 	}
 	ids := make([]string, 0, len(items))

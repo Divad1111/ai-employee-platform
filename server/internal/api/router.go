@@ -29,6 +29,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/feishu"
 	"github.com/ai-employee-platform/server/internal/job"
+	"github.com/ai-employee-platform/server/internal/jobinput"
 	"github.com/ai-employee-platform/server/internal/mcp"
 	"github.com/ai-employee-platform/server/internal/mcpauth"
 	"github.com/ai-employee-platform/server/internal/message"
@@ -59,6 +60,7 @@ type Deps struct {
 	Workstations    *workstation.Service
 	Sessions        *session.Service
 	Jobs            *job.Service
+	InputFiles      *jobinput.Store
 	TokenUsage      *tokenusage.Service
 	Messages        *message.Service
 	Bus             *eventbus.Bus
@@ -93,6 +95,7 @@ type SkillSyncer interface {
 // NewRouter 构造 HTTP 路由。
 func NewRouter(d Deps) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/integrations/workstation/jobs/{id}/inputs/{hash}", d.handleWorkstationJobInput)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
