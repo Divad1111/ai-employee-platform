@@ -170,10 +170,13 @@ func (d Deps) handleDeleteFeishuBinding(w http.ResponseWriter, r *http.Request, 
 			}
 		}
 	}
-	for _, id := range targets {
-		if code, msg := d.ensureOwnEmployeeBinding(r, sess, id); code != 0 {
-			writeErr(w, code, msg)
-			return
+	// 全局管理员可以清理已删除员工的残留绑定；其他用户仍须校验员工归属。
+	if !d.scopeAll(r, sess, "employee.write") {
+		for _, id := range targets {
+			if code, msg := d.ensureOwnEmployeeBinding(r, sess, id); code != 0 {
+				writeErr(w, code, msg)
+				return
+			}
 		}
 	}
 	if !d.Feishu.DeleteBinding(empID, alias) {

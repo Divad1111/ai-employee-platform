@@ -223,6 +223,9 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("PUT /api/workflow-mcp/skills/{id}", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleUpsertSkillPackage)))
 	mux.HandleFunc("DELETE /api/workflow-mcp/skills/{id}", d.requirePerm("workflow.delete", d.onlyAll("workflow.delete", d.handleDeleteSkillPackage)))
 	mux.HandleFunc("GET /api/workflow-mcp/skills/{id}/export", d.requirePerm("workflow.read", d.handleExportSkillPackage))
+	mux.HandleFunc("GET /api/workflow-mcp/skills/{id}/files", d.requirePerm("workflow.read", d.handleListSkillAssets))
+	mux.HandleFunc("GET /api/workflow-mcp/skills/{id}/file", d.requirePerm("workflow.read", d.handleReadSkillAsset))
+	mux.HandleFunc("PATCH /api/workflow-mcp/skills/{id}/assets", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handlePatchSkillAssets)))
 
 	mux.HandleFunc("GET /api/workflow-mcp/knowledge", d.requirePerm("workflow.read", d.handleListKnowledgeDocs))
 	mux.HandleFunc("POST /api/workflow-mcp/knowledge", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleUpsertKnowledgeDoc)))
@@ -912,6 +915,9 @@ func (d Deps) handleDeleteEmployee(w http.ResponseWriter, r *http.Request, sess 
 		}
 		writeErr(w, http.StatusConflict, err.Error())
 		return
+	}
+	if d.Feishu != nil {
+		d.Feishu.DeleteBinding(existing.ID, "")
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

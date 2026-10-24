@@ -33,9 +33,9 @@ func toolDefs() []map[string]any {
 		tool("get_skill", "获取技能包（文件索引）", obj(map[string]any{"id": str}, "id")),
 		tool("search_skills", "搜索技能", obj(map[string]any{"query": str, "limit": num}, "query")),
 		tool("export_skill", "导出完整技能包", obj(map[string]any{"id": str}, "id")),
-		tool("check_skill", "对比本地与 MCP 技能版本", obj(map[string]any{"id": str, "local_version": str}, "id")),
+		tool("check_skill", "对比本地与 MCP 技能内容, 建议提供 local_content_hash", obj(map[string]any{"id": str, "local_version": str, "local_content_hash": str}, "id")),
 		tool("check_local_skills", "根据客户端上报的本地技能清单对比", obj(map[string]any{"local_skills": map[string]any{"type": "array"}})),
-		tool("check_workflow_skills", "检查工作流依赖技能", obj(map[string]any{"workflow_id": str, "local_skills": map[string]any{"type": "object"}}, "workflow_id")),
+		tool("check_workflow_skills", "检查工作流依赖技能", obj(map[string]any{"workflow_id": str, "local_skills": map[string]any{"type": "object"}, "local_content_hashes": map[string]any{"type": "object"}}, "workflow_id")),
 		tool("upsert_skill", "创建或更新技能包（需写权限）", obj(map[string]any{"content": str, "files": map[string]any{"type": "array"}, "bump": str}, "content")),
 		tool("delete_skill", "删除技能包（需写权限）", obj(map[string]any{"id": str}, "id")),
 		tool("sync_skill", "触发技能同步到工作站（需写权限）", obj(map[string]any{"id": str, "workstation_id": str, "employee_id": str}, "id", "workstation_id")),
@@ -147,7 +147,7 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any)
 		}
 		return map[string]any{"skill": sp, "skill_md": md}, nil
 	case "check_skill":
-		return s.WF.CheckSkill(ctx, str("id"), str("local_version"))
+		return s.WF.CheckSkill(ctx, str("id"), str("local_version"), str("local_content_hash"))
 	case "check_local_skills":
 		var local []map[string]string
 		if raw, ok := args["local_skills"]; ok {
@@ -164,7 +164,15 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any)
 				}
 			}
 		}
-		return s.WF.CheckWorkflowSkills(ctx, str("workflow_id"), local)
+		hashes := map[string]string{}
+		if raw, ok := args["local_content_hashes"].(map[string]any); ok {
+			for k, v := range raw {
+				if hash, ok := v.(string); ok {
+					hashes[k] = hash
+				}
+			}
+		}
+		return s.WF.CheckWorkflowSkills(ctx, str("workflow_id"), local, hashes)
 	case "upsert_skill":
 		var files []workflowmcp.SkillFile
 		if raw, ok := args["files"]; ok {

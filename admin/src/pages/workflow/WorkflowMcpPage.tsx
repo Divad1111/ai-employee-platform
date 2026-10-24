@@ -7,13 +7,14 @@ import { PageFeatureGuide } from '../../components/PageFeatureGuide'
 import { EntityName } from '../../components/EntityName'
 import { IconBook, IconPackage, IconZap } from '../../components/Icons'
 import { CodeEditor } from '../../components/CodeEditor'
+import { SkillAssetsEditor } from './SkillAssetsEditor'
+import { savedIndexMessage } from '../../api/savedIndex'
 import { usePerm } from '../../stores/permissions'
 import {
   deleteKnowledge,
   deleteSkill,
   deleteWorkflow,
   getKnowledge,
-  getSkill,
   getWorkflow,
   importWorkflowMCPZip,
   listKnowledge,
@@ -110,6 +111,12 @@ export function WorkflowMcpPage() {
   const [wfYaml, setWfYaml] = useState('')
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
   const [skillMd, setSkillMd] = useState('')
+  const [skillDirty, setSkillDirty] = useState(false)
+  const [skillBusy, setSkillBusy] = useState(false)
+  const onSkillState = useCallback((dirty: boolean, busy: boolean) => { setSkillDirty(dirty); setSkillBusy(busy) }, [])
+  function allowSkillLeave() {
+    return !skillBusy && (!skillDirty || window.confirm('有未保存的资产变更，确定离开并放弃变更？'))
+  }
   const [selectedDoc, setSelectedDoc] = useState<string | null>(null)
   const [docContent, setDocContent] = useState('')
   const [docPath, setDocPath] = useState('')
@@ -149,6 +156,7 @@ export function WorkflowMcpPage() {
   }, [load])
 
   function showSearchOnTab(next: Tab, snap: SearchSnapshot) {
+    if (!allowSkillLeave()) return
     setTab(next)
     setSelectedWf(null)
     setSelectedSkill(null)
@@ -204,8 +212,8 @@ export function WorkflowMcpPage() {
   async function saveWorkflow(e: FormEvent) {
     e.preventDefault()
     try {
-      await upsertWorkflow(wfYaml)
-      setOk('工作流已保存')
+      const result = await upsertWorkflow(wfYaml)
+      setOk(savedIndexMessage('工作流已保存', result))
       setSelectedWf(null)
       await load()
     } catch (ex) {
@@ -215,16 +223,14 @@ export function WorkflowMcpPage() {
 
   async function openSkill(id: string) {
     setSelectedSkill(id)
-    const res = await getSkill(id)
-    setSkillMd(res.skill_md || '')
   }
 
   async function saveSkill(e: FormEvent) {
     e.preventDefault()
     try {
-      await upsertSkill(skillMd)
-      setOk('技能包已保存')
-      setSelectedSkill(null)
+      const res = await upsertSkill(skillMd)
+      setOk(savedIndexMessage('技能包已保存', res))
+      setSelectedSkill(res.skill.id)
       await load()
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : String(ex))
@@ -243,8 +249,8 @@ export function WorkflowMcpPage() {
   async function saveDoc(e: FormEvent) {
     e.preventDefault()
     try {
-      await upsertKnowledge(docPath || 'untitled.md', docContent)
-      setOk('知识文档已保存')
+      const result = await upsertKnowledge(docPath || 'untitled.md', docContent)
+      setOk(savedIndexMessage('知识文档已保存', result))
       setSelectedDoc(null)
       await load()
     } catch (ex) {
@@ -398,6 +404,7 @@ export function WorkflowMcpPage() {
           type="button"
           className={`tab-btn ${tab === 'workflows' ? 'active' : ''}`}
           onClick={() => {
+            if (!allowSkillLeave()) return
             setTab('workflows')
             setSelectedWf(null)
             setSelectedSkill(null)
@@ -419,6 +426,7 @@ export function WorkflowMcpPage() {
           type="button"
           className={`tab-btn ${tab === 'skills' ? 'active' : ''}`}
           onClick={() => {
+            if (!allowSkillLeave()) return
             setTab('skills')
             setSelectedWf(null)
             setSelectedSkill(null)
@@ -440,6 +448,7 @@ export function WorkflowMcpPage() {
           type="button"
           className={`tab-btn ${tab === 'knowledge' ? 'active' : ''}`}
           onClick={() => {
+            if (!allowSkillLeave()) return
             setTab('knowledge')
             setSelectedWf(null)
             setSelectedSkill(null)
@@ -644,6 +653,8 @@ export function WorkflowMcpPage() {
               </table>
             </div>
           </>
+        ) : tab === 'skills' && selectedSkill !== '__new__' ? (
+          <SkillAssetsEditor key={selectedSkill} skillId={selectedSkill!} canWrite={catalogWrite} canDelete={catalogDelete} onClose={() => setSelectedSkill(null)} onSaved={() => { void load() }} onStateChange={onSkillState} />
         ) : (
           <form
             onSubmit={(e) => {
@@ -720,6 +731,7 @@ export function WorkflowMcpPage() {
               }}
               language={tab === 'workflows' ? 'yaml' : 'markdown'}
               height="540px"
+              readOnly={!catalogWrite}
             />
           </form>
         )}

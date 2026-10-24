@@ -245,11 +245,17 @@ func (s *Service) GetSkill(ctx context.Context, id string) (*SkillPackage, error
 	if err != nil {
 		return nil, err
 	}
-	files, _ := s.store.GetSkillFiles(ctx, sp.ID)
+	files, err := s.store.ListSkillFileIndex(ctx, sp.ID)
+	if err != nil {
+		return nil, err
+	}
 	// 仅返回索引
-	idx := make([]SkillFile, len(files))
-	for i, f := range files {
-		idx[i] = SkillFile{Path: f.Path, SHA256: f.SHA256, Size: f.Size}
+	idx := make([]SkillFile, 0, len(files))
+	for _, f := range files {
+		if isLegacySkillDirectory(f) {
+			continue
+		}
+		idx = append(idx, SkillFile{Path: f.Path, SHA256: f.SHA256, Size: f.Size})
 	}
 	sp.Files = idx
 	return sp, nil
@@ -265,18 +271,28 @@ func (s *Service) ExportSkill(ctx context.Context, id string) (*SkillPackage, st
 	if err != nil {
 		return nil, "", err
 	}
-	outFiles := make([]SkillFile, len(files))
-	for i, f := range files {
+	latest, err := s.store.GetSkill(ctx, sp.ID)
+	if err != nil {
+		return nil, "", err
+	}
+	if latest.Revision != sp.Revision {
+		return nil, "", ErrConflict
+	}
+	outFiles := make([]SkillFile, 0, len(files))
+	for _, f := range files {
+		if isLegacySkillDirectory(f) {
+			continue
+		}
 		enc := "utf-8"
 		content := string(f.Content)
 		if !isPrintableUTF8(f.Content) {
 			enc = "base64"
 			content = base64.StdEncoding.EncodeToString(f.Content)
 		}
-		outFiles[i] = SkillFile{
+		outFiles = append(outFiles, SkillFile{
 			Path: f.Path, SHA256: f.SHA256, Size: f.Size,
 			Encoding: enc, ContentB64: content, Content: f.Content,
-		}
+		})
 	}
 	sp.Files = outFiles
 	md, err := RenderSkillMD(sp)
@@ -315,16 +331,40 @@ func (s *Service) UpsertSkill(ctx context.Context, sp *SkillPackage, files []Ski
 	} else {
 		sp.Version = ResolveSavedVersion(existing.Version, sp.Version, false, bump)
 	}
+	// Legacy upserts still bump versions, but preserve the rest of the raw document.
+	if sp.RawSkillMD != "" {
+		sp.RawSkillMD = replaceSkillVersion(sp.RawSkillMD, sp.Version)
+	}
+	var oldFiles []SkillFile
+	if !isNew {
+		sp.Revision = existing.Revision
+		oldFiles, err = s.store.GetSkillFiles(ctx, sp.ID)
+		if err != nil {
+			return nil, "", err
+		}
+		if files == nil {
+			files = oldFiles
+		} // Omitted files means preserve, never clear.
+	}
 	// 规范化文件
 	norm := make([]SkillFile, 0, len(files))
 	for _, f := range files {
-		if f.Path == "" {
+		if isLegacySkillDirectory(f) {
 			continue
+		}
+		if err := ValidateAssetPath(f.Path); err != nil {
+			return nil, "", err
+		}
+		if f.Path == "SKILL.md" {
+			return nil, "", fmt.Errorf("%w: SKILL.md 必须通过正文更新", ErrInvalidInput)
 		}
 		content := f.Content
 		if len(content) == 0 && f.ContentB64 != "" {
 			if f.Encoding == "base64" {
-				content, _ = base64.StdEncoding.DecodeString(f.ContentB64)
+				content, err = base64.StdEncoding.DecodeString(f.ContentB64)
+				if err != nil {
+					return nil, "", fmt.Errorf("%w: 无效 base64", ErrInvalidInput)
+				}
 			} else {
 				content = []byte(f.ContentB64)
 			}
@@ -336,7 +376,11 @@ func (s *Service) UpsertSkill(ctx context.Context, sp *SkillPackage, files []Ski
 		})
 	}
 	sp.ContentHash = ComputeContentHash(sp, norm)
-	if err := s.store.UpsertSkill(ctx, sp, norm); err != nil {
+	writes, deletes, err := diffSkillFiles(oldFiles, norm)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := s.store.SaveSkillChanges(ctx, sp, writes, deletes, sp.Revision); err != nil {
 		return nil, "", err
 	}
 	out, err := s.store.GetSkill(ctx, sp.ID)
@@ -380,17 +424,27 @@ func (s *Service) SearchSkills(ctx context.Context, query string, limit int) ([]
 }
 
 // CheckSkill 对比本地版本与 MCP 版本。
-func (s *Service) CheckSkill(ctx context.Context, id, localVersion string) (map[string]any, error) {
+func (s *Service) CheckSkill(ctx context.Context, id, localVersion string, localHashes ...string) (map[string]any, error) {
 	sp, err := s.store.GetSkill(ctx, id)
 	if err != nil {
 		return map[string]any{
 			"id": id, "status": "missing_on_mcp", "message": "MCP 中不存在该技能",
 		}, nil
 	}
+	localHash := ""
+	if len(localHashes) > 0 {
+		localHash = localHashes[0]
+	}
 	status := "current"
 	action := "none"
 	msg := "已是最新"
-	if localVersion == "" {
+	if localHash != "" {
+		if localHash != sp.ContentHash {
+			status = "outdated"
+			action = "update"
+			msg = "技能内容已更新"
+		}
+	} else if localVersion == "" {
 		status = "missing"
 		action = "install"
 		msg = "本地未安装"
@@ -409,6 +463,7 @@ func (s *Service) CheckSkill(ctx context.Context, id, localVersion string) (map[
 	result := map[string]any{
 		"id": sp.ID, "cursor_name": sp.CursorName,
 		"mcp_version": sp.Version, "local_version": localVersion,
+		"content_hash": sp.ContentHash, "local_content_hash": localHash,
 		"status": status, "action": action, "message": msg,
 		"install_to": "~/.cursor/skills/" + sp.CursorName + "/",
 	}
@@ -456,7 +511,11 @@ func (s *Service) CheckLocalSkills(ctx context.Context, localSkills []map[string
 			seen[sp.ID] = true
 			seen[sp.CursorName] = true
 		}
-		r, _ := s.CheckSkill(ctx, sp.ID, localVer)
+		localHash := ""
+		if ls != nil {
+			localHash = ls["content_hash"]
+		}
+		r, _ := s.CheckSkill(ctx, sp.ID, localVer, localHash)
 		results = append(results, r)
 		if st, ok := r["status"].(string); ok {
 			counts[st]++
@@ -482,7 +541,7 @@ func (s *Service) CheckLocalSkills(ctx context.Context, localSkills []map[string
 }
 
 // CheckWorkflowSkills 检查工作流依赖的技能。
-func (s *Service) CheckWorkflowSkills(ctx context.Context, workflowID string, localSkills map[string]string) (map[string]any, error) {
+func (s *Service) CheckWorkflowSkills(ctx context.Context, workflowID string, localSkills map[string]string, localHashes ...map[string]string) (map[string]any, error) {
 	w, err := s.store.GetWorkflow(ctx, workflowID)
 	if err != nil {
 		return nil, err
@@ -490,7 +549,11 @@ func (s *Service) CheckWorkflowSkills(ctx context.Context, workflowID string, lo
 	var results []map[string]any
 	for _, sid := range w.SkillRefs {
 		localVer := localSkills[sid]
-		r, _ := s.CheckSkill(ctx, sid, localVer)
+		localHash := ""
+		if len(localHashes) > 0 {
+			localHash = localHashes[0][sid]
+		}
+		r, _ := s.CheckSkill(ctx, sid, localVer, localHash)
 		results = append(results, r)
 	}
 	return map[string]any{
@@ -508,6 +571,9 @@ func ComputeContentHash(sp *SkillPackage, files []SkillFile) string {
 	sorted := append([]SkillFile(nil), files...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
 	for _, f := range sorted {
+		if isLegacySkillDirectory(f) {
+			continue
+		}
 		h.Write([]byte(f.Path))
 		h.Write(f.Content)
 	}

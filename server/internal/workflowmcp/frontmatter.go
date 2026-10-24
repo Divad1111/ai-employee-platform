@@ -12,7 +12,7 @@ var frontMatterRe = regexp.MustCompile(`(?s)^---\r?\n(.*?)\r?\n---\r?\n?(.*)$`)
 
 // ParseFrontMatter 解析 Markdown YAML front matter，返回元数据与正文。
 func ParseFrontMatter(raw string) (map[string]any, string, error) {
-	m := frontMatterRe.FindStringSubmatch(raw)
+	m := frontMatterRe.FindStringSubmatch(strings.TrimPrefix(raw, "\uFEFF"))
 	if m == nil {
 		return map[string]any{}, raw, nil
 	}
@@ -88,11 +88,18 @@ func ParseSkillMD(content string) (*SkillPackage, error) {
 	if sp.CursorName == "" {
 		sp.CursorName = CursorSkillName(sp.ID)
 	}
+	if err := ValidateAssetPath(sp.CursorName); err != nil || strings.Contains(sp.CursorName, "/") {
+		return nil, fmt.Errorf("非法技能安装目录名 %q", sp.CursorName)
+	}
+	sp.RawSkillMD = content
 	return sp, nil
 }
 
 // RenderSkillMD 将技能包渲染为 SKILL.md。
 func RenderSkillMD(sp *SkillPackage) (string, error) {
+	if sp.RawSkillMD != "" {
+		return sp.RawSkillMD, nil
+	}
 	meta := map[string]any{
 		"name":                     sp.CursorName,
 		"id":                       sp.ID,
@@ -120,12 +127,12 @@ func ParseKnowledgeMD(path, raw string) (*KnowledgeDoc, error) {
 		return nil, err
 	}
 	doc := &KnowledgeDoc{
-		Path:      path,
-		Content:   body,
-		Source:    "local",
-		Version:   "1.0.0",
-		Metadata:  map[string]any{},
-		Aliases:   nil,
+		Path:     path,
+		Content:  body,
+		Source:   "local",
+		Version:  "1.0.0",
+		Metadata: map[string]any{},
+		Aliases:  nil,
 	}
 	// 默认 id = 去 .md 的路径
 	id := strings.TrimSuffix(path, ".md")

@@ -1,5 +1,6 @@
 /** 工作流MCP 前端类型与 API */
 import { apiDelete, apiGet, apiPost, apiPut, getToken, setToken } from './client'
+import { rebuildSavedIndex } from './savedIndex'
 
 export type Workflow = {
   id: string
@@ -22,6 +23,7 @@ export type SkillPackage = {
   version: string
   description: string
   content_hash?: string
+  revision?: number
   files?: { path: string; sha256?: string; size_bytes?: number }[]
 }
 
@@ -54,7 +56,8 @@ export async function getWorkflow(id: string) {
 }
 
 export async function upsertWorkflow(yaml: string, bump = 'patch') {
-  return apiPost<{ status: string; action: string; workflow: Workflow }>('/workflow-mcp/workflows', { yaml, bump })
+  const saved = await apiPost<{ status: string; action: string; workflow: Workflow }>('/workflow-mcp/workflows', { yaml, bump })
+  return rebuildSavedIndex(saved, reindexKnowledge)
 }
 
 export async function deleteWorkflow(id: string) {
@@ -70,11 +73,57 @@ export async function getSkill(id: string) {
 }
 
 export async function upsertSkill(skill_md: string, bump = 'patch') {
-  return apiPost<{ status: string; skill: SkillPackage }>('/workflow-mcp/skills', { skill_md, bump })
+  const saved = await apiPost<{ status: string; skill: SkillPackage }>('/workflow-mcp/skills', { skill_md, bump })
+  return rebuildSavedIndex(saved, reindexKnowledge)
 }
 
 export async function deleteSkill(id: string) {
   return apiDelete(`/workflow-mcp/skills/${encodeURIComponent(id)}`)
+}
+
+export type SkillAsset = { path: string; sha256: string; size_bytes: number }
+export type SkillAssetIndex = { skill: SkillPackage; files: SkillAsset[] }
+
+export class SkillAssetConflict extends Error {}
+
+export async function listSkillAssets(id: string): Promise<SkillAssetIndex> {
+  return apiGet(`/workflow-mcp/skills/${encodeURIComponent(id)}/files`)
+}
+
+export async function readSkillAsset(id: string, path: string): Promise<{ blob: Blob; revision: number }> {
+  const headers = new Headers()
+  const token = getToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  const res = await fetch(`/api/workflow-mcp/skills/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`, { headers })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { error?: string }
+    if (res.status === 401) setToken(null)
+    if (res.status === 409) throw new SkillAssetConflict('资产已被其他人更新，请比较最新内容后重试')
+    throw new Error(body.error || `读取文件失败 (${res.status})`)
+  }
+  return { blob: await res.blob(), revision: Number(res.headers.get('X-Skill-Revision')) }
+}
+
+export async function patchSkillAssets(id: string, revision: number, writes: { path: string; blob: Blob }[], deletes: string[]) {
+  const body = new FormData()
+  const operations = writes.map((file, index) => {
+    const part = `file_${index}`
+    body.append(part, file.blob, 'asset')
+    return { path: file.path, part }
+  })
+  body.append('manifest', JSON.stringify({ revision, writes: operations, deletes }))
+  // Keep the status so the editor can preserve drafts and offer conflict resolution.
+  const headers = new Headers()
+  const token = getToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  const res = await fetch(`/api/workflow-mcp/skills/${encodeURIComponent(id)}/assets`, { method: 'PATCH', headers, body })
+  const result = await res.json() as { error?: string; changed: boolean; revision: number; content_hash: string; skill: SkillPackage; files: SkillAsset[] }
+  if (!res.ok) {
+    if (res.status === 401) setToken(null)
+    if (res.status === 409) throw new SkillAssetConflict('技能包已被其他人更新，本地草稿已保留')
+    throw new Error(result.error || `保存失败 (${res.status})`)
+  }
+  return result.changed ? rebuildSavedIndex(result, reindexKnowledge) : { ...result, reindexed: undefined, index_warning: undefined }
 }
 
 export async function listKnowledge(namespace = '') {
@@ -87,7 +136,8 @@ export async function getKnowledge(id: string) {
 }
 
 export async function upsertKnowledge(path: string, content: string, bump = 'patch') {
-  return apiPost<{ status: string; doc: KnowledgeDoc }>('/workflow-mcp/knowledge', { path, content, bump })
+  const saved = await apiPost<{ status: string; doc: KnowledgeDoc }>('/workflow-mcp/knowledge', { path, content, bump })
+  return rebuildSavedIndex(saved, reindexKnowledge)
 }
 
 export async function deleteKnowledge(id: string) {

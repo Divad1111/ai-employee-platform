@@ -2,6 +2,7 @@ package workflowmcp
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -9,14 +10,14 @@ import (
 
 // MemoryStore 内存实现（测试与无 DB 回退）。
 type MemoryStore struct {
-	mu        sync.RWMutex
-	workflows map[string]*Workflow
-	skills    map[string]*SkillPackage
+	mu         sync.RWMutex
+	workflows  map[string]*Workflow
+	skills     map[string]*SkillPackage
 	skillFiles map[string][]SkillFile // skillID -> files
-	knowledge map[string]*KnowledgeDoc
-	aliases   map[string]string // alias -> docID
-	chunks    map[string][]KnowledgeChunk
-	grants    map[string]map[string]EmployeeGrant // employeeID -> workflowID -> grant
+	knowledge  map[string]*KnowledgeDoc
+	aliases    map[string]string // alias -> docID
+	chunks     map[string][]KnowledgeChunk
+	grants     map[string]map[string]EmployeeGrant // employeeID -> workflowID -> grant
 }
 
 // NewMemoryStore 创建空内存存储。
@@ -124,27 +125,68 @@ func (m *MemoryStore) GetSkillFiles(_ context.Context, skillID string) ([]SkillF
 	return out, nil
 }
 
-func (m *MemoryStore) UpsertSkill(_ context.Context, sp *SkillPackage, files []SkillFile) error {
+func (m *MemoryStore) ListSkillFileIndex(ctx context.Context, skillID string) ([]SkillFile, error) {
+	files, err := m.GetSkillFiles(ctx, skillID)
+	for i := range files {
+		files[i].Content = nil
+	}
+	return files, err
+}
+
+func (m *MemoryStore) GetSkillFile(_ context.Context, skillID, path string) (SkillFile, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, f := range m.skillFiles[skillID] {
+		if f.Path == path {
+			f.Content = append([]byte{}, f.Content...)
+			return f, nil
+		}
+	}
+	return SkillFile{}, ErrNotFound
+}
+
+func (m *MemoryStore) SaveSkillChanges(_ context.Context, sp *SkillPackage, files []SkillFile, deletes []string, expectedRevision int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now().UTC()
 	if existing, ok := m.skills[sp.ID]; ok {
+		if existing.Revision != expectedRevision {
+			return ErrConflict
+		}
 		sp.CreatedAt = existing.CreatedAt
 	} else {
+		if expectedRevision != 0 {
+			return ErrConflict
+		}
 		sp.CreatedAt = now
 	}
+	for id, other := range m.skills {
+		if id != sp.ID && other.CursorName == sp.CursorName {
+			return fmt.Errorf("%w: 技能安装目录名已被使用", ErrInvalidInput)
+		}
+	}
+	sp.Revision = expectedRevision + 1
 	sp.UpdatedAt = now
 	cp := *sp
 	cp.Files = nil
 	m.skills[sp.ID] = &cp
-	copied := make([]SkillFile, len(files))
-	for i, f := range files {
-		copied[i] = f
-		if f.Content != nil {
-			copied[i].Content = append([]byte(nil), f.Content...)
-		}
+	byPath := map[string]SkillFile{}
+	for _, f := range m.skillFiles[sp.ID] {
+		byPath[f.Path] = f
 	}
-	m.skillFiles[sp.ID] = copied
+	for _, path := range deletes {
+		delete(byPath, path)
+	}
+	for _, f := range files {
+		f.Content = append([]byte{}, f.Content...)
+		byPath[f.Path] = f
+	}
+	merged := make([]SkillFile, 0, len(byPath))
+	for _, f := range byPath {
+		merged = append(merged, f)
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Path < merged[j].Path })
+	m.skillFiles[sp.ID] = merged
 	return nil
 }
 

@@ -7,10 +7,10 @@ import (
 
 // 领域错误。
 var (
-	ErrNotFound      = errors.New("资源不存在")
-	ErrInvalidInput  = errors.New("参数无效")
-	ErrConflict      = errors.New("资源冲突")
-	ErrUnauthorized  = errors.New("未授权")
+	ErrNotFound     = errors.New("资源不存在")
+	ErrInvalidInput = errors.New("参数无效")
+	ErrConflict     = errors.New("资源冲突")
+	ErrUnauthorized = errors.New("未授权")
 )
 
 // Store 工作流MCP 持久化接口。
@@ -25,7 +25,9 @@ type Store interface {
 	ListSkills(ctx context.Context) ([]*SkillPackage, error)
 	GetSkill(ctx context.Context, idOrCursor string) (*SkillPackage, error)
 	GetSkillFiles(ctx context.Context, skillID string) ([]SkillFile, error)
-	UpsertSkill(ctx context.Context, sp *SkillPackage, files []SkillFile) error
+	ListSkillFileIndex(ctx context.Context, skillID string) ([]SkillFile, error)
+	GetSkillFile(ctx context.Context, skillID, path string) (SkillFile, error)
+	SaveSkillChanges(ctx context.Context, sp *SkillPackage, writes []SkillFile, deletes []string, expectedRevision int64) error
 	DeleteSkill(ctx context.Context, id string) error
 
 	// Knowledge

@@ -46,7 +46,7 @@ import {
 } from '../../components/Icons'
 import { StatusBadge } from '../../components/StatusBadge'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
-import { formatTime } from '../../lib/time'
+import { formatDateTime } from '../../lib/time'
 import { usePerm } from '../../stores/permissions'
 
 type Tab = 'overview' | 'policies' | 'destinations' | 'runs' | 'restore'
@@ -669,10 +669,10 @@ export function BackupsPage() {
         <div className="stat-card">
           <div className="stat-label">最近成功备份</div>
           <div className="stat-value" style={{ fontSize: '1.1rem', marginTop: '0.8rem' }}>
-            {overview?.last_success_run_at ? formatTime(overview.last_success_run_at) : '暂无记录'}
+            {overview?.last_success_run_at ? formatDateTime(overview.last_success_run_at) : '暂无记录'}
           </div>
           <div className="stat-sub">
-            {overview?.next_scheduled_at ? `下次预计: ${formatTime(overview.next_scheduled_at)}` : '未配置自动调度'}
+            {overview?.next_scheduled_at ? `下次预计: ${formatDateTime(overview.next_scheduled_at)}` : '未配置自动调度'}
           </div>
         </div>
       </div>
@@ -748,7 +748,7 @@ export function BackupsPage() {
                 </h3>
                 <p style={{ margin: '0.25rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
                   {overview?.last_success_run_at
-                    ? `最近一次成功备份生成于 ${formatTime(overview.last_success_run_at)}，快照文件已受校验保护。`
+                    ? `最近一次成功备份生成于 ${formatDateTime(overview.last_success_run_at)}，快照文件已受校验保护。`
                     : '尚未生成任何成功备份，建议立即创建策略或发起手动全量快照。'}
                 </p>
               </div>
@@ -802,7 +802,7 @@ export function BackupsPage() {
                           r.policy_name || '手动即时备份'
                         )}
                       </td>
-                      <td>{formatTime(r.created_at)}</td>
+                      <td>{formatDateTime(r.created_at)}</td>
                       <td>{formatBytes(r.artifact_size)}</td>
                       <td>{formatDuration(r.duration_ms)}</td>
                       <td>
@@ -944,10 +944,10 @@ export function BackupsPage() {
                       )}
                     </td>
                     <td>
-                      <div>{p.last_run_at ? formatTime(p.last_run_at) : '—'}</div>
+                      <div>{p.last_run_at ? formatDateTime(p.last_run_at) : '—'}</div>
                       {p.last_run_status && <StatusBadge status={p.last_run_status} />}
                     </td>
-                    <td style={{ fontSize: '0.82rem' }}>{p.next_run_at ? formatTime(p.next_run_at) : '—'}</td>
+                    <td style={{ fontSize: '0.82rem' }}>{p.next_run_at ? formatDateTime(p.next_run_at) : '—'}</td>
                     <td>
                       <div style={{ display: 'flex', gap: '0.35rem' }}>
                         {canCreate && (
@@ -1108,7 +1108,7 @@ export function BackupsPage() {
                       最后连通测试:{' '}
                       {d.last_test_at ? (
                         <span style={{ color: d.last_test_status === 'SUCCESS' ? 'var(--success)' : 'var(--danger)' }}>
-                          {formatTime(d.last_test_at)} ({d.last_test_status})
+                          {formatDateTime(d.last_test_at)} ({d.last_test_status})
                         </span>
                       ) : (
                         '未测试'
@@ -1226,7 +1226,7 @@ export function BackupsPage() {
                         )}
                       </div>
                     </td>
-                    <td>{formatTime(r.created_at)}</td>
+                    <td>{formatDateTime(r.created_at)}</td>
                     <td>{formatDuration(r.duration_ms)}</td>
                     <td>{formatBytes(r.artifact_size)}</td>
                     <td>
@@ -1297,7 +1297,7 @@ export function BackupsPage() {
                                 id: r.id,
                                 title: '删除备份快照记录',
                                 label: r.backup_id,
-                                meta: `归档体积: ${formatBytes(r.artifact_size)} · 创建时间: ${formatTime(r.created_at)}`,
+                                meta: `归档体积: ${formatBytes(r.artifact_size)} · 创建时间: ${formatDateTime(r.created_at)}`,
                               })
                             }}
                             title="删除此备份及物理文件"
@@ -1402,8 +1402,8 @@ export function BackupsPage() {
                       )}
                     </td>
                     <td>{j.created_by || 'system'}</td>
-                    <td>{j.started_at ? formatTime(j.started_at) : '—'}</td>
-                    <td>{j.completed_at ? formatTime(j.completed_at) : '—'}</td>
+                    <td>{j.started_at ? formatDateTime(j.started_at) : '—'}</td>
+                    <td>{j.completed_at ? formatDateTime(j.completed_at) : '—'}</td>
                     <td>
                       <StatusBadge status={j.status} />
                     </td>
@@ -2082,7 +2082,7 @@ export function BackupsPage() {
                   <code style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>{restoreConfirmRun.backup_id}</code>
                 </div>
                 <div>
-                  <strong>创建时间:</strong> {formatTime(restoreConfirmRun.created_at)}
+                  <strong>创建时间:</strong> {formatDateTime(restoreConfirmRun.created_at)}
                 </div>
                 <div>
                   <strong>归档体积:</strong> {formatBytes(restoreConfirmRun.artifact_size)} ·{' '}
@@ -2196,7 +2196,7 @@ export function BackupsPage() {
             <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.8rem', fontSize: '0.85rem' }}>
                 <div><strong>Backup ID:</strong> <code>{detailRun.backup_id}</code></div>
-                <div><strong>生成时间:</strong> {formatTime(detailRun.created_at)}</div>
+                <div><strong>生成时间:</strong> {formatDateTime(detailRun.created_at)}</div>
                 <div><strong>耗时:</strong> {formatDuration(detailRun.duration_ms)}</div>
                 <div><strong>归档尺寸:</strong> {formatBytes(detailRun.artifact_size)}</div>
                 <div><strong>文件总数:</strong> {detailRun.file_count}</div>

@@ -211,6 +211,113 @@ func TestSecretNotEchoed(t *testing.T) {
 	}
 }
 
+func TestDeleteEmployeeRemovesFeishuBinding(t *testing.T) {
+	h, tok, _, _ := setupM6(t)
+	ids := make([]string, 0, 2)
+	for _, alias := range []string{"dev", "ops"} {
+		code, emp := doJSON(t, h, http.MethodPost, "/api/employees", tok, map[string]string{"name": alias})
+		if code != http.StatusCreated {
+			t.Fatalf("create employee: %d %v", code, emp)
+		}
+		id := emp["id"].(string)
+		ids = append(ids, id)
+		code, body := doJSON(t, h, http.MethodPost, "/api/integrations/feishu/bindings", tok, map[string]string{
+			"employee_id": id, "feishu_bot_alias": alias, "feishu_open_id": "ou_shared", "chat_id": "oc_shared",
+		})
+		if code != http.StatusOK {
+			t.Fatalf("bind: %d %v", code, body)
+		}
+	}
+	code, body := doJSON(t, h, http.MethodDelete, "/api/employees/"+ids[0], tok, nil)
+	if code != http.StatusForbidden {
+		t.Fatalf("delete without step-up: %d %v", code, body)
+	}
+	code, body = doJSON(t, h, http.MethodGet, "/api/integrations/feishu/bindings", tok, nil)
+	if code != http.StatusOK || len(body["items"].([]any)) != 2 {
+		t.Fatalf("rejected deletion must preserve bindings: %d %v", code, body)
+	}
+	code, body = doJSON(t, h, http.MethodPost, "/api/auth/step-up", tok, map[string]string{"password": "admin123"})
+	if code != http.StatusOK {
+		t.Fatalf("step-up: %d %v", code, body)
+	}
+	code, body = doJSON(t, h, http.MethodDelete, "/api/employees/"+ids[0], tok, nil)
+	if code != http.StatusOK {
+		t.Fatalf("delete employee: %d %v", code, body)
+	}
+	code, body = doJSON(t, h, http.MethodGet, "/api/integrations/feishu/bindings", tok, nil)
+	if code != http.StatusOK {
+		t.Fatalf("list bindings: %d %v", code, body)
+	}
+	items := body["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["employee_id"] != ids[1] {
+		t.Fatalf("must remove only the deleted employee's binding: %v", body)
+	}
+	// 没有绑定的员工也能正常删除。
+	code, body = doJSON(t, h, http.MethodDelete, "/api/integrations/feishu/bindings?employee_id="+ids[1], tok, nil)
+	if code != http.StatusOK {
+		t.Fatalf("delete remaining binding: %d %v", code, body)
+	}
+	code, body = doJSON(t, h, http.MethodDelete, "/api/employees/"+ids[1], tok, nil)
+	if code != http.StatusOK {
+		t.Fatalf("delete unbound employee: %d %v", code, body)
+	}
+}
+
+func TestDeleteFeishuBindingForDeletedEmployee(t *testing.T) {
+	auditor := audit.NewMemory()
+	users := auth.NewMemoryUserStore()
+	if err := users.SeedAdmin("admin", "admin123", "Admin"); err != nil {
+		t.Fatal(err)
+	}
+	vault, err := secret.NewMemoryVault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := feishu.NewService(vault)
+	h := api.NewRouter(api.Deps{
+		Auth:      auth.NewService(users, auth.NewMemorySessionStore(), auditor),
+		Audit:     auditor,
+		Employees: employee.NewService(employee.NewMemoryStore(), auditor, nil),
+		Feishu:    fs,
+	})
+	tok := login(t, h)
+	for _, query := range []string{
+		"employee_id=EMP-deleted&feishu_bot_alias=dev",
+		"employee_id=EMP-deleted",
+		"feishu_bot_alias=DEV",
+		"alias=dev",
+	} {
+		t.Run(query, func(t *testing.T) {
+			// 模拟旧版本遗留的绑定: 数字员工已不存在, 绑定仍在持久化数据中。
+			fs.UpsertBinding(feishu.Binding{EmployeeID: "EMP-deleted", FeishuAlias: "dev", FeishuOpenID: "ou_deleted"})
+			code, body := doJSON(t, h, http.MethodDelete, "/api/integrations/feishu/bindings?employee_id=EMP-other&alias=dev", tok, nil)
+			if code != http.StatusNotFound || fs.BindingByEmployee("EMP-deleted") == nil {
+				t.Fatalf("mismatched employee must not delete binding: %d %v", code, body)
+			}
+			code, body = doJSON(t, h, http.MethodDelete, "/api/integrations/feishu/bindings?"+query, tok, nil)
+			if code != http.StatusOK || body["status"] != "deleted" {
+				t.Fatalf("delete orphan binding: %d %v", code, body)
+			}
+			if fs.BindingByEmployee("EMP-deleted") != nil || fs.EmployeeHasOpenID("EMP-deleted", "ou_deleted") {
+				t.Fatal("binding or OpenID index remains")
+			}
+			if restored := feishu.NewService(vault); len(restored.ListBindings()) != 0 || restored.EmployeeHasOpenID("EMP-deleted", "ou_deleted") {
+				t.Fatal("deleted binding restored from persistence")
+			}
+			code, body = doJSON(t, h, http.MethodDelete, "/api/integrations/feishu/bindings?"+query, tok, nil)
+			if code != http.StatusNotFound {
+				t.Fatalf("repeated deletion: %d %v", code, body)
+			}
+		})
+	}
+	code, body := doJSON(t, h, http.MethodPost, "/api/integrations/feishu/bindings", tok, map[string]string{
+		"employee_id": "EMP-deleted", "feishu_bot_alias": "dev",
+	})
+	if code != http.StatusNotFound {
+		t.Fatalf("must not create bindings for missing employees: %d %v", code, body)
+	}
+}
+
 func TestFeishuBindingListScopedToOwner(t *testing.T) {
 	auditor := audit.NewMemory()
 	users := auth.NewMemoryUserStore()
@@ -222,11 +329,12 @@ func TestFeishuBindingListScopedToOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fs := feishu.NewService(vault)
 	h := api.NewRouter(api.Deps{
 		Auth:      authSvc,
 		Audit:     auditor,
 		Employees: employee.NewService(employee.NewMemoryStore(), auditor, nil),
-		Feishu:    feishu.NewService(vault),
+		Feishu:    fs,
 	})
 	login := func(user, pass string) string {
 		t.Helper()
@@ -292,5 +400,16 @@ func TestFeishuBindingListScopedToOwner(t *testing.T) {
 	}
 	if n := len(all["items"].([]any)); n != 2 {
 		t.Fatalf("管理员应看到全部绑定, got %d", n)
+	}
+	code, deleted := doJSON(t, h, http.MethodDelete, "/api/integrations/feishu/bindings?employee_id="+hers["id"].(string)+"&alias=alicebot", aliceTok, nil)
+	if code != http.StatusOK {
+		t.Fatalf("应能删除自己的绑定: %d %v", code, deleted)
+	}
+	fs.UpsertBinding(feishu.Binding{EmployeeID: "EMP-deleted", FeishuAlias: "orphan"})
+	for _, query := range []string{"employee_id=EMP-deleted&alias=orphan", "alias=orphan"} {
+		code, denied = doJSON(t, h, http.MethodDelete, "/api/integrations/feishu/bindings?"+query, aliceTok, nil)
+		if code != http.StatusNotFound || fs.BindingByEmployee("EMP-deleted") == nil {
+			t.Fatalf("仅本人权限不能删除归属未知的残留绑定: %d %v", code, denied)
+		}
 	}
 }

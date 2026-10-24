@@ -126,9 +126,29 @@ func (d Deps) handleUpsertSkillPackage(w http.ResponseWriter, r *http.Request, s
 	if md == "" {
 		md = body.Content
 	}
+	if body.Files != nil && !d.scopeAll(r, sess, "workflow.delete") {
+		parsed, err := workflowmcp.ParseSkillMD(md)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		existing, err := d.WorkflowMCP.GetSkill(r.Context(), parsed.ID)
+		if err == nil {
+			paths := map[string]bool{}
+			for _, f := range body.Files {
+				paths[f.Path] = true
+			}
+			for _, f := range existing.Files {
+				if !paths[f.Path] {
+					writeErr(w, http.StatusForbidden, "删除资产需要全局删除权限")
+					return
+				}
+			}
+		}
+	}
 	sp, action, err := d.WorkflowMCP.UpsertSkillMD(r.Context(), md, body.Files, body.Bump)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeAssetError(w, err)
 		return
 	}
 	code := http.StatusOK
@@ -407,6 +427,9 @@ func (d Deps) handleImportWorkflowMCP(w http.ResponseWriter, r *http.Request, se
 	// 收集技能包目录
 	skillDirs := map[string]map[string][]byte{} // cursor_name -> path -> content
 	for _, zf := range zr.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
 		name := strings.ReplaceAll(zf.Name, "\\", "/")
 		// 去掉可能的 data/ 前缀
 		name = strings.TrimPrefix(name, "data/")

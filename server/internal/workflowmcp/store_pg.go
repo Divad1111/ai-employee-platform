@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -95,7 +96,7 @@ func (s *PostgresStore) DeleteWorkflow(ctx context.Context, id string) error {
 func (s *PostgresStore) ListSkills(ctx context.Context) ([]*SkillPackage, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, cursor_name, name, version, description, body, metadata,
-		       disable_model_invocation, content_hash, created_at, updated_at
+		       disable_model_invocation, content_hash, created_at, updated_at, raw_skill_md, revision
 		FROM skill_packages ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -115,7 +116,7 @@ func (s *PostgresStore) ListSkills(ctx context.Context) ([]*SkillPackage, error)
 func (s *PostgresStore) GetSkill(ctx context.Context, idOrCursor string) (*SkillPackage, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, cursor_name, name, version, description, body, metadata,
-		       disable_model_invocation, content_hash, created_at, updated_at
+		       disable_model_invocation, content_hash, created_at, updated_at, raw_skill_md, revision
 		FROM skill_packages WHERE id = $1 OR cursor_name = $1`, idOrCursor)
 	sp, err := scanSkill(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -143,7 +144,34 @@ func (s *PostgresStore) GetSkillFiles(ctx context.Context, skillID string) ([]Sk
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) UpsertSkill(ctx context.Context, sp *SkillPackage, files []SkillFile) error {
+func (s *PostgresStore) ListSkillFileIndex(ctx context.Context, skillID string) ([]SkillFile, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT path, sha256, size_bytes FROM skill_package_files WHERE skill_id=$1 ORDER BY path`, skillID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SkillFile{}
+	for rows.Next() {
+		var f SkillFile
+		if err := rows.Scan(&f.Path, &f.SHA256, &f.Size); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) GetSkillFile(ctx context.Context, skillID, path string) (SkillFile, error) {
+	var f SkillFile
+	err := s.db.QueryRowContext(ctx, `SELECT path, content, sha256, size_bytes FROM skill_package_files WHERE skill_id=$1 AND path=$2`, skillID, path).Scan(&f.Path, &f.Content, &f.SHA256, &f.Size)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = ErrNotFound
+	}
+	return f, err
+}
+
+// SaveSkillChanges uses the package row as a compare-and-swap lock for every writer.
+func (s *PostgresStore) SaveSkillChanges(ctx context.Context, sp *SkillPackage, files []SkillFile, deletes []string, expectedRevision int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -155,33 +183,61 @@ func (s *PostgresStore) UpsertSkill(ctx context.Context, sp *SkillPackage, files
 	}
 	sp.UpdatedAt = now
 	meta, _ := json.Marshal(sp.Metadata)
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		INSERT INTO skill_packages (
 			id, cursor_name, name, version, description, body, metadata,
-			disable_model_invocation, content_hash, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			disable_model_invocation, content_hash, created_at, updated_at, raw_skill_md, revision
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,1)
 		ON CONFLICT (id) DO UPDATE SET
 			cursor_name=EXCLUDED.cursor_name, name=EXCLUDED.name, version=EXCLUDED.version,
 			description=EXCLUDED.description, body=EXCLUDED.body, metadata=EXCLUDED.metadata,
 			disable_model_invocation=EXCLUDED.disable_model_invocation,
-			content_hash=EXCLUDED.content_hash, updated_at=EXCLUDED.updated_at`,
+			content_hash=EXCLUDED.content_hash, updated_at=EXCLUDED.updated_at,
+			raw_skill_md=EXCLUDED.raw_skill_md, revision=skill_packages.revision+1
+		WHERE skill_packages.revision=$13`,
 		sp.ID, sp.CursorName, sp.Name, sp.Version, sp.Description, sp.Body, meta,
-		sp.DisableModelInvocation, sp.ContentHash, sp.CreatedAt, sp.UpdatedAt,
+		sp.DisableModelInvocation, sp.ContentHash, sp.CreatedAt, sp.UpdatedAt, sp.RawSkillMD, expectedRevision,
 	)
 	if err != nil {
+		var state interface{ SQLState() string }
+		if errors.As(err, &state) && state.SQLState() == "23505" {
+			return fmt.Errorf("%w: 技能安装目录名已被使用", ErrInvalidInput)
+		}
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM skill_package_files WHERE skill_id = $1`, sp.ID); err != nil {
+	if n, err := res.RowsAffected(); err != nil {
 		return err
+	} else if n == 0 {
+		return ErrConflict
+	}
+	// A deleted package must not be silently recreated by a stale update.
+	if expectedRevision > 0 {
+		var revision int64
+		if err := tx.QueryRowContext(ctx, `SELECT revision FROM skill_packages WHERE id=$1`, sp.ID).Scan(&revision); err != nil {
+			return err
+		}
+		if revision != expectedRevision+1 {
+			return ErrConflict
+		}
+	}
+	for _, path := range deletes {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM skill_package_files WHERE skill_id=$1 AND path=$2`, sp.ID, path); err != nil {
+			return err
+		}
 	}
 	for _, f := range files {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO skill_package_files (skill_id, path, content, sha256, size_bytes)
-			VALUES ($1,$2,$3,$4,$5)`, sp.ID, f.Path, f.Content, f.SHA256, f.Size); err != nil {
+			VALUES ($1,$2,$3,$4,$5)
+			ON CONFLICT (skill_id,path) DO UPDATE SET content=EXCLUDED.content, sha256=EXCLUDED.sha256, size_bytes=EXCLUDED.size_bytes`, sp.ID, f.Path, f.Content, f.SHA256, f.Size); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	sp.Revision = expectedRevision + 1
+	return nil
 }
 
 func (s *PostgresStore) DeleteSkill(ctx context.Context, id string) error {
@@ -441,7 +497,7 @@ func scanSkill(row scannable) (*SkillPackage, error) {
 	var sp SkillPackage
 	var meta []byte
 	err := row.Scan(&sp.ID, &sp.CursorName, &sp.Name, &sp.Version, &sp.Description, &sp.Body,
-		&meta, &sp.DisableModelInvocation, &sp.ContentHash, &sp.CreatedAt, &sp.UpdatedAt)
+		&meta, &sp.DisableModelInvocation, &sp.ContentHash, &sp.CreatedAt, &sp.UpdatedAt, &sp.RawSkillMD, &sp.Revision)
 	if err != nil {
 		return nil, err
 	}
