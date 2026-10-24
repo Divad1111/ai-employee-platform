@@ -46,6 +46,11 @@ export function roleDisplayName(name: string, description?: string) {
 }
 
 const PERM_DESCRIPTIONS: Record<string, string> = {
+  'infra.read': '查看 PVE、软件和部署记录',
+  'infra.manage': '管理 PVE、软件和更新策略',
+  'infra.deploy': '创建虚拟机、部署与回滚软件',
+  'infra.console': '登录主机 SSH 终端',
+  'infra.credential': '管理与查看基础设施凭证',
   'backup.view': '查看备份策略、存储目标与记录',
   'backup.create': '手动执行系统备份',
   'backup.manage': '管理备份策略与调度设置',

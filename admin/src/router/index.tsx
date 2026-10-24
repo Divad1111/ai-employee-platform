@@ -20,6 +20,10 @@ import { SessionsPage } from '../pages/SessionsPage'
 import { McpServersPage } from '../pages/mcp/McpServersPage'
 import { WorkflowMcpPage } from '../pages/workflow/WorkflowMcpPage'
 import { WorkstationsPage } from '../pages/WorkstationsPage'
+import { PVEPage } from '../pages/infrastructure/PVEPage'
+import { HostDetailPage } from '../pages/infrastructure/HostDetailPage'
+import { SoftwarePage } from '../pages/infrastructure/SoftwarePage'
+import { DeploymentsPage } from '../pages/infrastructure/DeploymentsPage'
 import { WorkstationDetailPage } from '../pages/WorkstationDetailPage'
 import { WorkspacesPage } from '../pages/WorkspacesPage'
 import { UsersPage } from '../pages/UsersPage'
@@ -54,6 +58,10 @@ export function AppRouter() {
             <Route path="/employees/:id" element={<EmployeeDetailPage />} />
             <Route path="/workstations" element={<WorkstationsPage />} />
             <Route path="/workstations/:id" element={<WorkstationDetailPage />} />
+            <Route path="/pve" element={<PVEPage />} />
+            <Route path="/pve/hosts/:id" element={<HostDetailPage />} />
+            <Route path="/software" element={<SoftwarePage />} />
+            <Route path="/infrastructure/deployments" element={<DeploymentsPage />} />
             <Route path="/workspaces" element={<WorkspacesPage />} />
             <Route path="/jobs" element={<JobsPage />} />
             <Route path="/jobs/:id" element={<JobDetailPage />} />

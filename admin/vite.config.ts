@@ -23,8 +23,9 @@ export default defineConfig({
     proxy: {
       // 开发期将 /api 代理到本地 Control Plane
       '/api': {
-        target: 'http://127.0.0.1:8080',
-        changeOrigin: true,
+        target: process.env.AIE_DEV_API_TARGET || 'http://127.0.0.1:8080',
+        changeOrigin: false,
+        ws: true,
       },
     },
   },

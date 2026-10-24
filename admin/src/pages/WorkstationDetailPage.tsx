@@ -6,6 +6,8 @@ import { Link, useParams } from 'react-router-dom'
 import { apiGet, apiPut } from '../api/client'
 import { roleDisplayName } from '../lib/rbacLabels'
 import { StatusBadge } from '../components/StatusBadge'
+import { usePerm } from '../stores/permissions'
+import { getInfrastructure, type Host } from '../api/infrastructure'
 
 type WS = {
   id: string
@@ -28,6 +30,17 @@ type RoleItem = { name: string; description: string }
 
 export function WorkstationDetailPage() {
   const { id } = useParams()
+  const { canAll } = usePerm()
+  const [infraHost, setInfraHost] = useState<Host | null>(null)
+  useEffect(() => {
+    let active = true
+    if (id && canAll('infra.read')) {
+      void getInfrastructure().then((v) => {
+        if (active) setInfraHost(v.hosts.find((h) => h.workstation_id === id) || null)
+      }).catch(() => { if (active) setInfraHost(null) })
+    }
+    return () => { active = false }
+  }, [id, canAll])
   const [ws, setWs] = useState<WS | null>(null)
   const [sharing, setSharing] = useState<Sharing | null>(null)
   const [roles, setRoles] = useState<RoleItem[]>([])
@@ -106,6 +119,7 @@ export function WorkstationDetailPage() {
       <div className="page-header">
         <Link to="/workstations" className="muted" style={{ fontSize: '0.85rem' }}>← 返回工作站列表</Link>
         <h1 style={{ marginTop: '0.35rem' }}>{ws.name || ws.id}</h1>
+        {infraHost && <Link to={`/pve/hosts/${infraHost.id}`}>管理关联主机 · {infraHost.name} / 软件部署 / SSH</Link>}
         <p style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
           <StatusBadge status={ws.status} />
           <span className="muted">{ws.id}</span>

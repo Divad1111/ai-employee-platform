@@ -81,6 +81,8 @@ npm run build    # 生产构建
 完整的生产与开发环境部署步骤，请参考：
 👉 **[安装配置中心服务器与 Workstation 部署手册](docs/DEPLOYMENT_GUIDE.md)**
 
+PVE 集群、Linux 虚拟机、软件部署与自动更新：**[PVE 与软件管理手册](docs/PVE_SOFTWARE_GUIDE.md)**。
+
 ### 容器一键启动
 ```bash
 # 启动中心服务器栈（PostgreSQL + Control Plane + Admin Web）

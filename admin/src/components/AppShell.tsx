@@ -58,6 +58,7 @@ const navSections: NavSection[] = [
     items: [
       { to: '/employees', label: '数字员工', icon: IconUsers, perm: 'employee.read' },
       { to: '/workstations', label: '工作站节点', icon: IconServer, perm: 'workstation.read' },
+      { to: '/pve', label: 'PVE 管理', icon: IconServer, perm: 'infra.read', allScope: true },
       { to: '/workspaces', label: '项目工作区', icon: IconFolder, perm: 'workspace.read' },
     ],
   },
@@ -74,6 +75,8 @@ const navSections: NavSection[] = [
     title: '能力与协同扩展',
     items: [
       { to: '/mcp-servers', label: 'MCP 服务管理', icon: IconPlug, perm: 'workflow.read' },
+      { to: '/software', label: '软件管理', icon: IconPackage, perm: 'infra.read', allScope: true },
+      { to: '/infrastructure/deployments', label: '部署任务', icon: IconClock, perm: 'infra.read', allScope: true },
       // 飞书应用配置属系统集成，需 system.write
       { to: '/feishu', label: '飞书应用协同', icon: IconMessage, perm: 'system.write' },
     ],

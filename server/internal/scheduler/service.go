@@ -62,6 +62,8 @@ type Service struct {
 	Pusher       CommandPusher
 	FullPusher   FullCommandPusher
 	TaskQueue    taskQueueGate
+	// Maintenance 在基础设施维护期间暂停分配新任务，已有任务可以正常结束。
+	Maintenance func(context.Context, string) (bool, error)
 	// OnTerminal 调度器自行把任务打到终态时回调，用于向飞书回执失败。
 	OnTerminal         func(ctx context.Context, j *job.Job)
 	WorkflowMCP        *workflowmcp.Service
@@ -148,7 +150,7 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job
 	}
 	if wsID == "" {
 		for _, v := range s.Workstations.List(ctx) {
-			if v.Status == reliability.StatusOnline && s.canAssign(v.ID) {
+			if v.Status == reliability.StatusOnline && s.isOnline(v.ID) && s.canAssign(v.ID) {
 				wsID = v.ID
 				break
 			}
@@ -254,11 +256,36 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job
 }
 
 func (s *Service) isOnline(wsID string) bool {
+	if s.Maintenance != nil {
+		blocked, err := s.Maintenance(context.Background(), wsID)
+		if err != nil || blocked {
+			return false
+		}
+	}
 	if s.Presence != nil && !s.Presence.IsSchedulable(wsID) {
 		return false
 	}
 	v := s.Workstations.Get(context.Background(), wsID)
 	return v.Status == reliability.StatusOnline
+}
+
+// WorkstationBusy 等待已开始的分配完成后检查运行任务，避免维护与任务派发交叉。
+func (s *Service) WorkstationBusy(ctx context.Context, wsID string) (bool, error) {
+	s.scheduleMu.Lock()
+	defer s.scheduleMu.Unlock()
+	jobs, err := s.Jobs.List(ctx)
+	if err != nil {
+		return true, err
+	}
+	for _, j := range jobs {
+		if j.WorkstationID == wsID {
+			switch j.Status {
+			case job.StatusAssigned, job.StatusStarting, job.StatusRunning, job.StatusUnknown, job.StatusBlocked, job.StatusWaitingApproval:
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (s *Service) canAssign(wsID string) bool {

@@ -37,6 +37,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/enrollment"
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/feishu"
+	"github.com/ai-employee-platform/server/internal/infrastructure"
 	"github.com/ai-employee-platform/server/internal/inquiry"
 	"github.com/ai-employee-platform/server/internal/job"
 	"github.com/ai-employee-platform/server/internal/jobinput"
@@ -445,6 +446,25 @@ func main() {
 	artSvc.SetJobLookup(artifactJobLookup{jobs: jobSvc})
 	inputFiles := &jobinput.Store{Root: filepath.Join(artRoot, "inputs")}
 	feishuSvc.InputFiles = inputFiles
+	var infrastructureStore infrastructure.Store = infrastructure.NewMemoryStore()
+	if pgSQL != nil {
+		infrastructureStore = infrastructure.NewPostgresStore(pgSQL)
+	}
+	infrastructureSvc := infrastructure.New(infrastructureStore, secretMgr, vault, getenv("AIE_SOFTWARE_DIR", filepath.Join(artRoot, "software")))
+	if err := infrastructureSvc.Seed(context.Background()); err != nil {
+		fatal("初始化基础设施服务失败: %v", err)
+	}
+	infrastructureSvc.Enroll = func(ctx context.Context, label, actor string) (string, error) {
+		token, _, err := enrollSvc.CreateToken(ctx, label, actor, "", 10*time.Minute, false, nil)
+		return token, err
+	}
+	infrastructureSvc.WorkstationReady = func(ctx context.Context, id string) bool {
+		return wsNodeSvc.Get(ctx, id).Status == reliability.StatusOnline
+	}
+	infrastructureSvc.Busy = sched.WorkstationBusy
+	infrastructureSvc.RefreshModels = wsNodeSvc.RequestModelRefresh
+	sched.Maintenance = infrastructureSvc.HostMaintenance
+	go infrastructureSvc.Run(sweepCtx)
 
 	var backupSvc *backup.Service
 	if pgSQL != nil {
@@ -594,6 +614,7 @@ func main() {
 		WSShare:         wsShare,
 		Quota:           quotaSvc,
 		Backup:          backupSvc,
+		Infrastructure:  infrastructureSvc,
 	})
 	mcpSrv := &mcpserver.Server{WF: wfSvc, MCPAuth: mcpAuthSvc, Auth: authSvc, Syncer: sched}
 	mux := http.NewServeMux()

@@ -28,6 +28,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/enrollment"
 	"github.com/ai-employee-platform/server/internal/eventbus"
 	"github.com/ai-employee-platform/server/internal/feishu"
+	"github.com/ai-employee-platform/server/internal/infrastructure"
 	"github.com/ai-employee-platform/server/internal/job"
 	"github.com/ai-employee-platform/server/internal/jobinput"
 	"github.com/ai-employee-platform/server/internal/mcp"
@@ -85,6 +86,7 @@ type Deps struct {
 	WSShare         workstation.ShareStore
 	Quota           *quota.Service
 	Backup          *backup.Service
+	Infrastructure  *infrastructure.Service
 }
 
 // SkillSyncer 向工作站推送技能包同步命令。
@@ -95,6 +97,7 @@ type SkillSyncer interface {
 // NewRouter 构造 HTTP 路由。
 func NewRouter(d Deps) http.Handler {
 	mux := http.NewServeMux()
+	d.infrastructureRoutes(mux)
 	mux.HandleFunc("GET /api/integrations/workstation/jobs/{id}/inputs/{hash}", d.handleWorkstationJobInput)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

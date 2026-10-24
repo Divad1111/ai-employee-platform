@@ -474,7 +474,7 @@ func defaultRoleGrants() map[string][]PermissionGrant {
 	}
 	return map[string][]PermissionGrant{
 		"SUPER_ADMIN": {{Code: "*", Scope: "ALL"}},
-		"ADMIN":       all(adminCodes...),
+		"ADMIN":       append(all(adminCodes...), all("infra.read", "infra.manage", "infra.deploy", "infra.console", "infra.credential")...),
 		"OPERATOR": append(own(
 			"employee.read", "employee.write", "workstation.read", "workspace.read",
 			"session.read", "job.read", "job.write", "job.cancel",
