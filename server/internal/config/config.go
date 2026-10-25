@@ -8,14 +8,15 @@ import (
 	"strings"
 )
 
-
 // Version 为 Control Plane 构建版本号（后续可由 ldflags 注入）。
 const Version = "0.0.1-dev"
 
 // Config 表示运行时有效配置。
 type Config struct {
 	// Env 运行环境：development / staging / production
-	Env string
+	Env             string
+	RequireAdminMFA bool
+	TrustedProxies  []*net.IPNet
 	// HTTPAddr Admin / Feishu Webhook 等 HTTP 监听地址
 	HTTPAddr string
 	// GRPCAddr Workstation gRPC（mTLS）监听地址
@@ -34,8 +35,8 @@ type Config struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		Env:         getenv("AIE_ENV", "development"),
-		HTTPAddr:    getenv("AIE_HTTP_ADDR", ":8080"),
-		GRPCAddr:    getenv("AIE_GRPC_ADDR", ":9090"),
+		HTTPAddr:    getenv("AIE_HTTP_ADDR", "127.0.0.1:8080"),
+		GRPCAddr:    getenv("AIE_GRPC_ADDR", "127.0.0.1:9090"),
 		DatabaseURL: LoadDatabaseDSN(),
 	}
 	httpPort := getenv("AIE_HTTP_PORT", "")
@@ -49,9 +50,26 @@ func Load() (*Config, error) {
 	cfg.PublicHTTPPort = httpPort
 	cfg.PublicGRPCPort = getenv("AIE_GRPC_PORT", "9090")
 	cfg.PublicServerURL = getenv("AIE_PUBLIC_SERVER_URL", "")
+	cfg.RequireAdminMFA = strings.EqualFold(cfg.Env, "production") || getenv("AIE_REQUIRE_ADMIN_MFA", "0") == "1"
+	for _, raw := range strings.Split(os.Getenv("AIE_TRUSTED_PROXIES"), ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(raw)
+		if err != nil {
+			return nil, fmt.Errorf("AIE_TRUSTED_PROXIES 必须为 CIDR 网段")
+		}
+		if ones, _ := network.Mask.Size(); ones == 0 {
+			return nil, fmt.Errorf("不允许信任所有代理地址")
+		}
+		cfg.TrustedProxies = append(cfg.TrustedProxies, network)
+	}
+	if err := cfg.validateSecurity(); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
-
 
 // LoadDatabaseDSN 加载 PostgreSQL DSN。
 // 优先使用 AIE_DATABASE_URL；若未设置，则根据 POSTGRES_* 环境变量进行安全 URL 编码组装，
@@ -84,4 +102,3 @@ func getenv(key, def string) string {
 	}
 	return def
 }
-

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ai-employee-platform/server/internal/statepg"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,7 @@ type Inquiry struct {
 	JobID              string          `json:"job_id"`
 	WorkstationID      string          `json:"workstation_id"`
 	EmployeeID         string          `json:"employee_id"`
+	ApproverOpenID     string          `json:"approver_open_id"`
 	ChatID             string          `json:"chat_id"`
 	Message            string          `json:"message"`
 	Options            []InquiryOption `json:"options"`
@@ -70,11 +72,13 @@ type Service struct {
 	byChat    map[string]*Inquiry // chatID -> latest PENDING Inquiry
 	byJob     map[string]*Inquiry // jobID -> latest PENDING Inquiry
 
-	commands     CommandPusher
-	jobs         JobManager
-	employees    EmployeeGetter
-	feishu       *feishu.Service
-	chatResolver ChatResolver
+	Persistent     *statepg.Collection
+	commands       CommandPusher
+	jobs           JobManager
+	employees      EmployeeGetter
+	feishu         *feishu.Service
+	chatResolver   ChatResolver
+	ApproverForJob func(context.Context, string) string
 }
 
 // NewService 创建 Inquiry 服务
@@ -131,6 +135,18 @@ func (s *Service) HandleInquiryEvent(ctx context.Context, wsID string, ev *aiev1
 		}
 	}
 
+	if s.jobs == nil || s.ApproverForJob == nil {
+		return
+	}
+	j, err := s.jobs.Get(ctx, jobID)
+	if err != nil || j == nil || j.WorkstationID != wsID || (empID != "" && empID != j.EmployeeID) {
+		return
+	}
+	empID = j.EmployeeID
+	approver := s.ApproverForJob(ctx, jobID)
+	if approver == "" {
+		return
+	}
 	// 查找该任务对应的飞书会话
 	chatID := ""
 	if s.chatResolver != nil && jobID != "" {
@@ -148,18 +164,49 @@ func (s *Service) HandleInquiryEvent(ctx context.Context, wsID string, ev *aiev1
 	}
 
 	inq := &Inquiry{
-		ID:            inquiryID,
-		JobID:         jobID,
-		WorkstationID: wsID,
-		EmployeeID:    empID,
-		ChatID:        chatID,
-		Message:       msgText,
-		Options:       options,
-		Status:        "PENDING",
-		CreatedAt:     time.Now().UTC(),
+		ID:             inquiryID,
+		ApproverOpenID: approver,
+		JobID:          jobID,
+		WorkstationID:  wsID,
+		EmployeeID:     empID,
+		ChatID:         chatID,
+		Message:        msgText,
+		Options:        options,
+		Status:         "PENDING",
+		CreatedAt:      time.Now().UTC(),
 	}
 
 	s.mu.Lock()
+	if previous := s.inquiries[inquiryID]; previous != nil {
+		s.mu.Unlock()
+		return
+	}
+	for id, old := range s.inquiries {
+		if time.Since(old.CreatedAt) > 30*time.Minute {
+			delete(s.inquiries, id)
+			if s.byJob[old.JobID] == old {
+				delete(s.byJob, old.JobID)
+			}
+			if s.byChat[old.ChatID] == old {
+				delete(s.byChat, old.ChatID)
+			}
+		}
+	}
+	if old := s.byJob[jobID]; old != nil {
+		old.Status = "EXPIRED"
+		if s.Persistent != nil {
+			if err := s.Persistent.Put(ctx, old.ID, old); err != nil {
+				s.mu.Unlock()
+				return
+			}
+		}
+	}
+	if s.Persistent != nil {
+		if err := s.Persistent.Insert(ctx, inquiryID, inq); err != nil {
+			s.mu.Unlock()
+			return
+		}
+	}
 	s.inquiries[inquiryID] = inq
 	if chatID != "" {
 		s.byChat[chatID] = inq
@@ -253,12 +300,17 @@ func (s *Service) CheckChatReply(ctx context.Context, chatID, text, senderOpenID
 		return false, nil
 	}
 
-	s.mu.RLock()
-	inq := s.byChat[chatID]
-	if inq == nil && senderOpenID != "" {
-		inq = s.byChat[senderOpenID]
+	parts := strings.Fields(text)
+	if len(parts) < 2 {
+		return false, nil
 	}
+	s.mu.RLock()
+	inq := s.inquiries[parts[0]]
 	s.mu.RUnlock()
+	if inq == nil || (inq.ChatID != chatID && inq.ChatID != senderOpenID) {
+		return false, nil
+	}
+	text = strings.Join(parts[1:], " ")
 
 	if inq == nil || inq.Status != "PENDING" {
 		return false, nil
@@ -301,6 +353,40 @@ func (s *Service) ResolveInquiry(ctx context.Context, inquiryID, optionID, optio
 		return inq, fmt.Errorf("请示 %s 已于 %s 完成处理 (状态=%s)", inquiryID, inq.ResolvedAt.Format("15:04:05"), inq.Status)
 	}
 
+	if s.byJob[inq.JobID] != inq {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("此请求已被新的请示替代")
+	}
+	if actor == "" || actor != inq.ApproverOpenID {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("只有任务发起者可以确认此请求")
+	}
+	if time.Since(inq.CreatedAt) > 10*time.Minute {
+		inq.Status = "EXPIRED"
+		s.mu.Unlock()
+		return nil, fmt.Errorf("请求已过期")
+	}
+	if s.jobs == nil {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("任务校验不可用")
+	}
+	j, err := s.jobs.Get(ctx, inq.JobID)
+	if err != nil || j == nil || j.WorkstationID != inq.WorkstationID || j.EmployeeID != inq.EmployeeID || j.Status != job.StatusWaitingApproval {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("任务已结束或归属不符")
+	}
+	validOption := false
+	for _, o := range inq.Options {
+		if o.OptionID == optionID {
+			optionName = o.Name
+			validOption = true
+			break
+		}
+	}
+	if !validOption {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("无效选项")
+	}
 	if optionName == "" {
 		for _, o := range inq.Options {
 			if o.OptionID == optionID {
@@ -313,6 +399,19 @@ func (s *Service) ResolveInquiry(ctx context.Context, inquiryID, optionID, optio
 		optionName = optionID
 	}
 
+	if s.Persistent != nil {
+		next := *inq
+		next.Status = "RESOLVED"
+		next.SelectedOptionID = optionID
+		next.SelectedOptionName = optionName
+		next.ResolvedBy = actor
+		next.ResolvedAt = time.Now().UTC()
+		claimed, err := s.Persistent.ResolvePending(ctx, inq.ID, &next)
+		if err != nil || !claimed {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("请示已处理或持久化不可用")
+		}
+	}
 	inq.Status = "RESOLVED"
 	inq.SelectedOptionID = optionID
 	inq.SelectedOptionName = optionName
@@ -410,4 +509,35 @@ func matchOption(input string, options []InquiryOption) (InquiryOption, bool) {
 	}
 
 	return InquiryOption{}, false
+}
+
+func (s *Service) SetPersistentStore(ctx context.Context, data *statepg.Collection) error {
+	all, err := data.All(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, b := range all {
+		var inq Inquiry
+		if err = json.Unmarshal(b, &inq); err != nil {
+			return err
+		}
+		if inq.Status != "PENDING" || time.Since(inq.CreatedAt) > 10*time.Minute {
+			continue
+		}
+		if current := s.byJob[inq.JobID]; current != nil {
+			if current.CreatedAt.After(inq.CreatedAt) {
+				continue
+			}
+			current.Status = "EXPIRED"
+		}
+		s.inquiries[inq.ID] = &inq
+		if current := s.byChat[inq.ChatID]; current == nil || inq.CreatedAt.After(current.CreatedAt) {
+			s.byChat[inq.ChatID] = &inq
+		}
+		s.byJob[inq.JobID] = &inq
+	}
+	s.Persistent = data
+	return nil
 }

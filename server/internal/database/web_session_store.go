@@ -24,30 +24,30 @@ func (s *PostgresWebSessionStore) Save(ctx context.Context, sess *auth.Session) 
 		roles = []string{}
 	}
 	query := `
-		INSERT INTO admin_web_sessions (token, user_id, username, roles, expires_at, step_up_until)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO admin_web_sessions (token, user_id, username, roles, expires_at, step_up_until, credential_version, mfa_authenticated)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (token) DO UPDATE SET
 			user_id = EXCLUDED.user_id,
 			username = EXCLUDED.username,
 			roles = EXCLUDED.roles,
 			expires_at = EXCLUDED.expires_at,
-			step_up_until = EXCLUDED.step_up_until
+			step_up_until = EXCLUDED.step_up_until, credential_version = EXCLUDED.credential_version, mfa_authenticated = EXCLUDED.mfa_authenticated
 	`
-	_, err := s.db.SQL.ExecContext(ctx, query, sess.Token, sess.UserID, sess.Username, roles, sess.ExpiresAt, stepUp)
+	_, err := s.db.SQL.ExecContext(ctx, query, auth.SessionTokenHash(sess.Token), sess.UserID, sess.Username, roles, sess.ExpiresAt, stepUp, sess.CredentialVersion, sess.MFAAuthenticated)
 	return err
 }
 
 func (s *PostgresWebSessionStore) Get(ctx context.Context, token string) (*auth.Session, error) {
 	row := s.db.SQL.QueryRowContext(ctx, `
-		SELECT token, user_id, username, roles, expires_at, step_up_until
+		SELECT token, user_id, username, roles, expires_at, step_up_until, credential_version, mfa_authenticated
 		FROM admin_web_sessions
-		WHERE token = $1`, token)
+		WHERE token = $1`, auth.SessionTokenHash(token))
 	var sess auth.Session
 	var stepUp sql.NullTime
 	var roles []string
 	// pgx/stdlib 下 text[] 需经 Map.SQLScanner 才能扫入 []string
 	tm := pgtype.NewMap()
-	if err := row.Scan(&sess.Token, &sess.UserID, &sess.Username, tm.SQLScanner(&roles), &sess.ExpiresAt, &stepUp); err != nil {
+	if err := row.Scan(&sess.Token, &sess.UserID, &sess.Username, tm.SQLScanner(&roles), &sess.ExpiresAt, &stepUp, &sess.CredentialVersion, &sess.MFAAuthenticated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -61,10 +61,11 @@ func (s *PostgresWebSessionStore) Get(ctx context.Context, token string) (*auth.
 		// 历史脏数据 roles 列为空时回退为最小权限 VIEWER，避免赋予意外的高权限 ADMIN
 		sess.Roles = []string{"VIEWER"}
 	}
+	sess.Token = token
 	return &sess, nil
 }
 
 func (s *PostgresWebSessionStore) Delete(ctx context.Context, token string) error {
-	_, err := s.db.SQL.ExecContext(ctx, `DELETE FROM admin_web_sessions WHERE token = $1`, token)
+	_, err := s.db.SQL.ExecContext(ctx, `DELETE FROM admin_web_sessions WHERE token = $1`, auth.SessionTokenHash(token))
 	return err
 }

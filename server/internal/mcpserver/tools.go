@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/ai-employee-platform/server/internal/workflowmcp"
 )
@@ -60,9 +61,12 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any)
 		"upsert_workflow": true, "delete_workflow": true,
 		"upsert_skill": true, "delete_skill": true,
 		"upsert_knowledge": true, "delete_knowledge": true,
-		"sync_skill": true, "sync_all_skills": true,
+		"sync_skill": true, "sync_all_skills": true, "reload_resources": true,
 	}
-	if needWrite[name] && (caller == nil || !caller.CanWrite) {
+	if strings.HasPrefix(name, "delete_") && (caller == nil || !caller.CanDelete) {
+		return nil, fmt.Errorf("需要全局删除权限")
+	}
+	if needWrite[name] && !strings.HasPrefix(name,"delete_") && (caller == nil || !caller.CanWrite) {
 		return nil, fmt.Errorf("需要写权限")
 	}
 

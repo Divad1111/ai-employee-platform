@@ -86,7 +86,6 @@ func (s *PostgresUserStore) loadRoles(ctx context.Context, u *auth.User) {
 	u.Roles = loaded
 }
 
-
 func (s *PostgresUserStore) FindByUsername(ctx context.Context, username string) (*auth.User, error) {
 	row := s.db.SQL.QueryRowContext(ctx, `
 		SELECT id, username, password_hash, display_name, failed_attempts, locked_until,
@@ -294,36 +293,20 @@ func (s *PostgresUserStore) ListPermissionGrants(ctx context.Context, roles []st
 		}
 	}
 	rows, err := s.db.SQL.QueryContext(ctx, `
-		SELECT p.code, COALESCE(NULLIF(rp.scope,''), 'ALL')
+		SELECT p.code, COALESCE(NULLIF(rp.scope,''), 'NONE')
 		FROM permissions p
 		JOIN role_permissions rp ON rp.permission_id = p.id
 		JOIN roles r ON r.id = rp.role_id
 		WHERE r.name = ANY($1)`, roles)
 	if err != nil {
-		// 无 scope 列时回退
-		codes, err2 := s.ListPermissions(ctx, roles)
-		if err2 != nil {
-			return nil, err2
-		}
-		out := make([]auth.PermissionGrant, 0, len(codes))
-		for _, c := range codes {
-			scope := "OWN"
-			for _, r := range roles {
-				if r == "ADMIN" {
-					scope = "ALL"
-					break
-				}
-			}
-			out = append(out, auth.PermissionGrant{Code: c, Scope: scope})
-		}
-		return out, nil
+		return nil, err
 	}
 	defer rows.Close()
 	best := map[string]auth.PermissionGrant{}
 	for rows.Next() {
 		var g auth.PermissionGrant
 		if err := rows.Scan(&g.Code, &g.Scope); err != nil {
-			continue
+			return nil, err
 		}
 		g.Scope = strings.ToUpper(g.Scope)
 		if prev, ok := best[g.Code]; ok {
@@ -334,20 +317,8 @@ func (s *PostgresUserStore) ListPermissionGrants(ctx context.Context, roles []st
 		}
 		best[g.Code] = g
 	}
-	if len(best) == 0 {
-		codes := fallbackPermissions(roles)
-		out := make([]auth.PermissionGrant, 0, len(codes))
-		scope := "OWN"
-		for _, r := range roles {
-			if r == "ADMIN" {
-				scope = "ALL"
-				break
-			}
-		}
-		for _, c := range codes {
-			out = append(out, auth.PermissionGrant{Code: c, Scope: scope})
-		}
-		return out, nil
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	out := make([]auth.PermissionGrant, 0, len(best))
 	for _, g := range best {
@@ -550,8 +521,9 @@ func (s *PostgresUserStore) Count(ctx context.Context) (int, error) {
 }
 
 func (s *PostgresUserStore) IsInitialized(ctx context.Context) (bool, error) {
-	n, err := s.Count(ctx)
-	return n > 0, err
+	var initialized bool
+	err := s.db.SQL.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users) OR EXISTS(SELECT 1 FROM system_config WHERE key='security.initialized')`).Scan(&initialized)
+	return initialized, err
 }
 
 func fallbackPermissions(roles []string) []string {
@@ -607,7 +579,6 @@ func fallbackPermissions(roles []string) []string {
 			"workflow.read",
 			"automation.read",
 		},
-
 	}
 	seen := map[string]struct{}{}
 	var out []string
@@ -621,4 +592,39 @@ func fallbackPermissions(roles []string) []string {
 		}
 	}
 	return out
+}
+
+// CreateInitialAdmin serializes bootstrap across server processes and commits user + roles together.
+func (s *PostgresUserStore) CreateInitialAdmin(ctx context.Context, u *auth.User) error {
+	tx, err := s.db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(719428631)`); err != nil {
+		return err
+	}
+	var exists bool
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users) OR EXISTS(SELECT 1 FROM system_config WHERE key='security.initialized')`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return auth.ErrAlreadyInitialized
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO users(id,username,password_hash,display_name,status) VALUES($1::uuid,$2,$3,$4,'active')`, u.ID, u.Username, u.PasswordHash, u.DisplayName)
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO user_roles(user_id,role_id) SELECT $1::uuid,id FROM roles WHERE name IN ('SUPER_ADMIN','ADMIN')`, u.ID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n != 2 {
+		return fmt.Errorf("管理员角色尚未迁移")
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO system_config(key,value_json) VALUES('security.initialized','true') ON CONFLICT(key) DO NOTHING`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

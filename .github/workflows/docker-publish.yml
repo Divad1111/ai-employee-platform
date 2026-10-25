@@ -86,6 +86,8 @@ jobs:
           file: deploy/Dockerfile.server
           platforms: linux/amd64,linux/arm64
           push: true
+          sbom: true
+          provenance: mode=max
           tags: ${{ steps.meta-server.outputs.tags }}
           labels: ${{ steps.meta-server.outputs.labels }}
           cache-from: type=gha
@@ -113,6 +115,8 @@ jobs:
           file: deploy/Dockerfile.admin
           platforms: linux/amd64,linux/arm64
           push: true
+          sbom: true
+          provenance: mode=max
           tags: ${{ steps.meta-admin.outputs.tags }}
           labels: ${{ steps.meta-admin.outputs.labels }}
           cache-from: type=gha

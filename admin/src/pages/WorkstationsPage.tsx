@@ -65,7 +65,7 @@ export function WorkstationsPage() {
 
   // 令牌生成表单
   const [label, setLabel] = useState('开发计算节点')
-  const [ttlHours, setTtlHours] = useState(24)
+  const [ttlMinutes, setTtlMinutes] = useState(15)
   const [isPublic, setIsPublic] = useState(false)
   const [grantRoles, setGrantRoles] = useState<string[]>([])
   const [roleChoices, setRoleChoices] = useState<Array<{ name: string; description: string }>>([])
@@ -203,7 +203,7 @@ export function WorkstationsPage() {
       }
       const res = await apiPost<TokenResult>('/enrollment/tokens', {
         label: label.trim() || '工作站计算节点',
-        ttl_hours: Number(ttlHours) || 24,
+        ttl_minutes: Number(ttlMinutes) || 15,
         public: isPublic,
         grant_roles: isPublic ? grantRoles : [],
       })
@@ -223,7 +223,7 @@ export function WorkstationsPage() {
 
   const effectivePort = serverPort.trim() || '8080'
   const effectiveHost = serverHost.trim() || '127.0.0.1'
-  const serverUrl = `http://${effectiveHost}:${effectivePort}`
+  const serverUrl = tokenResult?.server_url || `http://${effectiveHost}:${effectivePort}`
 
   const unixCommand = tokenResult
     ? `export AIE_DATA_DIR="$HOME/.aie"
@@ -336,13 +336,13 @@ aew service status`
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                <label style={{ fontSize: '0.85rem', fontWeight: 600 }}>令牌有效期 (小时)</label>
+                <label style={{ fontSize: '0.85rem', fontWeight: 600 }}>令牌有效期 (分钟)</label>
                 <input
                   type="number"
-                  value={ttlHours}
-                  onChange={(e) => setTtlHours(Number(e.target.value))}
+                  value={ttlMinutes}
+                  onChange={(e) => setTtlMinutes(Number(e.target.value))}
                   min={1}
-                  max={720}
+                  max={60}
                   style={{ width: '110px', padding: '0.45rem 0.65rem' }}
                   required
                 />

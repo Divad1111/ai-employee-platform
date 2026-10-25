@@ -4,11 +4,14 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,7 +68,7 @@ type Deps struct {
 	TokenUsage      *tokenusage.Service
 	Messages        *message.Service
 	Bus             *eventbus.Bus
-	Audit           *audit.Memory
+	Audit           audit.Store
 	Feishu          *feishu.Service
 	Scheduler       *scheduler.Service
 	Notify          *notification.Service
@@ -318,7 +321,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/providers/signing-key", d.handleSigningKey)
 	mux.HandleFunc("GET /api/scheduler/status", d.requirePerm("job.read", d.handleSchedulerStatus))
 	if d.Metrics != nil {
-		mux.HandleFunc("GET /metrics", d.Metrics.Handler())
+		mux.HandleFunc("GET /metrics", d.requirePerm("system.read", d.onlyAll("system.read", func(w http.ResponseWriter, r *http.Request, _ *auth.Session) { d.Metrics.Handler()(w, r) })))
 	}
 
 	// 备份与容灾恢复 (Center Server Backup System)
@@ -367,13 +370,15 @@ func (d Deps) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"initialized": init,
-		"needs_setup": !init,
-		"version":     "v1.0.0",
+		"initialized":          init,
+		"needs_setup":          !init,
+		"setup_token_required": os.Getenv("AIE_SETUP_TOKEN") != "" || d.Config == nil || d.Config.Env != "development",
+		"version":              "v1.0.0",
 	})
 }
 
 type setupInitReq struct {
+	SetupToken  string `json:"setup_token"`
 	Username    string `json:"username"`
 	Password    string `json:"password"`
 	DisplayName string `json:"display_name"`
@@ -405,6 +410,28 @@ func (d Deps) handleSetupInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	expected := os.Getenv("AIE_SETUP_TOKEN")
+	supplied := req.SetupToken
+	if supplied == "" {
+		supplied = r.Header.Get("X-Setup-Token")
+	}
+	local := false
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		ip := net.ParseIP(host)
+		local = ip != nil && ip.IsLoopback()
+	}
+	if expected == "" {
+		if d.Config == nil || d.Config.Env != "development" || !local {
+			writeErr(w, 403, "请配置部署初始化密钥 AIE_SETUP_TOKEN")
+			return
+		}
+	} else {
+		a, b := sha256.Sum256([]byte(expected)), sha256.Sum256([]byte(supplied))
+		if subtle.ConstantTimeCompare(a[:], b[:]) != 1 {
+			writeErr(w, 403, "部署初始化密钥不正确")
+			return
+		}
+	}
 	sess, err := d.Auth.InitAdmin(r.Context(), req.Username, req.Password, req.DisplayName, clientIP(r))
 	if err != nil {
 		if err == auth.ErrAlreadyInitialized {
@@ -479,6 +506,12 @@ func (d Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if req.TOTP != "" && d.Approvals != nil && d.Approvals.TOTPEnabled(r.Context(), sess.UserID) {
+		if err := d.Auth.ConfirmMFA(r.Context(), sess.Token); err != nil {
+			writeErr(w, 500, "会话更新失败")
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":      sess.Token,
 		"expires_at": sess.ExpiresAt,
@@ -505,6 +538,7 @@ func (d Deps) handleMe(w http.ResponseWriter, _ *http.Request, sess *auth.Sessio
 
 type createTokenReq struct {
 	Label      string   `json:"label"`
+	TTLMinutes int      `json:"ttl_minutes"`
 	TTLHours   int      `json:"ttl_hours"`
 	Public     bool     `json:"public"`
 	GrantRoles []string `json:"grant_roles"`
@@ -570,7 +604,15 @@ func (d Deps) handleCreateToken(w http.ResponseWriter, r *http.Request, sess *au
 	if !req.Public {
 		grantRoles = nil
 	}
-	plain, meta, err := d.Enrollment.CreateToken(r.Context(), req.Label, sess.UserID, clientIP(r), time.Duration(ttl)*time.Hour, req.Public, grantRoles)
+	lifetime := time.Duration(ttl) * time.Hour
+	if req.TTLMinutes > 0 {
+		lifetime = time.Duration(req.TTLMinutes) * time.Minute
+	}
+	if lifetime > time.Hour {
+		writeErr(w, 400, "注册令牌有效期不能超过 60 分钟")
+		return
+	}
+	plain, meta, err := d.Enrollment.CreateToken(r.Context(), req.Label, sess.UserID, clientIP(r), lifetime, req.Public, grantRoles)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1423,31 +1465,62 @@ func (d Deps) handleSettings(w http.ResponseWriter, _ *http.Request, _ *auth.Ses
 	})
 }
 
-func (d Deps) handleSSE(w http.ResponseWriter, r *http.Request, _ *auth.Session) {
+func (d Deps) handleSSE(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeErr(w, http.StatusInternalServerError, "不支持 SSE")
+		writeErr(w, 500, "不支持 SSE")
 		return
 	}
+	if !acquireEventStream(sess.UserID) {
+		writeErr(w, 429, "事件连接数量超过上限")
+		return
+	}
+	defer releaseEventStream(sess.UserID)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	ch := d.Bus.Subscribe(32)
 	defer d.Bus.Unsubscribe(ch)
-	// 先推送最近事件
-	for _, ev := range d.Bus.Recent(5) {
-		writeSSE(w, flusher, ev)
+	send := func(ev eventbus.Event) bool {
+		current, err := d.Auth.Authenticate(r.Context(), bearer(r))
+		if err != nil || current.MFARequired && !current.MFAAuthenticated {
+			return false
+		}
+		grants, err := d.Auth.PermissionGrants(r.Context(), current)
+		if err != nil {
+			return false
+		}
+		request := r.WithContext(authz.WithAuthz(r.Context(), "", authz.ScopeNONE, toAuthzGrants(grants)))
+		if d.visibleBusEvent(request, current, ev) {
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(15 * time.Second))
+			writeSSE(w, flusher, ev)
+		}
+		return true
 	}
-	ctx := r.Context()
+	for _, ev := range d.Bus.Recent(5) {
+		if !send(ev) {
+			return
+		}
+	}
+	timer := time.NewTicker(30 * time.Second)
+	defer timer.Stop()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-r.Context().Done():
 			return
-		case ev, ok := <-ch:
-			if !ok {
+		case <-timer.C:
+			if _, err := d.Auth.Authenticate(r.Context(), bearer(r)); err != nil {
 				return
 			}
-			writeSSE(w, flusher, ev)
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(15 * time.Second))
+			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case ev, ok := <-ch:
+			if !ok || !send(ev) {
+				return
+			}
 		}
 	}
 }
@@ -1490,6 +1563,10 @@ func (d Deps) requireAuth(next authed) http.HandlerFunc {
 func (d Deps) requirePerm(code string, next authed) http.HandlerFunc {
 	// 上层 AuthZ 管道：鉴权 → 权限码 → Scope 注入 → 业务 handler（§18/§46）
 	return d.requireAuth(func(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+		if sess.MFARequired && (!sess.MFAAuthenticated || d.Approvals == nil || !d.Approvals.TOTPEnabled(r.Context(), sess.UserID)) {
+			writeJSON(w, 403, map[string]any{"error": "管理员必须先完成双因子验证，请前往审批中心绑定 TOTP", "needs_mfa_enrollment": true})
+			return
+		}
 		grants, err := d.Auth.PermissionGrants(r.Context(), sess)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
@@ -1497,19 +1574,9 @@ func (d Deps) requirePerm(code string, next authed) http.HandlerFunc {
 		}
 		az := toAuthzGrants(grants)
 		scope := authz.Resolve(az, code)
-		if scope == authz.ScopeNONE && !authz.Allowed(az, code) {
-			writeErr(w, http.StatusForbidden, "权限不足")
+		if scope == authz.ScopeNONE {
+			writeErr(w, 403, "权限不足")
 			return
-		}
-		// 有权限码但 scope 未配置时：ADMIN 类默认 ALL，其余 OWN
-		if scope == authz.ScopeNONE && authz.Allowed(az, code) {
-			scope = authz.ScopeOWN
-			for _, g := range az {
-				if g.Name == "*" {
-					scope = authz.ScopeALL
-					break
-				}
-			}
 		}
 		ctx := authz.WithAuthz(r.Context(), code, scope, az)
 		next(w, r.WithContext(ctx), sess)
@@ -1553,17 +1620,8 @@ func securityHeaders(next http.Handler) http.Handler {
 }
 
 func clientIP(r *http.Request) string {
-	if ip := strings.TrimSpace(r.Header.Get("X-Real-IP")); ip != "" {
+	if ip, ok := r.Context().Value(addressKey{}).(string); ok && ip != "" {
 		return ip
-	}
-	if x := r.Header.Get("X-Forwarded-For"); x != "" {
-		parts := strings.Split(x, ",")
-		if len(parts) > 0 {
-			ip := strings.TrimSpace(parts[0])
-			if ip != "" {
-				return ip
-			}
-		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil && host != "" {

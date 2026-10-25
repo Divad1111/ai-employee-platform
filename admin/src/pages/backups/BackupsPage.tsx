@@ -100,6 +100,7 @@ export function BackupsPage() {
     s3SecretKey: string
     s3UseSSL: boolean
     s3PathStyle: boolean
+    sftpHostKey: string
     sftpHost: string
     sftpPort: number
     sftpUser: string
@@ -124,6 +125,7 @@ export function BackupsPage() {
     s3SecretKey: '',
     s3UseSSL: true,
     s3PathStyle: false,
+    sftpHostKey: '',
     sftpHost: '',
     sftpPort: 22,
     sftpUser: '',
@@ -400,6 +402,7 @@ export function BackupsPage() {
     } else if (destForm.type === 'SFTP') {
       cfg = {
         host: destForm.sftpHost,
+        host_key: destForm.sftpHostKey,
         port: destForm.sftpPort,
         username: destForm.sftpUser,
         password: destForm.sftpPass,
@@ -535,6 +538,7 @@ export function BackupsPage() {
       s3SecretKey: '',
       s3UseSSL: cfg.use_ssl ?? true,
       s3PathStyle: cfg.path_style ?? false,
+      sftpHostKey: cfg.host_key || '',
       sftpHost: cfg.host || '',
       sftpPort: cfg.port || 22,
       sftpUser: cfg.username || '',
@@ -1031,7 +1035,8 @@ export function BackupsPage() {
                     s3SecretKey: '',
                     s3UseSSL: true,
                     s3PathStyle: false,
-                    sftpHost: '',
+                    sftpHostKey: '',
+    sftpHost: '',
                     sftpPort: 22,
                     sftpUser: '',
                     sftpPass: '',
@@ -1625,6 +1630,8 @@ export function BackupsPage() {
                     </div>
 
                     <div>
+                      <label className="form-label">SSH 主机指纹（从可信渠道核对）*</label>
+                      <input className="input" required value={destForm.sftpHostKey} onChange={e => setDestForm({ ...destForm, sftpHostKey: e.target.value })} placeholder="SHA256:..." />
                       <label className="form-label">SSH 私钥 (PEM 格式，可选)</label>
                       <textarea
                         className="input"

@@ -54,6 +54,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/scheduler"
 	"github.com/ai-employee-platform/server/internal/secret"
 	"github.com/ai-employee-platform/server/internal/session"
+	"github.com/ai-employee-platform/server/internal/statepg"
 	"github.com/ai-employee-platform/server/internal/taskconversation"
 	"github.com/ai-employee-platform/server/internal/tokenusage"
 	"github.com/ai-employee-platform/server/internal/workergrpc"
@@ -69,7 +70,7 @@ func main() {
 		fatal("加载配置失败: %v", err)
 	}
 
-	auditor := audit.NewMemory()
+	var auditor audit.Store = audit.NewMemory()
 	bus := eventbus.New(500)
 
 	var (
@@ -114,6 +115,7 @@ func main() {
 			fmt.Println("✅ 数据库: 已连接 PostgreSQL，启用全量持久化 (Users, Employees, Workspaces, Jobs, Sessions, Workstations, TOTP, Certificates, WorkflowMCP, Automation, Artifacts)")
 			defer db.Close()
 			pgSQL = db.SQL
+			auditor = audit.NewPostgres(pgSQL)
 			users = db.NewUserStore()
 			webSessions = db.NewWebSessionStore()
 			empStore = db.NewEmployeeStore()
@@ -145,6 +147,7 @@ func main() {
 		}
 	}
 	authSvc := auth.NewService(users, webSessions, auditor)
+	authSvc.EnforceAdminMFA = cfg.RequireAdminMFA
 
 	caDir := getenv("AIE_CA_DIR", "/var/lib/aie/ca")
 	ca, err := certca.LoadOrNewAuthority(caDir)
@@ -152,9 +155,15 @@ func main() {
 		fatal("初始化 CA 失败: %v", err)
 	}
 	if certStore != nil {
-		ca.SetStore(certStore)
+		if err := ca.SetStore(certStore); err != nil {
+			fatal("证书状态加载失败: %v", err)
+		}
 	}
-	enrollSvc := enrollment.NewService(enrollment.NewMemoryStore(), ca, auditor)
+	var enrollmentStore enrollment.Store = enrollment.NewMemoryStore()
+	if pgSQL != nil {
+		enrollmentStore = enrollment.NewPostgresStore(pgSQL)
+	}
+	enrollSvc := enrollment.NewService(enrollmentStore, ca, auditor)
 
 	var vault secret.Store
 	mv, err := secret.NewMemoryVault()
@@ -203,6 +212,11 @@ func main() {
 	msgSvc := message.NewService(message.NewMemoryStore(), auditor)
 
 	feishuSvc := feishu.NewService(vault)
+	if pgSQL != nil {
+		feishuSvc.ClaimEvent = func(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+			return statepg.Claim(ctx, pgSQL, "feishu:"+feishuSvc.GetConfigPublic().AppID+":"+key, ttl)
+		}
+	}
 	notifySvc := notification.New(feishuSvc, bus, jobSvc)
 
 	// 启动飞书官方 WebSocket 长连接网关（若已配置并启用）
@@ -246,6 +260,7 @@ func main() {
 	}
 	gs, lis, workerSvc, err := workergrpc.ListenAndServeWith(cfg.GRPCAddr, ca, srvCert, workergrpc.Options{
 		CA: ca, Presence: presence,
+		ValidateEvent: resourceEventValidator(jobSvc, sessSvc, empSvc),
 		OnModels: func(wsID string, models map[string][]reliability.ModelOption) {
 			cached := make(map[string][]workstation.ModelOption, len(models))
 			for provider, list := range models {
@@ -300,7 +315,43 @@ func main() {
 	}
 
 	inquirySvc := inquiry.NewService(workerSvc, jobSvc, empSvc, feishuSvc, notifySvc)
+	inquirySvc.ApproverForJob = func(ctx context.Context, jobID string) string {
+		j, err := jobSvc.Get(ctx, jobID)
+		if err != nil || j == nil {
+			return ""
+		}
+		user, err := users.FindByID(ctx, j.CreatedBy)
+		if err != nil || user == nil || user.Status != auth.StatusActive {
+			return ""
+		}
+		verified := feishuSvc.BindingByEmployee(j.EmployeeID)
+		if verified == nil || !verified.Verified || verified.OwnerUserID != j.CreatedBy {
+			return ""
+		}
+		c, err := taskConversationStore.FindByJob(ctx, jobID)
+		if err == nil && c != nil {
+			if c.OwnerUserID == j.CreatedBy && c.EmployeeID == j.EmployeeID && feishuSvc.EmployeeHasOpenID(j.EmployeeID, c.OwnerOpenID) {
+				return c.OwnerOpenID
+			}
+			return ""
+		}
+		e, err := empSvc.Get(ctx, j.EmployeeID)
+		if err != nil || e == nil || e.OwnerUserID != j.CreatedBy {
+			return ""
+		}
+		binding := feishuSvc.BindingByEmployee(e.ID)
+		if binding == nil {
+			return ""
+		}
+		return binding.FeishuOpenID
+	}
+
 	if feishuSvc != nil {
+		if pgSQL != nil {
+			if err := inquirySvc.SetPersistentStore(context.Background(), statepg.New(pgSQL, "inquiry.requests")); err != nil {
+				fatal("审批请求恢复失败: %v", err)
+			}
+		}
 		feishuSvc.SetInquiryHandler(inquirySvc)
 	}
 
@@ -431,11 +482,25 @@ func main() {
 			}
 		}
 	}
-	permStore := permission.NewMemoryStore()
-	_ = permission.EnsureDefault(permStore)
+	var permStore permission.Store = permission.NewMemoryStore()
+	var secretBindings secret.BindingStore = secret.NewMemoryBindings()
+	var approvalStore approval.Store = approval.NewMemoryStore()
+	if pgSQL != nil {
+		permStore = permission.NewPostgresStore(pgSQL)
+		secretBindings = secret.NewPostgresBindings(pgSQL)
+		approvalStore = approval.NewPostgresStore(pgSQL)
+	}
+	if err := permission.EnsureDefault(permStore); err != nil {
+		fatal("权限策略加载失败: %v", err)
+	}
 	permEng := permission.NewEngine(permStore, auditor)
-	secretMgr := secret.NewManager(vault, secret.NewMemoryBindings(), auditor)
-	approvalSvc := approval.New(approval.NewMemoryStore(), totpStore, vault, jobSvc, permEng, auditor, bus)
+	secretMgr := secret.NewManager(vault, secretBindings, auditor)
+	if pgSQL != nil {
+		if err := secretMgr.SetMetadataStore(context.Background(), statepg.New(pgSQL, "secret.metadata")); err != nil {
+			fatal("Secret 元数据恢复失败: %v", err)
+		}
+	}
+	approvalSvc := approval.New(approvalStore, totpStore, vault, jobSvc, permEng, auditor, bus)
 	artRoot := getenv("AIE_ARTIFACT_DIR", "")
 	if artRoot == "" {
 		secretDir := getenv("AIE_SECRET_DIR", "/data/secrets")
@@ -496,7 +561,15 @@ func main() {
 	wfSvc := workflowmcp.NewService(wfStore)
 	mcpAuthSvc := mcpauth.NewService(mcpTokStore)
 	mcpSvc := mcp.NewService(mcpStore, secretMgr)
+
 	bridge := &feishu.Bridge{
+		AuthorizeUser: func(ctx context.Context, id string) error {
+			u, err := users.FindByID(ctx, id)
+			if err != nil || u == nil || u.Status != auth.StatusActive {
+				return auth.ErrUnauthorized
+			}
+			return nil
+		},
 		Employees: empSvc, Jobs: jobSvc, Messages: msgSvc,
 		Scheduler: sched, Notify: notifySvc, Feishu: feishuSvc,
 		Workspaces:    wsSvc,
@@ -513,10 +586,18 @@ func main() {
 	}
 	bridge.Wire()
 
-	mcpURL := getenv("AIE_MCP_PUBLIC_URL", "http://127.0.0.1"+cfg.HTTPAddr+"/mcp")
-	if cfg.HTTPAddr != "" && cfg.HTTPAddr[0] == ':' {
-		mcpURL = getenv("AIE_MCP_PUBLIC_URL", "http://127.0.0.1"+cfg.HTTPAddr+"/mcp")
+	defaultMCPURL := "http://127.0.0.1:" + cfg.PublicHTTPPort + "/mcp"
+	if cfg.PublicServerURL != "" {
+		defaultMCPURL = strings.TrimRight(cfg.PublicServerURL, "/") + "/mcp"
 	}
+	mcpURL := getenv("AIE_MCP_PUBLIC_URL", defaultMCPURL)
+	if strings.EqualFold(cfg.Env, "production") {
+		endpoint, err := url.Parse(mcpURL)
+		if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" || endpoint.User != nil {
+			fatal("生产 MCP 公网地址必须使用可信 HTTPS")
+		}
+	}
+
 	sched.SetWorkflowMCP(wfSvc, mcpURL)
 	sched.SetMCPAuth(mcpAuthSvc)
 	sched.SetMCP(mcpSvc)
@@ -620,7 +701,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/", httpHandler)
 	mux.Handle("/mcp", mcpSrv.Handler())
-	httpSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: mux}
+	httpSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: api.SecureHTTP(mux, cfg),
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	go func() {
 		fmt.Printf("HTTP 监听 %s\n", cfg.HTTPAddr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

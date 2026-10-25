@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ai-employee-platform/server/internal/auth"
 	"github.com/ai-employee-platform/server/internal/feishu"
@@ -138,7 +141,15 @@ func (d Deps) handleFeishuBinding(w http.ResponseWriter, r *http.Request, sess *
 		writeErr(w, code, msg)
 		return
 	}
-	d.Feishu.UpsertBinding(b)
+	if err := d.Feishu.UpsertBinding(b); err != nil {
+		if errors.Is(err, feishu.ErrAliasConflict) {
+			writeErr(w, 409, err.Error())
+			return
+		}
+		writeErr(w, 500, "绑定保存失败")
+		return
+	}
+	b.Verified = true
 	d.auditUser(r, sess, "feishu.binding.upsert", map[string]string{
 		"employee_id": b.EmployeeID, "alias": b.FeishuAlias,
 		"summary": fmt.Sprintf("员工 %s 绑定别名 @%s", b.EmployeeID, b.FeishuAlias),
@@ -210,59 +221,38 @@ func (d Deps) handleFeishuEvents(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "feishu 未启用")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "读取失败")
 		return
 	}
-	challenge, token, ev, err := feishu.ParseWebhookBody(body)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	ts := r.Header.Get("X-Lark-Request-Timestamp")
-	nonce := r.Header.Get("X-Lark-Request-Nonce")
-	sig := r.Header.Get("X-Lark-Signature")
+	ts, nonce, sig := r.Header.Get("X-Lark-Request-Timestamp"), r.Header.Get("X-Lark-Request-Nonce"), r.Header.Get("X-Lark-Signature")
 	if sig == "" {
 		sig = r.Header.Get("X-Lark-Signature-256")
 	}
-
-	// 严格安全校验：优先使用签名校验；若无签名头，必须具备合法 VerificationToken，严禁任何未签名或无 Token 请求
-	if sig != "" || (ts != "" && nonce != "") {
-		if err := d.Feishu.VerifySignature(ts, nonce, sig, string(body)); err != nil {
-			writeErr(w, http.StatusUnauthorized, "飞书 Webhook 签名校验失败")
-			return
-		}
-	} else {
-		if !d.Feishu.VerifyToken(token) {
-			writeErr(w, http.StatusUnauthorized, "飞书 Webhook 凭证校验失败：缺少合法签名或 verification_token")
-			return
-		}
+	if err := d.Feishu.VerifySignature(ts, nonce, sig, string(body)); err != nil {
+		writeErr(w, 401, "飞书签名无效或事件已过期，请配置 Encrypt Key")
+		return
 	}
-
-	if challenge != "" {
-		ch, err := d.Feishu.HandleURLChallenge(token, challenge)
+	if d.Feishu.ClaimEvent != nil {
+		ok, err := d.Feishu.ClaimEvent(r.Context(), "http:"+sig, 10*time.Minute)
 		if err != nil {
-			writeErr(w, http.StatusUnauthorized, err.Error())
+			writeErr(w, 503, "事件去重存储不可用")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"challenge": ch})
+		if !ok {
+			writeJSON(w, 200, map[string]any{"duplicate": true})
+			return
+		}
+	}
+	handler := d.Feishu.WebhookHandler()
+	if handler == nil {
+		writeErr(w, 503, "飞书事件接收未启用")
 		return
 	}
-	if ev == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
-		return
-	}
-	// HTTP 内不候 Agent：只建 Job 后 200
-	jobID, dup, err := d.Feishu.HandleMessage(r.Context(), *ev)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "accepted", "job_id": jobID, "duplicate": dup,
-	})
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	handler(w, r)
 }
 
 func (d Deps) handleSchedulerTick(w http.ResponseWriter, r *http.Request, _ *auth.Session) {

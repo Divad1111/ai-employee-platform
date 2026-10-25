@@ -47,19 +47,19 @@ const (
 
 // Destination 表示备份存储目标
 type Destination struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	Type            string    `json:"type"` // LOCAL | S3 | SFTP | SMB
-	ConfigEncrypted string    `json:"-"`    // 加密凭据
-	Config          any       `json:"config,omitempty"`
-	Enabled         bool      `json:"enabled"`
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	Type            string     `json:"type"` // LOCAL | S3 | SFTP | SMB
+	ConfigEncrypted string     `json:"-"`    // 加密凭据
+	Config          any        `json:"config,omitempty"`
+	Enabled         bool       `json:"enabled"`
 	LastTestAt      *time.Time `json:"last_test_at,omitempty"`
-	LastTestStatus  string    `json:"last_test_status,omitempty"` // SUCCESS | FAILED
-	LastTestMessage string    `json:"last_test_message,omitempty"`
-	CreatedBy       string    `json:"created_by,omitempty"`
-	UpdatedBy       string    `json:"updated_by,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	LastTestStatus  string     `json:"last_test_status,omitempty"` // SUCCESS | FAILED
+	LastTestMessage string     `json:"last_test_message,omitempty"`
+	CreatedBy       string     `json:"created_by,omitempty"`
+	UpdatedBy       string     `json:"updated_by,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 // LocalConfig 本地目录存储配置
@@ -81,6 +81,7 @@ type S3Config struct {
 
 // SFTPConfig SFTP 存储配置
 type SFTPConfig struct {
+	HostKey    string `json:"host_key"`
 	Host       string `json:"host"`
 	Port       int    `json:"port"`
 	Username   string `json:"username"`
@@ -181,15 +182,15 @@ type RestoreJob struct {
 
 // Manifest 备份包元数据描述
 type Manifest struct {
-	FormatVersion int              `json:"format_version"`
-	BackupID      string           `json:"backup_id"`
-	CreatedAt     string           `json:"created_at"`
-	BackupType    string           `json:"backup_type"`
-	ServerVersion string           `json:"server_version"`
-	DatabaseType  string           `json:"database_type"`
-	Encryption    EncryptionInfo   `json:"encryption"`
-	Compression   CompressionInfo  `json:"compression"`
-	Files         []ManifestFile   `json:"files"`
+	FormatVersion int             `json:"format_version"`
+	BackupID      string          `json:"backup_id"`
+	CreatedAt     string          `json:"created_at"`
+	BackupType    string          `json:"backup_type"`
+	ServerVersion string          `json:"server_version"`
+	DatabaseType  string          `json:"database_type"`
+	Encryption    EncryptionInfo  `json:"encryption"`
+	Compression   CompressionInfo `json:"compression"`
+	Files         []ManifestFile  `json:"files"`
 }
 
 type EncryptionInfo struct {

@@ -254,6 +254,10 @@ func (d Deps) handleConfirmTOTP(w http.ResponseWriter, r *http.Request, sess *au
 		writeErr(w, http.StatusForbidden, "动态口令校验失败，请核对手机时间或重新输入")
 		return
 	}
+	if err := d.Auth.ConfirmMFA(r.Context(), sess.Token); err != nil {
+		writeErr(w, 500, "会话更新失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": true,
 		"message": "TOTP 双因子认证已成功激活生效",
@@ -261,6 +265,10 @@ func (d Deps) handleConfirmTOTP(w http.ResponseWriter, r *http.Request, sess *au
 }
 
 func (d Deps) handleDisableTOTP(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	if d.Config != nil && d.Config.RequireAdminMFA && auth.AdminRoles(sess.Roles) {
+		writeErr(w, 403, "生产管理员必须保留双因子认证；可使用重新绑定功能更换设备")
+		return
+	}
 	if d.Approvals == nil {
 		writeErr(w, http.StatusServiceUnavailable, "approvals 未启用")
 		return

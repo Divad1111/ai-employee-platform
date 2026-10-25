@@ -506,6 +506,16 @@ func runRegister(args []string) error {
 	if *token == "" {
 		return fmt.Errorf("需要 --token")
 	}
+	u, err := url.Parse(*server)
+	if err != nil || u.Hostname() == "" || u.User != nil {
+		return fmt.Errorf("无效的服务端地址")
+	}
+	if u.Scheme != "https" {
+		ip := net.ParseIP(u.Hostname())
+		if u.Scheme != "http" || ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("远程注册必须使用 HTTPS；HTTP 仅允许本机回环地址")
+		}
+	}
 	paths := platform.Detect()
 	b, _, err := identity.Generate()
 	if err != nil {
@@ -515,12 +525,16 @@ func runRegister(args []string) error {
 		"token": *token, "workstation_id": b.WorkstationID, "csr_pem": string(b.CSRPEM),
 	})
 	enrollURL := strings.TrimRight(*server, "/") + "/api/enrollment/enroll"
-	resp, err := http.Post(enrollURL, "application/json", bytes.NewReader(body))
+	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("注册不允许重定向") }}
+	resp, err := client.Post(enrollURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, (256<<10)+1))
+	if readErr != nil || len(raw) > 256<<10 {
+		return fmt.Errorf("注册响应无效或过大")
+	}
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("enroll 失败: %s %s", resp.Status, string(raw))
 	}
@@ -548,21 +562,24 @@ func runRegister(args []string) error {
 	}
 	// 尝试向服务端探测声明的对外 gRPC 端口与服务器地址
 	epURL := serverURL + "/api/enrollment/endpoint"
-	if epResp, err := http.Get(epURL); err == nil && epResp.StatusCode == http.StatusOK {
-		var ep struct {
-			GRPCPort   string `json:"grpc_port"`
-			ServerHost string `json:"server_host"`
-		}
-		if rawEP, err := io.ReadAll(epResp.Body); err == nil {
-			_ = json.Unmarshal(rawEP, &ep)
-			if ep.GRPCPort != "" {
-				grpcPort = ep.GRPCPort
+	if epResp, err := client.Get(epURL); err == nil {
+		defer epResp.Body.Close()
+		if epResp.StatusCode == http.StatusOK {
+			var ep struct {
+				GRPCPort   string `json:"grpc_port"`
+				ServerHost string `json:"server_host"`
 			}
-			if ep.ServerHost != "" && ep.ServerHost != "127.0.0.1" && ep.ServerHost != "localhost" {
-				grpcHost = ep.ServerHost
+			if rawEP, err := io.ReadAll(io.LimitReader(epResp.Body, 64<<10)); err == nil {
+				_ = json.Unmarshal(rawEP, &ep)
+				if ep.GRPCPort != "" {
+					grpcPort = ep.GRPCPort
+				}
+				if ep.ServerHost != "" && ep.ServerHost != "127.0.0.1" && ep.ServerHost != "localhost" {
+					grpcHost = ep.ServerHost
+				}
 			}
+			_ = epResp.Body.Close()
 		}
-		_ = epResp.Body.Close()
 	}
 
 	cfgPath := filepath.Join(paths.ConfigDir(), "config.yaml")

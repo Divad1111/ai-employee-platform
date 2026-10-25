@@ -15,6 +15,7 @@ import (
 
 // BackupExecutor 备份执行编排器
 type BackupExecutor struct {
+	operation  sync.Mutex
 	store      Store
 	dbProvider database.DatabaseBackupProvider
 	crypto     *CryptoManager
@@ -55,12 +56,16 @@ type RunOptions struct {
 	PolicyID          string
 	TriggerType       string // MANUAL | SCHEDULED
 	CreatedBy         string
-	EncryptionEnabled *bool  // 可选手动覆盖策略中的加密开关
+	EncryptionEnabled *bool // 可选手动覆盖策略中的加密开关
 	DestinationIDs    []string
 }
 
 // Execute 触发一次全量备份
 func (e *BackupExecutor) Execute(ctx context.Context, opts RunOptions, getDest func(destID string) (destination.BackupDestination, error)) (*BackupRun, error) {
+	if !e.operation.TryLock() {
+		return nil, fmt.Errorf("已有备份任务执行中")
+	}
+	defer e.operation.Unlock()
 	e.mu.Lock()
 	lockKey := opts.PolicyID
 	if lockKey != "" && e.runningJobs[lockKey] {
@@ -142,7 +147,7 @@ func (e *BackupExecutor) Execute(ctx context.Context, opts RunOptions, getDest f
 		CompressionAlgo:   CompressZstd,
 		CompressionLevel:  3,
 		EncryptionEnabled: encEnabled, // 用户设置的加密开关生效
-		EncryptionKeyVer:  1,
+		EncryptionKeyVer:  2,
 		Crypto:            e.crypto,
 	})
 

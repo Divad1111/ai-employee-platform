@@ -312,7 +312,7 @@ export function FeishuPage() {
     <section>
       <header className="page-header">
         <div>
-          <h1>飞书企业协同集成 (Feishu Integration)</h1>
+          <h1>飞书企业协同集成 (Feishu Integration)</h1><p>安全升级后，请在员工绑定中重新保存并确认飞书账号和允许使用的群聊；首次 @ 不再自动建立绑定。</p>
           <p>对接飞书开放平台机器人与群聊事件 · 支持以自然语言 @机器人 触发任务派发</p>
         </div>
       </header>

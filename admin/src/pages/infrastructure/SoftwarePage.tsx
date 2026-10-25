@@ -587,6 +587,7 @@ export function SoftwarePage() {
                 }
               />
             </Field>
+            <Field wide label="远程发布签名（Base64 Ed25519）"><input value={release.signature || ''} onChange={e => setRelease({ ...release, signature: e.target.value })} /></Field>
             <Field wide label="发布说明">
               <textarea
                 value={release.notes}

@@ -25,23 +25,25 @@ import (
 
 // Options 组装可靠通信依赖。
 type Options struct {
-	CA       *certca.Authority
-	Commands *reliability.CommandStore
-	Events   *reliability.EventStore
-	Presence *reliability.Presence
-	OnEvent  func(wsID string, ev *aiev1.Event)
-	OnModels func(wsID string, models map[string][]reliability.ModelOption)
+	CA            *certca.Authority
+	Commands      *reliability.CommandStore
+	Events        *reliability.EventStore
+	Presence      *reliability.Presence
+	ValidateEvent func(wsID string, ev *aiev1.Event) error
+	OnEvent       func(wsID string, ev *aiev1.Event)
+	OnModels      func(wsID string, models map[string][]reliability.ModelOption)
 }
 
 // Server 实现 aiev1.WorkerServiceServer。
 type Server struct {
 	aiev1.UnimplementedWorkerServiceServer
-	CA       *certca.Authority
-	Commands *reliability.CommandStore
-	Events   *reliability.EventStore
-	Presence *reliability.Presence
-	OnEvent  func(wsID string, ev *aiev1.Event)
-	OnModels func(wsID string, models map[string][]reliability.ModelOption)
+	CA            *certca.Authority
+	Commands      *reliability.CommandStore
+	Events        *reliability.EventStore
+	Presence      *reliability.Presence
+	ValidateEvent func(wsID string, ev *aiev1.Event) error
+	OnEvent       func(wsID string, ev *aiev1.Event)
+	OnModels      func(wsID string, models map[string][]reliability.ModelOption)
 
 	mu      sync.Mutex
 	streams map[string]*connSession // workstation_id → 当前连接
@@ -65,13 +67,14 @@ func NewServer(opt Options) *Server {
 		opt.Presence = reliability.NewPresence(5, 15)
 	}
 	return &Server{
-		CA:       opt.CA,
-		Commands: opt.Commands,
-		Events:   opt.Events,
-		Presence: opt.Presence,
-		OnEvent:  opt.OnEvent,
-		OnModels: opt.OnModels,
-		streams:  make(map[string]*connSession),
+		CA:            opt.CA,
+		Commands:      opt.Commands,
+		Events:        opt.Events,
+		Presence:      opt.Presence,
+		OnEvent:       opt.OnEvent,
+		ValidateEvent: opt.ValidateEvent,
+		OnModels:      opt.OnModels,
+		streams:       make(map[string]*connSession),
 	}
 }
 
@@ -167,6 +170,13 @@ func (s *Server) Connect(stream aiev1.WorkerService_ConnectServer) error {
 }
 
 func (s *Server) handleUpstream(wsID string, stream aiev1.WorkerService_ConnectServer, msg *aiev1.WorkerToServer) error {
+	if s.CA != nil {
+		record := s.CA.FindByWorkstation(wsID)
+		if record == nil || record.Status != "ACTIVE" || !record.ExpiresAt.After(time.Now()) {
+			return status.Error(codes.Unauthenticated, "工作站证书已失效")
+		}
+	}
+
 	switch body := msg.GetBody().(type) {
 	case *aiev1.WorkerToServer_Heartbeat:
 		hb := body.Heartbeat
@@ -213,6 +223,15 @@ func (s *Server) handleUpstream(wsID string, stream aiev1.WorkerService_ConnectS
 		})
 	case *aiev1.WorkerToServer_Event:
 		ev := body.Event
+		if ev == nil || (ev.WorkstationId != "" && ev.WorkstationId != wsID) {
+			return status.Error(codes.PermissionDenied, "事件工作站与证书不符")
+		}
+		if s.ValidateEvent == nil {
+			return status.Error(codes.FailedPrecondition, "事件授权未就绪")
+		}
+		if err := s.ValidateEvent(wsID, ev); err != nil {
+			return status.Error(codes.PermissionDenied, "事件不属于该工作站")
+		}
 		if ev.GetWorkstationId() == "" {
 			ev.WorkstationId = wsID
 		}

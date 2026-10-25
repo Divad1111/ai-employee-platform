@@ -7,6 +7,7 @@ package feishu
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,9 +34,10 @@ import (
 
 // 错误定义
 var (
-	ErrBadSignature = errors.New("飞书验签失败")
-	ErrNoEmployee   = errors.New("无法解析目标 Employee")
-	ErrDisabled     = errors.New("Employee 未启用或未绑定 Workstation")
+	ErrAliasConflict = errors.New("该别名已被其他员工使用，或与员工 ID 冲突")
+	ErrBadSignature  = errors.New("飞书验签失败")
+	ErrNoEmployee    = errors.New("无法解析目标 Employee")
+	ErrDisabled      = errors.New("Employee 未启用或未绑定 Workstation")
 )
 
 // Config 飞书应用配置（Secret 仅存引用）
@@ -48,6 +51,8 @@ type Config struct {
 
 // Binding Employee 飞书绑定
 type Binding struct {
+	OwnerUserID  string `json:"owner_user_id"`
+	Verified     bool   `json:"verified"`
 	EmployeeID   string `json:"employee_id"`
 	FeishuOpenID string `json:"feishu_open_id"`
 	FeishuAlias  string `json:"feishu_bot_alias"`
@@ -141,18 +146,20 @@ type EmployeeChecker interface {
 
 // Service 飞书统一集成服务
 type Service struct {
-	mu           sync.RWMutex
-	cfg          Config
-	vault        secret.Store
-	bindings     map[string]Binding  // alias(lower) → binding
-	byOpenID     map[string][]string // open_id → 可绑定多个数字员工
-	seenEvent    map[string]time.Time
-	Sender       Sender
-	Jobs         JobCreator
-	Employees    EmployeeChecker
-	Commands     CommandDirectory
-	InputFiles   *jobinput.Store
-	pendingFiles map[string]pendingAttachments
+	mu             sync.RWMutex
+	cfg            Config
+	vault          secret.Store
+	bindings       map[string]Binding  // alias(lower) → binding
+	byOpenID       map[string][]string // open_id → 可绑定多个数字员工
+	AuthorizeActor func(context.Context, string, string) error
+	ClaimEvent     func(context.Context, string, time.Duration) (bool, error)
+	seenEvent      map[string]time.Time
+	Sender         Sender
+	Jobs           JobCreator
+	Employees      EmployeeChecker
+	Commands       CommandDirectory
+	InputFiles     *jobinput.Store
+	pendingFiles   map[string]pendingAttachments
 
 	// 官方 SDK 核心驱动组件
 	larkClient     *lark.Client
@@ -253,8 +260,12 @@ func (s *Service) loadPersistedLocked() {
 				var list []Binding
 				if json.Unmarshal([]byte(str), &list) == nil {
 					for _, b := range list {
-						if b.FeishuAlias != "" {
-							s.bindings[strings.ToLower(b.FeishuAlias)] = b
+						key := b.FeishuAlias
+						if key == "" {
+							key = b.EmployeeID
+						}
+						if key != "" {
+							s.bindings[strings.ToLower(key)] = b
 						}
 						if b.FeishuOpenID != "" {
 							s.indexOpenIDLocked(b.FeishuOpenID, b.EmployeeID)
@@ -819,7 +830,7 @@ func (s *Service) BindingByEmployee(employeeID string) *Binding {
 // 优先使用绑定的飞书 open_id，未设置则使用默认群聊 chat_id。
 func (s *Service) ResolveTargetChat(employeeID string) string {
 	b := s.BindingByEmployee(employeeID)
-	if b == nil {
+	if b == nil || !b.Verified || s.AuthorizeActor == nil || s.AuthorizeActor(context.Background(), employeeID, b.FeishuOpenID) != nil {
 		return ""
 	}
 	if strings.TrimSpace(b.FeishuOpenID) != "" {
@@ -881,35 +892,61 @@ func (s *Service) ResolveUserName(ctx context.Context, openID string) string {
 }
 
 // saveBindingsLocked 持久化绑定到 Vault
-func (s *Service) saveBindingsLocked() {
+func (s *Service) saveBindingsLocked() error {
 	if s.vault == nil {
-		return
+		return errors.New("飞书绑定持久化不可用")
 	}
-	seen := map[string]struct{}{}
-	list := make([]Binding, 0, len(s.bindings))
-	for _, b := range s.bindings {
-		key := b.EmployeeID + "|" + b.FeishuAlias
-		if _, ok := seen[key]; !ok {
-			seen[key] = struct{}{}
-			list = append(list, b)
+	seen := map[string]bool{}
+	list := []Binding{}
+	for _, binding := range s.bindings {
+		key := binding.EmployeeID + "|" + binding.FeishuAlias
+		if !seen[key] {
+			seen[key] = true
+			list = append(list, binding)
 		}
 	}
-	if b, err := json.Marshal(list); err == nil {
-		if rot, ok := s.vault.(secret.Rotator); ok {
-			for _, ref := range s.vault.List() {
-				if ref.Name == "feishu.bindings_data" {
-					_ = rot.Delete(ref.ID)
-				}
+	data, err := json.Marshal(list)
+	if err != nil {
+		return err
+	}
+	for _, ref := range s.vault.List() {
+		if ref.Name == "feishu.bindings_data" {
+			rotator, ok := s.vault.(secret.Rotator)
+			if !ok {
+				return errors.New("Vault 不支持原子替换")
 			}
+			return rotator.Replace(ref.ID, string(data))
 		}
-		_, _ = s.vault.Put("feishu.bindings_data", string(b))
 	}
+	_, err = s.vault.Put("feishu.bindings_data", string(data))
+	return err
 }
 
 // UpsertBinding 绑定别名
-func (s *Service) UpsertBinding(b Binding) {
+func (s *Service) UpsertBinding(b Binding) error {
+	b.Verified = true // Explicit management action; persisted legacy auto-bindings require reconfirmation.
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	b.FeishuAlias = strings.TrimSpace(b.FeishuAlias)
+	alias := strings.ToLower(b.FeishuAlias)
+	if alias == "" {
+		alias = strings.ToLower(b.EmployeeID)
+	}
+	if strings.HasPrefix(alias, "emp-") && !strings.EqualFold(alias, b.EmployeeID) {
+		return ErrAliasConflict
+	}
+	if existing, ok := s.bindings[alias]; ok && existing.EmployeeID != b.EmployeeID {
+		return ErrAliasConflict
+	}
+
+	oldBindings := map[string]Binding{}
+	for key, value := range s.bindings {
+		oldBindings[key] = value
+	}
+	oldIndex := map[string][]string{}
+	for key, value := range s.byOpenID {
+		oldIndex[key] = append([]string(nil), value...)
+	}
 	for k, existing := range s.bindings {
 		if existing.EmployeeID == b.EmployeeID {
 			delete(s.bindings, k)
@@ -926,7 +963,12 @@ func (s *Service) UpsertBinding(b Binding) {
 	if b.FeishuOpenID != "" {
 		s.indexOpenIDLocked(b.FeishuOpenID, b.EmployeeID)
 	}
-	s.saveBindingsLocked()
+	if err := s.saveBindingsLocked(); err != nil {
+		s.bindings = oldBindings
+		s.byOpenID = oldIndex
+		return err
+	}
+	return nil
 }
 
 func (s *Service) indexOpenIDLocked(openID, employeeID string) {
@@ -966,45 +1008,10 @@ type IdentityNotice struct {
 	SavedChatID  string
 }
 
-// AutoBindFromMention 缺什么补什么：群聊补 OpenID 和默认群聊，单聊只补 OpenID。
+// AutoBindFromMention is deprecated: task messages never establish account ownership.
 func (s *Service) AutoBindFromMention(employeeID, senderOpenID, chatID string, group bool) IdentityNotice {
-	note := IdentityNotice{OpenID: strings.TrimSpace(senderOpenID), Group: group}
-	if group {
-		note.ChatID = strings.TrimSpace(chatID)
-	}
-	existing := s.BindingByEmployee(employeeID)
-	if existing == nil {
-		next := Binding{EmployeeID: employeeID, FeishuOpenID: note.OpenID}
-		if group {
-			next.ChatID = note.ChatID
-		}
-		note.OpenBoundNow = note.OpenID != ""
-		note.ChatBoundNow = group && note.ChatID != ""
-		note.SavedChatID = next.ChatID
-		if note.OpenBoundNow || note.ChatBoundNow {
-			s.UpsertBinding(next)
-		}
-		return note
-	}
-	next := *existing
-	if next.FeishuOpenID == "" && note.OpenID != "" {
-		next.FeishuOpenID = note.OpenID
-		note.OpenBoundNow = true
-	} else if next.FeishuOpenID != "" {
-		note.OpenID = next.FeishuOpenID
-	}
-	if group && next.ChatID == "" && note.ChatID != "" {
-		next.ChatID = note.ChatID
-		note.ChatBoundNow = true
-	}
-	note.SavedChatID = next.ChatID
-	if !group {
-		note.ChatID = next.ChatID
-	}
-	if note.OpenBoundNow || note.ChatBoundNow {
-		s.UpsertBinding(next)
-	}
-	return note
+	// Pairing is explicit via the authenticated management API, never first mention.
+	return IdentityNotice{OpenID: senderOpenID, ChatID: chatID, Group: group}
 }
 
 // FormatIdentityNotice 写成回执里的身份说明。
@@ -1284,14 +1291,13 @@ func (s *Service) EmployeeByOpenID(openID string) string {
 
 // EmployeeHasOpenID 该员工是否已绑定这个飞书用户。同一 OpenID 可以绑多个员工。
 func (s *Service) EmployeeHasOpenID(employeeID, openID string) bool {
-	openID = strings.TrimSpace(openID)
-	if employeeID == "" || openID == "" {
+	if employeeID == "" || strings.TrimSpace(openID) == "" {
 		return false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, id := range s.byOpenID[openID] {
-		if id == employeeID {
+	for _, binding := range s.bindings {
+		if binding.Verified && binding.EmployeeID == employeeID && binding.FeishuOpenID == openID {
 			return true
 		}
 	}
@@ -1304,6 +1310,15 @@ func (s *Service) EmployeeHasOpenID(employeeID, openID string) bool {
 //  2. 群聊里出现了 @、/emp 或 EMP- 但没对上员工：回复格式提示；完全不像呼叫则静默；
 //  3. 私聊未点名员工：回复「请@对应员工执行」，不创建任务。
 func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID string, duplicate bool, err error) {
+	if s.ClaimEvent != nil && ev.EventID != "" {
+		accepted, err := s.ClaimEvent(ctx, "event:"+ev.EventID, 24*time.Hour)
+		if err != nil {
+			return "", false, err
+		}
+		if !accepted {
+			return "", true, nil
+		}
+	}
 	if s.Dedupe(ev.EventID) {
 		return "", true, nil
 	}
@@ -1362,6 +1377,15 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 		}
 		return "", false, s.sendCommandReply(ctx, ev.ChatID, "请在目标员工后填写任务需求。\n\n"+mentionGuidance(s.boundAliases()))
 	}
+	if !s.TaskSenderAllowed(empID, ev.SenderOpenID, ev.ChatID, !isP2PChat(ev.ChatType)) {
+		return "", false, s.sendCommandReply(ctx, ev.ChatID, "无权使用该数字员工。请先在管理页面绑定你的飞书账号及允许使用的群聊。")
+	}
+	if s.AuthorizeActor == nil {
+		return "", false, s.sendCommandReply(ctx, ev.ChatID, "员工授权服务不可用")
+	}
+	if err := s.AuthorizeActor(ctx, empID, ev.SenderOpenID); err != nil {
+		return "", false, s.sendCommandReply(ctx, ev.ChatID, "账号已停用或绑定归属已变更，请重新确认绑定")
+	}
 	// Legacy natural-language controls use the same pre-existing binding check
 	// as slash commands, before assignability and automatic task binding.
 	s.mu.RLock()
@@ -1402,7 +1426,7 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 		idem = fmt.Sprintf("feishu:%s:%s", ev.SenderOpenID, ev.EventID)
 	}
 	group := !isP2PChat(ev.ChatType)
-	notice := FormatIdentityNotice(s.AutoBindFromMention(empID, ev.SenderOpenID, ev.ChatID, group))
+	notice := FormatIdentityNotice(IdentityNotice{OpenID: ev.SenderOpenID, ChatID: ev.ChatID, Group: group})
 	if s.Jobs == nil {
 		return "", false, errors.New("未配置 JobCreator")
 	}
@@ -1486,17 +1510,30 @@ func (s *Service) HandleURLChallenge(token, challenge string) (string, error) {
 	return challenge, nil
 }
 
-// VerifySignature 校验请求签名（兼容老测试用例）
+// VerifySignature validates the official EncryptKey signature and a bounded timestamp window.
 func (s *Service) VerifySignature(timestamp, nonce, signature, body string) error {
-	s.mu.RLock()
-	token := s.cfg.VerificationToken
-	s.mu.RUnlock()
-	if token == "" {
+	sec, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil || nonce == "" || len(nonce) > 256 {
 		return ErrBadSignature
 	}
-	sum := sha256.Sum256([]byte(timestamp + nonce + token + body))
-	expect := hex.EncodeToString(sum[:])
-	if !strings.EqualFold(expect, signature) {
+	now := time.Now()
+	then := time.Unix(sec, 0)
+	if then.Before(now.Add(-5*time.Minute)) || then.After(now.Add(time.Minute)) {
+		return ErrBadSignature
+	}
+	s.mu.RLock()
+	ref, vault := s.cfg.EncryptKeyRef, s.vault
+	s.mu.RUnlock()
+	if vault == nil || ref == "" {
+		return ErrBadSignature
+	}
+	key, err := vault.Get(ref)
+	if err != nil || key == "" {
+		return ErrBadSignature
+	}
+	sum := sha256.Sum256([]byte(timestamp + nonce + key + body))
+	supplied, err := hex.DecodeString(signature)
+	if err != nil || subtle.ConstantTimeCompare(sum[:], supplied) != 1 {
 		return ErrBadSignature
 	}
 	return nil
@@ -1769,4 +1806,13 @@ func ParseWebhookBody(body []byte) (challenge string, token string, ev *Incoming
 	}
 
 	return "", tok, nil, nil
+}
+
+// TaskSenderAllowed checks both actor and destination; group visibility grants no authority.
+func (s *Service) TaskSenderAllowed(employeeID, openID, chatID string, group bool) bool {
+	b := s.BindingByEmployee(employeeID)
+	if b == nil || !b.Verified || strings.TrimSpace(openID) == "" || b.FeishuOpenID != openID {
+		return false
+	}
+	return !group || (b.ChatID != "" && b.ChatID == chatID)
 }

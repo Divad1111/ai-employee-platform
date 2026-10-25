@@ -323,7 +323,7 @@ func commandNewSession(s *Service, ctx context.Context, ev IncomingEvent, scope 
 }
 
 func (s *Service) employeeControl(ctx context.Context, ev IncomingEvent, id, command string) string {
-	if !s.EmployeeHasOpenID(id, ev.SenderOpenID) {
+	if !s.TaskSenderAllowed(id, ev.SenderOpenID, ev.ChatID, !isP2PChat(ev.ChatType)) || s.AuthorizeActor == nil || s.AuthorizeActor(ctx, id, ev.SenderOpenID) != nil {
 		return "当前飞书账号未绑定该 AI 员工, 不能修改会话或模型。请在后台完成身份绑定。"
 	}
 	s.mu.RLock()

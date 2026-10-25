@@ -4,16 +4,13 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: ${AIE_POSTGRES_IMAGE:-postgres:16-alpine}
     container_name: aie-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-aie}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aie}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请配置随机数据库密码}
       POSTGRES_DB: ${POSTGRES_DB:-aie}
-    ports:
-      # 安全强化：默认仅绑定本地 127.0.0.1 回环地址，严禁将数据库端口直接暴露在公网 0.0.0.0
-      - "${POSTGRES_PORT:-127.0.0.1:5432}:5432"
     volumes:
       # 持久化数据库存储映射到本地目录，镜像更新/重新拉取不丢失配置与业务数据
       - ${AIE_PG_DATA_DIR:-./data/postgres}:/var/lib/postgresql/data
@@ -25,7 +22,7 @@ services:
 
   # 初始化宿主机数据目录权限（适配 Linux / 群晖 DSM 挂载权限）
   init-data:
-    image: busybox:latest
+    image: ${AIE_INIT_IMAGE:-busybox:1.37.0}
     container_name: aie-init-data
     restart: "no"
     command: >
@@ -36,24 +33,24 @@ services:
 
   # 数据库自动迁移：在 Postgres 就绪后自动同步最新表结构，升级镜像后零人工配置
   migrate:
-    image: ${AIE_CONTROL_PLANE_IMAGE:-aie-control-plane:latest}
+    image: ${AIE_CONTROL_PLANE_IMAGE:?请指定控制面镜像版本或 digest}
     container_name: aie-migrate
     restart: "no"
     entrypoint: ["/app/migrate"]
     command: ["-dir", "/migrations", "up"]
     environment:
-      AIE_DATABASE_URL: ${AIE_DATABASE_URL:-host=postgres port=5432 user=${POSTGRES_USER:-aie} password='${POSTGRES_PASSWORD:-aie}' dbname=${POSTGRES_DB:-aie} sslmode=disable}
+      AIE_DATABASE_URL: "${AIE_DATABASE_URL:-}"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_USER: ${POSTGRES_USER:-aie}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aie}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请配置随机数据库密码}
       POSTGRES_DB: ${POSTGRES_DB:-aie}
     depends_on:
       postgres:
         condition: service_healthy
 
   control-plane:
-    image: ${AIE_CONTROL_PLANE_IMAGE:-aie-control-plane:latest}
+    image: ${AIE_CONTROL_PLANE_IMAGE:?请指定控制面镜像版本或 digest}
     container_name: aie-control-plane
     restart: unless-stopped
     environment:
@@ -64,21 +61,27 @@ services:
       AIE_GRPC_PORT: "${AIE_GRPC_PORT:-9090}"
       AIE_PUBLIC_SERVER_URL: "${AIE_PUBLIC_SERVER_URL:-}"
 
-      AIE_DATABASE_URL: ${AIE_DATABASE_URL:-host=postgres port=5432 user=${POSTGRES_USER:-aie} password='${POSTGRES_PASSWORD:-aie}' dbname=${POSTGRES_DB:-aie} sslmode=disable}
+      AIE_DATABASE_URL: "${AIE_DATABASE_URL:-}"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_USER: ${POSTGRES_USER:-aie}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aie}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请配置随机数据库密码}
       POSTGRES_DB: ${POSTGRES_DB:-aie}
-      AIE_SECRET_MASTER_KEY: "${AIE_SECRET_MASTER_KEY:-}"
+      AIE_SECRET_MASTER_KEY: "${AIE_SECRET_MASTER_KEY:?请配置随机 Secret 主密钥}"
+      AIE_BACKUP_MASTER_KEY: "${AIE_BACKUP_MASTER_KEY:?请配置随机备份主密钥}"
+      AIE_BACKUP_PREVIOUS_KEY: "${AIE_BACKUP_PREVIOUS_KEY:-}"
+      AIE_SETUP_TOKEN: "${AIE_SETUP_TOKEN:?请配置随机部署初始化密钥}"
+      AIE_TRUSTED_PROXIES: "${AIE_TRUSTED_PROXIES:-172.30.20.10/32}"
+      AIE_SOFTWARE_ALLOWED_HOSTS: "${AIE_SOFTWARE_ALLOWED_HOSTS:-api.github.com,github.com,release-assets.githubusercontent.com,objects.githubusercontent.com}"
+      AIE_SOFTWARE_SIGNING_KEY: "${AIE_SOFTWARE_SIGNING_KEY:-}"
       AIE_SEED_DEMO: "${AIE_SEED_DEMO:-0}"
       AIE_CA_DIR: "/data/ca"
       AIE_SECRET_DIR: "/data/secrets"
       AIE_ARTIFACT_DIR: "/data/artifacts"
 
     ports:
-      - "${AIE_HTTP_PORT:-8080}:8080"
-      - "${AIE_GRPC_PORT:-9090}:9090"
+      - "127.0.0.1:${AIE_HTTP_PORT:-8080}:8080"
+      - "${AIE_GRPC_BIND_IP:-127.0.0.1}:${AIE_GRPC_PORT:-9090}:9090"
     volumes:
       # 持久化 CA 根证书与私钥、机密凭据，保证镜像更新后已接入工作站 mTLS 仍长期有效
       - ${AIE_SERVER_DATA_DIR:-./data/server}:/data
@@ -91,10 +94,40 @@ services:
         condition: service_completed_successfully
 
   admin-web:
-    image: ${AIE_ADMIN_IMAGE:-aie-admin:latest}
+    image: ${AIE_ADMIN_IMAGE:?请指定管理页镜像版本或 digest}
     container_name: aie-admin
     restart: unless-stopped
     ports:
-      - "${AIE_ADMIN_PORT:-8088}:80"
+      - "127.0.0.1:${AIE_ADMIN_PORT:-8088}:80"
     depends_on:
       - control-plane
+
+  gateway:
+    image: ${AIE_GATEWAY_IMAGE:-caddy:2-alpine}
+    profiles: [public]
+    restart: unless-stopped
+    environment:
+      AIE_DOMAIN: ${AIE_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - gateway_data:/data
+      - gateway_config:/config
+    networks:
+      default:
+        ipv4_address: 172.30.20.10
+    depends_on:
+      - control-plane
+      - admin-web
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.20.0/24
+
+volumes:
+  gateway_data:
+  gateway_config:

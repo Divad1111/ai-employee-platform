@@ -79,19 +79,28 @@ func CreateSnapshot(ctx context.Context, cfg SnapshotConfig) (*SnapshotResult, e
 
 	// 2. 复制 CA 目录
 	if cfg.CADir != "" {
-		caFiles, _ := copyDirIntoStage(cfg.CADir, filepath.Join(stageDir, "ca"), stageDir)
+		caFiles, err := copyDirIntoStage(cfg.CADir, filepath.Join(stageDir, "ca"), stageDir)
+		if err != nil {
+			return nil, err
+		}
 		manifestFiles = append(manifestFiles, caFiles...)
 	}
 
 	// 3. 复制 Secrets 目录
 	if cfg.SecretDir != "" {
-		secFiles, _ := copyDirIntoStage(cfg.SecretDir, filepath.Join(stageDir, "secrets"), stageDir)
+		secFiles, err := copyDirIntoStage(cfg.SecretDir, filepath.Join(stageDir, "secrets"), stageDir)
+		if err != nil {
+			return nil, err
+		}
 		manifestFiles = append(manifestFiles, secFiles...)
 	}
 
 	// 4. 复制 Artifacts 目录
 	if cfg.ArtifactDir != "" {
-		artFiles, _ := copyDirIntoStage(cfg.ArtifactDir, filepath.Join(stageDir, "artifacts"), stageDir)
+		artFiles, err := copyDirIntoStage(cfg.ArtifactDir, filepath.Join(stageDir, "artifacts"), stageDir)
+		if err != nil {
+			return nil, err
+		}
 		manifestFiles = append(manifestFiles, artFiles...)
 	}
 
@@ -134,15 +143,25 @@ func CreateSnapshot(ctx context.Context, cfg SnapshotConfig) (*SnapshotResult, e
 
 	// 6. 打包为 Tar 流并使用 Zstd 压缩
 	tarBuf := new(bytes.Buffer)
-	zstdWriter, err := zstd.NewWriter(tarBuf, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	zstdWriter, err := zstd.NewWriter(&boundedWriter{tarBuf, MaxArtifactBytes}, zstd.WithEncoderLevel(zstd.SpeedDefault))
 	if err != nil {
 		return nil, fmt.Errorf("初始化 Zstd 压缩器失败: %w", err)
 	}
 	tarWriter := tar.NewWriter(zstdWriter)
 
+	var expanded int64
+	var fileCount int
 	err = filepath.Walk(stageDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("备份只支持普通文件")
+		}
+		expanded += info.Size()
+		fileCount++
+		if expanded > MaxExpandedBytes || info.Size() > MaxArtifactBytes || fileCount > MaxArchiveFiles {
+			return fmt.Errorf("快照超过安全容量或文件数量上限")
 		}
 		rel, err := filepath.Rel(stageDir, path)
 		if err != nil {
@@ -171,8 +190,12 @@ func CreateSnapshot(ctx context.Context, cfg SnapshotConfig) (*SnapshotResult, e
 		return nil, fmt.Errorf("Tar 打包失败: %w", err)
 	}
 
-	_ = tarWriter.Close()
-	_ = zstdWriter.Close()
+	if err := tarWriter.Close(); err != nil {
+		return nil, err
+	}
+	if err := zstdWriter.Close(); err != nil {
+		return nil, err
+	}
 
 	// 7. 写入最终输出文件（经过条件加密）
 	finalArtifactPath := filepath.Join(cfg.WorkDir, cfg.BackupID+".backup")
@@ -235,6 +258,7 @@ func copyDirIntoStage(srcDir, destDir, stageDir string) ([]ManifestFile, error) 
 		return nil, nil
 	}
 	var res []ManifestFile
+	var copied int64
 	_ = os.MkdirAll(destDir, 0o750)
 
 	err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
@@ -251,6 +275,13 @@ func copyDirIntoStage(srcDir, destDir, stageDir string) ([]ManifestFile, error) 
 			return os.MkdirAll(targetPath, 0o750)
 		}
 
+		if !info.Mode().IsRegular() || info.Size() > MaxArtifactBytes {
+			return fmt.Errorf("不支持的备份文件或文件过大")
+		}
+		copied += info.Size()
+		if copied > MaxExpandedBytes || len(res) >= MaxArchiveFiles {
+			return fmt.Errorf("备份超过解压容量或数量上限")
+		}
 		in, err := os.Open(path)
 		if err != nil {
 			return err
@@ -265,7 +296,7 @@ func copyDirIntoStage(srcDir, destDir, stageDir string) ([]ManifestFile, error) 
 
 		hasher := sha256.New()
 		mw := io.MultiWriter(out, hasher)
-		if _, err := io.Copy(mw, in); err != nil {
+		if _, err := io.Copy(mw, io.LimitReader(in, MaxArtifactBytes+1)); err != nil {
 			return err
 		}
 

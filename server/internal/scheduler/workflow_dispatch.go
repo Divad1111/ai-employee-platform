@@ -183,6 +183,13 @@ func (s *Service) buildStartJobPayload(ctx context.Context, employeeID, prompt, 
 				}
 				// 注入已绑定的身份凭证（若有）
 				if b.CredentialID != "" {
+					e, err := s.Employees.Get(ctx, employeeID)
+					if err != nil || e == nil {
+						return nil, fmt.Errorf("员工身份不可用")
+					}
+					if err := s.MCP.CredentialForOwner(ctx, b.CredentialID, e.OwnerUserID); err != nil {
+						return nil, err
+					}
 					authn, err := s.MCP.ResolveAuthentication(ctx, b.CredentialID, spec.Type)
 					if err != nil {
 						return nil, fmt.Errorf("MCP 服务 %s 的凭证不可用: %w", srv.Name, err)

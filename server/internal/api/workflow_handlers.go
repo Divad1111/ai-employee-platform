@@ -4,8 +4,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -400,13 +402,24 @@ func (d Deps) handleRevokeMCPToken(w http.ResponseWriter, r *http.Request, sess 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+var workflowImportSlot = make(chan struct{}, 1)
+
 // ---------- Import from PersonalWorkMCP data zip ----------
 
 func (d Deps) handleImportWorkflowMCP(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
-	if err := r.ParseMultipartForm(64 << 20); err != nil {
+	select {
+	case workflowImportSlot <- struct{}{}:
+		defer func() { <-workflowImportSlot }()
+	default:
+		writeErr(w, 429, "已有导入任务执行中")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		writeErr(w, http.StatusBadRequest, "需要 multipart zip")
 		return
 	}
+	defer r.MultipartForm.RemoveAll()
 	f, _, err := r.FormFile("file")
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "缺少 file")
@@ -423,6 +436,11 @@ func (d Deps) handleImportWorkflowMCP(w http.ResponseWriter, r *http.Request, se
 		writeErr(w, http.StatusBadRequest, "无效 zip")
 		return
 	}
+	bodies, err := boundedZip(zr)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	stats := map[string]int{"workflows": 0, "skills": 0, "knowledge": 0, "errors": 0}
 	// 收集技能包目录
 	skillDirs := map[string]map[string][]byte{} // cursor_name -> path -> content
@@ -434,13 +452,7 @@ func (d Deps) handleImportWorkflowMCP(w http.ResponseWriter, r *http.Request, se
 		// 去掉可能的 data/ 前缀
 		name = strings.TrimPrefix(name, "data/")
 		if strings.HasPrefix(name, "workflows/") && strings.HasSuffix(name, ".yaml") {
-			rc, err := zf.Open()
-			if err != nil {
-				stats["errors"]++
-				continue
-			}
-			b, _ := io.ReadAll(rc)
-			rc.Close()
+			b := bodies[zf]
 			if _, _, err := d.WorkflowMCP.UpsertWorkflowYAML(r.Context(), string(b), "patch"); err != nil {
 				stats["errors"]++
 			} else {
@@ -458,23 +470,12 @@ func (d Deps) handleImportWorkflowMCP(w http.ResponseWriter, r *http.Request, se
 			if skillDirs[dir] == nil {
 				skillDirs[dir] = map[string][]byte{}
 			}
-			rc, err := zf.Open()
-			if err != nil {
-				continue
-			}
-			b, _ := io.ReadAll(rc)
-			rc.Close()
+			b := bodies[zf]
 			skillDirs[dir][rel] = b
 			continue
 		}
 		if strings.HasPrefix(name, "knowledge/") && strings.HasSuffix(name, ".md") {
-			rc, err := zf.Open()
-			if err != nil {
-				stats["errors"]++
-				continue
-			}
-			b, _ := io.ReadAll(rc)
-			rc.Close()
+			b := bodies[zf]
 			rel := strings.TrimPrefix(name, "knowledge/")
 			if _, _, err := d.WorkflowMCP.UpsertKnowledgeMD(r.Context(), rel, string(b), "patch"); err != nil {
 				stats["errors"]++
@@ -533,4 +534,46 @@ func (d Deps) handleSyncSkillsToWorkstation(w http.ResponseWriter, r *http.Reque
 		"workstation_id": body.WorkstationID, "employee_id": body.EmployeeID,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+func boundedZip(zr *zip.Reader) (map[*zip.File][]byte, error) {
+	if len(zr.File) > 2000 {
+		return nil, fmt.Errorf("压缩包文件数量超过 2000")
+	}
+	out := map[*zip.File][]byte{}
+	seen := map[string]bool{}
+	var total int64
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		if !f.Mode().IsRegular() || f.Name != path.Clean(f.Name) || path.IsAbs(f.Name) || strings.Contains(f.Name, "\\") || strings.HasPrefix(f.Name, "../") || seen[f.Name] {
+			return nil, fmt.Errorf("非法或重复的归档文件")
+		}
+		seen[f.Name] = true
+		if f.UncompressedSize64 > 8<<20 {
+			return nil, fmt.Errorf("单文件解压大小超过 8 MiB")
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return nil, err
+		}
+		b, readErr := io.ReadAll(io.LimitReader(rc, (8<<20)+1))
+		closeErr := rc.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		if len(b) > 8<<20 {
+			return nil, fmt.Errorf("解压文件超过上限")
+		}
+		total += int64(len(b))
+		if total > 128<<20 {
+			return nil, fmt.Errorf("解压总大小超过 128 MiB")
+		}
+		out[f] = b
+	}
+	return out, nil
 }

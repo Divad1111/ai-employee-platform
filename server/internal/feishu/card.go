@@ -359,7 +359,7 @@ func BuildInquiryCard(jobID, employeeName, inquiryID, message string, options []
 	for i, opt := range options {
 		sb.WriteString(fmt.Sprintf("• **[%d]** %s (`%s`)\n", i+1, opt.Name, opt.OptionID))
 	}
-	sb.WriteString("\n> 💡 **交互说明**：您可以直接点击下方按钮快速选择；也可以在当前会话中直接回复选项数字序号（如 `1`）或选项名称。")
+	sb.WriteString(fmt.Sprintf("\n> 💡 **交互说明**：仅任务发起者可以确认。点击按钮，或回复 `%s 1`（请求 ID + 选项编号）。", inquiryID))
 
 	card.Elements = append(card.Elements, CardElement{
 		"tag": "div",

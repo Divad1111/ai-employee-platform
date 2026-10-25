@@ -1,21 +1,18 @@
 package backup
 
 import (
-	"archive/tar"
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ai-employee-platform/server/internal/backup/database"
 	"github.com/ai-employee-platform/server/internal/backup/destination"
-	"github.com/klauspost/compress/zstd"
 )
 
 // RestoreOptions 恢复参数
@@ -32,6 +29,7 @@ type RestoreOptions struct {
 
 // RestoreManager 负责容灾恢复全流程
 type RestoreManager struct {
+	operation  sync.Mutex
 	store      Store
 	dbProvider database.DatabaseBackupProvider
 	crypto     *CryptoManager
@@ -64,6 +62,10 @@ func NewRestoreManager(
 
 // ExecuteRestore 执行系统恢复核心流程
 func (m *RestoreManager) ExecuteRestore(ctx context.Context, jobID, backupRunID, userID string, getDest func(destID string) (destination.BackupDestination, error)) error {
+	if !m.operation.TryLock() {
+		return fmt.Errorf("已有恢复任务执行中")
+	}
+	defer m.operation.Unlock()
 	job, err := m.store.GetRestoreJob(ctx, jobID)
 	if err != nil {
 		return err
@@ -106,9 +108,17 @@ func (m *RestoreManager) ExecuteRestore(ctx context.Context, jobID, backupRunID,
 		WorkDir:           m.workDir,
 		CompressionAlgo:   CompressZstd,
 		CompressionLevel:  3,
-		EncryptionEnabled: false, // 应急快照默认不加密以便最快回滚
+		EncryptionEnabled: true,
+		EncryptionKeyVer:  2,
 		Crypto:            m.crypto,
 	})
+	if err != nil || emerResult == nil {
+		if err == nil {
+			err = fmt.Errorf("应急快照未生成")
+		}
+		m.failJob(ctx, job, "ERR_EMERGENCY_BACKUP", err.Error())
+		return err
+	}
 	if err == nil && emerResult != nil {
 		now := time.Now().UTC()
 		mBytes, _ := json.Marshal(emerResult.Manifest)
@@ -189,96 +199,59 @@ func (m *RestoreManager) ExecuteRestore(ctx context.Context, jobID, backupRunID,
 	job.Status = RestoreStatusRestoringDB
 	_ = m.store.UpdateRestoreJob(ctx, job)
 
-	stageDir := filepath.Join(m.workDir, "restore_"+run.BackupID)
-	_ = os.MkdirAll(stageDir, 0o750)
+	if err := os.MkdirAll(m.workDir, 0700); err != nil {
+		return err
+	}
+	stageDir, err := os.MkdirTemp(m.workDir, "restore-verified-*")
+	if err != nil {
+		return err
+	}
 	defer os.RemoveAll(stageDir)
-
-	// 解密到临时缓存
-	decryptedBuf := new(bytes.Buffer)
-	rawBytes, err := io.ReadAll(reader)
+	fail := func(err error) error { m.failJob(ctx, job, "ERR_VERIFY_RESTORE", err.Error()); return err }
+	raw, err := readBounded(reader, MaxArtifactBytes)
 	if err != nil {
-		m.failJob(ctx, job, "ERR_READ", err.Error())
-		return err
+		return fail(err)
 	}
-
-	isEncrypted := len(rawBytes) > len(ArtifactMagic) && string(rawBytes[:len(ArtifactMagic)]) == ArtifactMagic
-	if isEncrypted {
-		if err := m.crypto.DecryptArtifact(decryptedBuf, bytes.NewReader(rawBytes), EncryptAES256GCM); err != nil {
-			m.failJob(ctx, job, "ERR_DECRYPT", fmt.Sprintf("解密失败: %v", err))
-			return err
+	var expected Manifest
+	if err = json.Unmarshal(run.ManifestJSON, &expected); err != nil || expected.Encryption.Algorithm == "" {
+		return fail(fmt.Errorf("缺少可信备份清单记录，禁止猜测加密状态"))
+	}
+	manifest, err := unpackVerified(ctx, raw, run.Checksum, expected.Encryption.Algorithm, run.BackupID, stageDir, m.crypto)
+	if err != nil {
+		return fail(err)
+	}
+	// No data directory writes occur until every archive file has passed validation.
+	for _, file := range manifest.Files {
+		var base, relative string
+		switch {
+		case strings.HasPrefix(file.Path, "ca/"):
+			base = m.caDir
+			relative = strings.TrimPrefix(file.Path, "ca/")
+		case strings.HasPrefix(file.Path, "secrets/"):
+			base = m.secretDir
+			relative = strings.TrimPrefix(file.Path, "secrets/")
+		case strings.HasPrefix(file.Path, "artifacts/"):
+			base = m.artDir
+			relative = strings.TrimPrefix(file.Path, "artifacts/")
 		}
-	} else {
-		decryptedBuf.Write(rawBytes)
+		if relative != "" {
+			if err = installVerified(base, filepath.FromSlash(relative), filepath.Join(stageDir, filepath.FromSlash(file.Path))); err != nil {
+				return fail(err)
+			}
+		}
 	}
-
-	// Zstd 解压
-	zstdReader, err := zstd.NewReader(decryptedBuf)
-	if err != nil {
-		m.failJob(ctx, job, "ERR_DECOMPRESS", fmt.Sprintf("解压失败: %v", err))
-		return err
-	}
-	defer zstdReader.Close()
-
-	// 遍历 Tar 解包，严格防范路径穿越
-	tarReader := tar.NewReader(zstdReader)
-	var dbDumpData []byte
-
-	for {
-		hdr, err := tarReader.Next()
+	if m.dbProvider != nil {
+		dbFile, err := os.Open(filepath.Join(stageDir, "database", "database.dump"))
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			m.failJob(ctx, job, "ERR_TAR_EXTRACT", err.Error())
-			return err
+			return fail(err)
 		}
-
-		cleanPath := filepath.Clean(hdr.Name)
-		if strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
-			m.failJob(ctx, job, "ERR_PATH_TRAVERSAL", "检测到非法路径穿越文件")
-			return errors.New("非法路径穿越文件")
+		err = m.dbProvider.Restore(ctx, dbFile)
+		closeErr := dbFile.Close()
+		if err != nil {
+			return fail(err)
 		}
-
-		// 拦截数据库转储
-		if cleanPath == filepath.Join("database", "database.dump") || cleanPath == "database/database.dump" {
-			dbDumpData, err = io.ReadAll(tarReader)
-			if err != nil {
-				m.failJob(ctx, job, "ERR_READ_DB_DUMP", err.Error())
-				return err
-			}
-			continue
-		}
-
-		// 还原持久化文件
-		var destBase string
-		var subRel string
-		if strings.HasPrefix(cleanPath, "ca/") || strings.HasPrefix(cleanPath, "ca\\") {
-			destBase = m.caDir
-			subRel = strings.TrimPrefix(strings.TrimPrefix(cleanPath, "ca/"), "ca\\")
-		} else if strings.HasPrefix(cleanPath, "secrets/") || strings.HasPrefix(cleanPath, "secrets\\") {
-			destBase = m.secretDir
-			subRel = strings.TrimPrefix(strings.TrimPrefix(cleanPath, "secrets/"), "secrets\\")
-		} else if strings.HasPrefix(cleanPath, "artifacts/") || strings.HasPrefix(cleanPath, "artifacts\\") {
-			destBase = m.artDir
-			subRel = strings.TrimPrefix(strings.TrimPrefix(cleanPath, "artifacts/"), "artifacts\\")
-		}
-
-		if destBase != "" && subRel != "" {
-			targetFile := filepath.Join(destBase, subRel)
-			_ = os.MkdirAll(filepath.Dir(targetFile), 0o750)
-			f, err := os.OpenFile(targetFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, hdr.FileInfo().Mode())
-			if err == nil {
-				_, _ = io.Copy(f, tarReader)
-				_ = f.Close()
-			}
-		}
-	}
-
-	// 5. 还原数据库
-	if len(dbDumpData) > 0 && m.dbProvider != nil {
-		if err := m.dbProvider.Restore(ctx, bytes.NewReader(dbDumpData)); err != nil {
-			m.failJob(ctx, job, "ERR_RESTORE_DB", fmt.Sprintf("数据库数据还原失败: %v", err))
-			return err
+		if closeErr != nil {
+			return fail(closeErr)
 		}
 	}
 

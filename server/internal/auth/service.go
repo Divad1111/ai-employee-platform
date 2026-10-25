@@ -6,6 +6,8 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -59,12 +61,15 @@ type PermissionGrant struct {
 
 // Session 表示登录会话。
 type Session struct {
-	Token       string
-	UserID      string
-	Username    string
-	Roles       []string
-	ExpiresAt   time.Time
-	StepUpUntil time.Time // 高风险操作二次认证有效期
+	CredentialVersion string `json:"-"`
+	MFAAuthenticated  bool   `json:"-"`
+	MFARequired       bool   `json:"-"`
+	Token             string
+	UserID            string
+	Username          string
+	Roles             []string
+	ExpiresAt         time.Time
+	StepUpUntil       time.Time // 高风险操作二次认证有效期
 }
 
 // UserStore 用户持久化抽象。
@@ -95,7 +100,6 @@ var BuiltInRoles = map[string]struct{}{
 	"USER":        {},
 	"VIEWER":      {},
 }
-
 
 // IsBuiltInRole 是否内置角色。
 func IsBuiltInRole(name string) bool {
@@ -130,10 +134,12 @@ type Auditor interface {
 
 // Service 认证服务。
 type Service struct {
-	users    UserStore
-	sessions SessionStore
-	audit    Auditor
-	limiter  *RateLimiter
+	EnforceAdminMFA bool
+	initMu          sync.Mutex
+	users           UserStore
+	sessions        SessionStore
+	audit           Auditor
+	limiter         *RateLimiter
 
 	sessionTTL time.Duration
 	maxFail    int
@@ -192,11 +198,12 @@ func (s *Service) Login(ctx context.Context, username, password, ip string) (*Se
 		return nil, err
 	}
 	sess := &Session{
-		Token:     tok,
-		UserID:    u.ID,
-		Username:  u.Username,
-		Roles:     append([]string{}, u.Roles...),
-		ExpiresAt: time.Now().Add(s.sessionTTL),
+		Token:             tok,
+		UserID:            u.ID,
+		Username:          u.Username,
+		Roles:             append([]string{}, u.Roles...),
+		CredentialVersion: credentialVersion(u.PasswordHash),
+		ExpiresAt:         time.Now().Add(s.sessionTTL),
 	}
 	if err := s.sessions.Save(ctx, sess); err != nil {
 		return nil, err
@@ -224,13 +231,24 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*Session, err
 	if err != nil || sess == nil || time.Now().After(sess.ExpiresAt) {
 		return nil, ErrUnauthorized
 	}
-	u, _ := s.users.FindByID(ctx, sess.UserID)
-	if u == nil {
-		u, _ = s.users.FindByUsername(ctx, sess.Username)
+	u, err := s.users.FindByID(ctx, sess.UserID)
+	if err != nil || u == nil || u.ID != sess.UserID || u.Username != sess.Username {
+		return nil, ErrUnauthorized
 	}
-	if u != nil && u.Status == StatusDisabled {
+	if u.Status != StatusActive {
 		return nil, ErrUserDisabled
 	}
+	version := credentialVersion(u.PasswordHash)
+	if sess.CredentialVersion == "" || subtle.ConstantTimeCompare([]byte(sess.CredentialVersion), []byte(version)) != 1 {
+		_ = s.sessions.Delete(ctx, token)
+		return nil, ErrUnauthorized
+	}
+	if !sameRoles(sess.Roles, u.Roles) {
+		sess.StepUpUntil = time.Time{}
+	}
+	sess.Roles = append([]string(nil), u.Roles...)
+	sess.MFARequired = s.EnforceAdminMFA && AdminRoles(u.Roles)
+
 	return sess, nil
 }
 
@@ -239,12 +257,32 @@ func (s *Service) Authorize(ctx context.Context, sess *Session, need string) err
 	if sess == nil {
 		return ErrUnauthorized
 	}
+	if sess.MFARequired && !sess.MFAAuthenticated {
+		return ErrForbidden
+	}
 	grants, err := s.users.ListPermissionGrants(ctx, sess.Roles)
 	if err != nil {
 		return err
 	}
 	for _, g := range grants {
-		if g.Code == need || g.Code == "*" {
+		if (g.Code == need || g.Code == "*") && (g.Scope == "ALL" || g.Scope == "OWN" || g.Scope == "ASSIGNED") {
+			return nil
+		}
+	}
+	return ErrForbidden
+}
+
+// AuthorizeAll requires an explicit ALL grant; OWN never grants global writes.
+func (s *Service) AuthorizeAll(ctx context.Context, sess *Session, code string) error {
+	if sess == nil || (sess.MFARequired && !sess.MFAAuthenticated) {
+		return ErrForbidden
+	}
+	grants, err := s.PermissionGrants(ctx, sess)
+	if err != nil {
+		return err
+	}
+	for _, g := range grants {
+		if (g.Code == code || g.Code == "*") && strings.EqualFold(g.Scope, "ALL") {
 			return nil
 		}
 	}
@@ -322,6 +360,8 @@ func (s *Service) IsInitialized(ctx context.Context) (bool, error) {
 
 // InitAdmin 执行首次部署管理员注册，并返回登录会话。
 func (s *Service) InitAdmin(ctx context.Context, username, password, display, ip string) (*Session, error) {
+	s.initMu.Lock()
+	defer s.initMu.Unlock()
 	username = strings.TrimSpace(username)
 	if len(username) < 3 || len(username) > 32 {
 		return nil, ErrInvalidUsername
@@ -352,7 +392,13 @@ func (s *Service) InitAdmin(ctx context.Context, username, password, display, ip
 		Status:       StatusActive,
 		Roles:        []string{"SUPER_ADMIN", "ADMIN"},
 	}
-	if err := s.users.Create(ctx, u); err != nil {
+	create := s.users.Create
+	if initial, ok := s.users.(interface {
+		CreateInitialAdmin(context.Context, *User) error
+	}); ok {
+		create = initial.CreateInitialAdmin
+	}
+	if err := create(ctx, u); err != nil {
 		return nil, err
 	}
 
@@ -361,11 +407,12 @@ func (s *Service) InitAdmin(ctx context.Context, username, password, display, ip
 		return nil, err
 	}
 	sess := &Session{
-		Token:     tok,
-		UserID:    u.ID,
-		Username:  u.Username,
-		Roles:     append([]string{}, u.Roles...),
-		ExpiresAt: time.Now().Add(s.sessionTTL),
+		Token:             tok,
+		UserID:            u.ID,
+		Username:          u.Username,
+		Roles:             append([]string{}, u.Roles...),
+		CredentialVersion: credentialVersion(u.PasswordHash),
+		ExpiresAt:         time.Now().Add(s.sessionTTL),
 	}
 	if err := s.sessions.Save(ctx, sess); err != nil {
 		return nil, err
@@ -414,6 +461,16 @@ func (r *RateLimiter) Allow(key string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
+	if len(r.attempts) >= 10000 {
+		for k, attempts := range r.attempts {
+			if len(attempts) == 0 || now.Sub(attempts[len(attempts)-1]) > r.window {
+				delete(r.attempts, k)
+			}
+		}
+		if _, exists := r.attempts[key]; !exists && len(r.attempts) >= 10000 {
+			return false
+		}
+	}
 	cut := now.Add(-r.window)
 	arr := r.attempts[key]
 	alive := arr[:0]
@@ -432,11 +489,12 @@ func (r *RateLimiter) Allow(key string) bool {
 
 // MemoryUserStore 内存用户库（开发/测试）。
 type MemoryUserStore struct {
-	mu     sync.RWMutex
-	users  map[string]*User             // username -> user
-	byID   map[string]string            // id -> username
-	grants map[string][]PermissionGrant // role -> grants
-	descs  map[string]string            // role -> description
+	initialized bool
+	mu          sync.RWMutex
+	users       map[string]*User             // username -> user
+	byID        map[string]string            // id -> username
+	grants      map[string][]PermissionGrant // role -> grants
+	descs       map[string]string            // role -> description
 }
 
 func defaultRoleGrants() map[string][]PermissionGrant {
@@ -482,7 +540,10 @@ func defaultRoleGrants() map[string][]PermissionGrant {
 			"workflow.read", "workflow.grant",
 			"automation.read", "quota.read",
 		)),
-		"USER": own(adminCodes...),
+		"USER": own("employee.read", "employee.write", "employee.delete", "workstation.read", "workstation.write",
+			"workspace.read", "workspace.write", "session.read", "session.write", "job.read", "job.write", "job.cancel",
+			"message.read", "message.write", "approval.read", "secret.read", "secret.write", "enrollment.write",
+			"workflow.read", "workflow.write", "workflow.delete", "workflow.grant", "automation.read", "automation.write", "user.read", "user.update", "quota.read"),
 		"VIEWER": own(
 			"employee.read", "workstation.read", "workspace.read",
 			"session.read", "job.read", "message.read",
@@ -507,7 +568,6 @@ func NewMemoryUserStore() *MemoryUserStore {
 		},
 	}
 }
-
 
 // SeedAdmin 写入初始管理员。
 func (m *MemoryUserStore) SeedAdmin(username, password, display string) error {
@@ -600,10 +660,10 @@ func (m *MemoryUserStore) Create(_ context.Context, u *User) error {
 	cp := *u
 	cp.Roles = cleanRoles
 	m.users[u.Username] = &cp
+	m.initialized = true
 	m.byID[u.ID] = u.Username
 	return nil
 }
-
 
 // Update 更新用户。
 func (m *MemoryUserStore) Update(_ context.Context, u *User) error {
@@ -626,6 +686,7 @@ func (m *MemoryUserStore) Update(_ context.Context, u *User) error {
 		cp.Roles = append([]string{}, old.Roles...)
 	}
 	m.users[u.Username] = &cp
+	m.initialized = true
 	m.byID[u.ID] = u.Username
 	return nil
 }
@@ -664,14 +725,7 @@ func (m *MemoryUserStore) Count(_ context.Context) (int, error) {
 func (m *MemoryUserStore) IsInitialized(_ context.Context) (bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	for _, u := range m.users {
-		for _, r := range u.Roles {
-			if r == "ADMIN" || r == "SUPER_ADMIN" {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
+	return m.initialized || len(m.users) > 0, nil
 }
 
 // ListPermissionGrants 汇总角色权限与 Scope。
@@ -815,6 +869,7 @@ func (m *MemoryUserStore) DeleteRole(_ context.Context, name string) error {
 func (m *MemoryUserStore) SoftDelete(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+ if len(m.users)>0{m.initialized=true}
 	uname := m.byID[id]
 	if uname == "" {
 		return errors.New("用户不存在")
@@ -913,3 +968,39 @@ func newUUID() string {
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+func credentialVersion(hash string) string {
+	sum := sha256.Sum256([]byte(hash))
+	return hex.EncodeToString(sum[:])
+}
+
+func sameRoles(a, b []string) bool {
+	x, y := append([]string(nil), a...), append([]string(nil), b...)
+	sort.Strings(x)
+	sort.Strings(y)
+	return strings.Join(x, "\x00") == strings.Join(y, "\x00")
+}
+
+func AdminRoles(roles []string) bool {
+	for _, r := range roles {
+		if r == "ADMIN" || r == "SUPER_ADMIN" {
+			return true
+		}
+	}
+	return false
+}
+
+// ConfirmMFA is called only after a verified TOTP challenge.
+func (s *Service) ConfirmMFA(ctx context.Context, token string) error {
+	sess, err := s.Authenticate(ctx, token)
+	if err != nil {
+		return err
+	}
+	sess.MFAAuthenticated = true
+	return s.sessions.Save(ctx, sess)
+}
+
+// SessionTokenHash is the only representation stored by persistent session stores.
+func SessionTokenHash(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}

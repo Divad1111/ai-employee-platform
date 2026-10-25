@@ -2,6 +2,7 @@ package destination
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 
 // SFTPDestination SFTP 远程存储目标
 type SFTPDestination struct {
+	hostKey    string
 	host       string
 	port       int
 	username   string
@@ -26,6 +28,7 @@ type SFTPDestination struct {
 
 // SFTPDestOptions SFTP 参数
 type SFTPDestOptions struct {
+	HostKey    string
 	Host       string
 	Port       int
 	Username   string
@@ -46,6 +49,7 @@ func NewSFTPDestination(opts SFTPDestOptions) *SFTPDestination {
 	}
 	return &SFTPDestination{
 		host:       opts.Host,
+		hostKey:    opts.HostKey,
 		port:       port,
 		username:   opts.Username,
 		password:   opts.Password,
@@ -55,6 +59,9 @@ func NewSFTPDestination(opts SFTPDestOptions) *SFTPDestination {
 }
 
 func (s *SFTPDestination) connect() (*ssh.Client, *sftp.Client, error) {
+	if err := s.Validate(context.Background()); err != nil {
+		return nil, nil, err
+	}
 	var authMethods []ssh.AuthMethod
 	if s.password != "" {
 		authMethods = append(authMethods, ssh.Password(s.password))
@@ -70,10 +77,15 @@ func (s *SFTPDestination) connect() (*ssh.Client, *sftp.Client, error) {
 	}
 
 	cfg := &ssh.ClientConfig{
-		User:            s.username,
-		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // 可根据需要配置已知 hostkey
-		Timeout:         10 * time.Second,
+		User: s.username,
+		Auth: authMethods,
+		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			if subtle.ConstantTimeCompare([]byte(ssh.FingerprintSHA256(key)), []byte(s.hostKey)) != 1 {
+				return errors.New("SFTP 主机指纹不匹配")
+			}
+			return nil
+		},
+		Timeout: 10 * time.Second,
 	}
 
 	addr := net.JoinHostPort(s.host, fmt.Sprintf("%d", s.port))
@@ -92,6 +104,9 @@ func (s *SFTPDestination) connect() (*ssh.Client, *sftp.Client, error) {
 }
 
 func (s *SFTPDestination) Validate(_ context.Context) error {
+	if !strings.HasPrefix(s.hostKey, "SHA256:") || len(s.hostKey) != 50 {
+		return errors.New("必须配置可信的 SFTP SHA256 主机指纹")
+	}
 	if s.host == "" {
 		return errors.New("SFTP Host 不能为空")
 	}

@@ -76,14 +76,7 @@ func (d Deps) resolveScope(ctx context.Context, sess *auth.Session, perm string)
 		grants = toAuthzGrants(gs)
 	}
 	scope := authz.Resolve(grants, perm)
-	if scope == authz.ScopeNONE && authz.Allowed(grants, perm) {
-		for _, g := range grants {
-			if g.Name == "*" {
-				return authz.ScopeALL
-			}
-		}
-		return authz.ScopeOWN
-	}
+
 	return scope
 }
 

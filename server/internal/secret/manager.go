@@ -5,7 +5,9 @@ package secret
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"github.com/ai-employee-platform/server/internal/statepg"
 	"sync"
 	"time"
 )
@@ -13,7 +15,7 @@ import (
 // 扩展错误。
 var (
 	ErrResolveFailed = errors.New("Secret 解析失败")
-	ErrNotBound     = errors.New("Employee 未绑定该 Secret")
+	ErrNotBound      = errors.New("Employee 未绑定该 Secret")
 )
 
 // Meta 可安全返回 Admin 的元数据（无明文）。
@@ -60,11 +62,12 @@ type BindingStore interface {
 
 // Manager SecretManager：引用模型 + 受控解析 + Audit。
 type Manager struct {
-	store Store
-	bind  BindingStore
-	audit Auditor
-	meta  map[string]*Meta // id → 元数据
-	mu    sync.RWMutex
+	store    Store
+	metadata *statepg.Collection
+	bind     BindingStore
+	audit    Auditor
+	meta     map[string]*Meta // id → 元数据
+	mu       sync.RWMutex
 }
 
 // NewManager 创建。
@@ -85,6 +88,11 @@ func (m *Manager) Put(ctx context.Context, name, plaintext, actorID, ip, desc st
 	meta := &Meta{
 		ID: ref.ID, Name: name, Description: desc,
 		Masked: "***", CreatedAt: now, CreatedBy: actorID,
+	}
+	if m.metadata != nil {
+		if err := m.metadata.Put(ctx, meta.ID, meta); err != nil {
+			return Meta{}, err
+		}
 	}
 	m.mu.Lock()
 	m.meta[ref.ID] = meta
@@ -122,6 +130,11 @@ func (m *Manager) Rotate(ctx context.Context, id, newPlaintext, actorID, ip stri
 	meta.RotatedAt = time.Now().UTC()
 	cp := *meta
 	m.mu.Unlock()
+	if m.metadata != nil {
+		if err := m.metadata.Put(ctx, cp.ID, cp); err != nil {
+			return Meta{}, err
+		}
+	}
 	if m.audit != nil {
 		m.audit.Log(ctx, "USER", actorID, "secret.rotate", "success", ip, map[string]string{
 			"secret_id": id, "name": old.Name, "value": Redact(newPlaintext),
@@ -259,6 +272,11 @@ func (m *Manager) Delete(ctx context.Context, id, actorID, ip string) error {
 	m.mu.Lock()
 	delete(m.meta, id)
 	m.mu.Unlock()
+	if m.metadata != nil {
+		if err := m.metadata.Delete(ctx, id); err != nil {
+			return err
+		}
+	}
 	if m.audit != nil {
 		m.audit.Log(ctx, "USER", actorID, "secret.delete", "success", ip, map[string]string{"secret_id": id})
 	}
@@ -328,4 +346,22 @@ func (m *MemoryBindings) List(_ context.Context) ([]*Binding, error) {
 		out = append(out, &cp)
 	}
 	return out, nil
+}
+
+func (m *Manager) SetMetadataStore(ctx context.Context, data *statepg.Collection) error {
+	all, err := data.All(ctx)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, b := range all {
+		var v Meta
+		if err = json.Unmarshal(b, &v); err != nil {
+			return err
+		}
+		m.meta[v.ID] = &v
+	}
+	m.metadata = data
+	return nil
 }

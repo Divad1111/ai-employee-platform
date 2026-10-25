@@ -15,7 +15,7 @@
 ## PVE 与主机接入
 
 1. 在 PVE 创建专用 API 用户及 Token，并授予实际使用的节点、资源池、模板、存储与虚拟机权限。列表读取、克隆、资源配置、磁盘扩容、Cloud-init、Guest Agent、启动关机分别需要相应权限；以所用 PVE 版本 API 权限说明为准。
-2. 在「PVE 管理 → 管理凭证」保存 PVE Token，格式为 `user@realm!tokenid=secret`。系统以 `infra.pve.*` 名称加密保存，不复用飞书或 TOTP 等系统凭证。
+2. 在「PVE 管理 → 管理凭证」保存 PVE Token，格式为 `user@realm!tokenid=secret`。系统以 `infra.pve.*` 名称加密保存。也支持直接引用保险箱中以 `user@realm!tokenid` 命名的已有凭证，值可为 Secret 或完整的 `user@realm!tokenid=secret`；下拉框只返回名称、类型和引用 ID。不会复用飞书或 TOTP 等系统凭证。
 3. 添加 PVE HTTPS 地址并关联 Token。私有证书需要填写可信 CA 的 PEM；程序不会关闭 TLS 验证。同步后显示节点及 QEMU 虚拟机，LXC 容器不在本版部署范围。
 4. 从现有 Linux Cloud-init 模板克隆，设置 VMID、节点、CPU、内存、存储、网桥、网络、用户和公钥。磁盘可选择扩容，根磁盘设备须与模板一致，例如 `scsi0`；磁盘大小为 0 时沿用模板。模板必须准备 Cloud-init 驱动盘，并在首次启动重新生成客体 SSH 主机密钥。
 5. 模板内安装并启用 QEMU Guest Agent 后，可在详情读取 IP；没有 Agent 时手动填写 SSH 地址。创建时可选择后续安装的软件。虚拟机创建成功后，任务会等待管理员填写 SSH 配置并核对主机指纹，再继续安装。
@@ -84,7 +84,7 @@ Codex 软件安装与账号认证分开记录。可在详情选择保险箱 API 
 - 若克隆请求已在 PVE 成功、但平台未能保存成功标记，重试会拒绝接管现有 VMID。请先在 PVE 核实，随后同步并从已有主机详情继续部署，避免误覆盖资源。
 - 新权限为 `infra.read/manage/deploy/console/credential`，所有入口要求 `ALL` 范围。默认只给 ADMIN 和 SUPER_ADMIN，不扩展普通用户的本人范围权限。
 - 创建/部署/回滚、SSH、凭证写入和明文查看、策略保存要求二次认证。开启自动部署还要求 `infra.deploy`，不能仅凭管理策略权限获得远程执行能力。
-- 凭证列表脱敏，明文查看单独审计；UI 30 秒后隐藏已查看内容。只允许访问 `infra.*` 专用凭证，不能借新接口读取 TOTP 或其他系统凭证。
+- 凭证列表脱敏，明文查看单独审计；UI 30 秒后隐藏已查看内容。只允许访问基础设施专用凭证和以 PVE Token ID 命名的已有 PVE 凭证，不能借新接口读取 TOTP 或其他系统凭证。已有 PVE 凭证不能用于 SSH 或软件下载。
 
 ## 验收路径
 

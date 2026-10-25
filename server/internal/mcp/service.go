@@ -273,6 +273,31 @@ type BindEmployeeInput struct {
 	Config       map[string]any `json:"config"`
 }
 
+// CredentialForOwner prevents cross-user secret injection, including legacy bindings.
+func (s *Service) CredentialForOwner(ctx context.Context, id, owner string) error {
+	if id == "" {
+		return nil
+	}
+	c, err := s.store.GetCredential(ctx, id)
+	if err != nil {
+		return err
+	}
+	if owner == "" || c == nil {
+		return errors.New("无权使用该凭证")
+	}
+	if c.OwnerType == OwnerTypeUser && c.OwnerID == owner {
+		return nil
+	}
+	if c.OwnerType != OwnerTypeUser && c.CreatedBy == owner {
+		return nil
+	}
+	return errors.New("无权使用其他用户的凭证")
+}
+
+func (s *Service) GetBinding(ctx context.Context, id string) (*EmployeeMCPBinding, error) {
+	return s.store.GetBinding(ctx, id)
+}
+
 func (s *Service) ListBindingsByEmployee(ctx context.Context, employeeID string) ([]*EmployeeMCPBinding, error) {
 	return s.store.ListBindingsByEmployee(ctx, employeeID)
 }

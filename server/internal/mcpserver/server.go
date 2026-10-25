@@ -15,10 +15,11 @@ import (
 
 // Caller 当前调用方身份。
 type Caller struct {
-	Kind       string // employee | user | admin_session
-	SubjectID  string
-	Scope      string // READ | ADMIN
-	CanWrite   bool
+	Kind          string // employee | user | admin_session
+	SubjectID     string
+	Scope         string // READ | ADMIN
+	CanWrite      bool
+	CanDelete     bool
 	EmployeeScope *workflowmcp.Scope // employee 时非空
 }
 
@@ -91,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 		}
 		ctx := WithCaller(r.Context(), caller)
 
+		r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
 		var req rpcRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeRPC(w, rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: -32700, Message: "parse error"}})
@@ -128,17 +130,35 @@ func (s *Server) authenticate(r *http.Request) (*Caller, error) {
 		if t.SubjectType == mcpauth.SubjectEmployee {
 			c.Kind = "employee"
 			c.CanWrite = false
+			if s.WF == nil {
+				return nil, fmt.Errorf("员工授权范围不可用")
+			}
 			if s.WF != nil {
-				scope, _ := s.WF.ResolveScope(r.Context(), t.SubjectID)
+				scope, err := s.WF.ResolveScope(r.Context(), t.SubjectID)
+				if err != nil || scope == nil {
+					return nil, fmt.Errorf("员工授权范围不可用")
+				}
 				c.EmployeeScope = scope
 			}
 		} else {
 			c.Kind = "user"
-			c.CanWrite = t.Scope == mcpauth.ScopeAdmin
-			if s.Auth != nil {
-				// 用用户角色再验一次写权限
-				// 简化：ADMIN scope 即可写
+			if s.Auth == nil {
+				return nil, fmt.Errorf("用户授权不可用")
 			}
+			u, err := s.Auth.Users().FindByID(r.Context(), t.SubjectID)
+			if err != nil || u == nil || u.Status != auth.StatusActive {
+				return nil, auth.ErrUnauthorized
+			}
+			session := &auth.Session{UserID: u.ID, Username: u.Username, Roles: u.Roles}
+			if s.Auth.Authorize(r.Context(), session, "workflow.read") != nil {
+				return nil, auth.ErrForbidden
+			}
+			if s.Auth.EnforceAdminMFA && auth.AdminRoles(u.Roles) {
+				return nil, fmt.Errorf("管理员请使用已完成双因子验证的 Web 会话")
+			}
+			c.CanWrite = t.Scope == mcpauth.ScopeAdmin && s.Auth.AuthorizeAll(r.Context(), session, "workflow.write") == nil
+			c.CanDelete = t.Scope == mcpauth.ScopeAdmin && s.Auth.AuthorizeAll(r.Context(), session, "workflow.delete") == nil
+
 		}
 		return c, nil
 	}
@@ -150,10 +170,13 @@ func (s *Server) authenticate(r *http.Request) (*Caller, error) {
 	if err != nil {
 		return nil, err
 	}
-	canWrite := s.Auth.Authorize(r.Context(), sess, "workflow.write") == nil
+	if s.Auth.Authorize(r.Context(), sess, "workflow.read") != nil {
+		return nil, auth.ErrForbidden
+	}
+	canWrite := s.Auth.AuthorizeAll(r.Context(), sess, "workflow.write") == nil
 	return &Caller{
 		Kind: "admin_session", SubjectID: sess.UserID,
-		Scope: mcpauth.ScopeAdmin, CanWrite: canWrite,
+		Scope: mcpauth.ScopeAdmin, CanWrite: canWrite, CanDelete: s.Auth.AuthorizeAll(r.Context(), sess, "workflow.delete") == nil,
 	}, nil
 }
 

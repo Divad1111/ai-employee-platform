@@ -59,9 +59,14 @@ func (db *DB) ensureHelperTables() error {
 		username      TEXT NOT NULL,
 		roles         TEXT[] NOT NULL DEFAULT '{}',
 		expires_at    TIMESTAMPTZ NOT NULL,
-		step_up_until TIMESTAMPTZ
-	);
-	`
+		step_up_until TIMESTAMPTZ,
+ credential_version TEXT NOT NULL DEFAULT '',
+ mfa_authenticated BOOLEAN NOT NULL DEFAULT FALSE
+    );
+    ALTER TABLE admin_web_sessions ADD COLUMN IF NOT EXISTS credential_version TEXT NOT NULL DEFAULT '';
+    ALTER TABLE admin_web_sessions ADD COLUMN IF NOT EXISTS mfa_authenticated BOOLEAN NOT NULL DEFAULT FALSE;
+    DELETE FROM admin_web_sessions WHERE token NOT LIKE 'sha256:%';
+    `
 	if _, err := db.SQL.Exec(schema); err != nil {
 		return err
 	}
@@ -77,15 +82,7 @@ func (db *DB) ensureHelperTables() error {
 		ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description;
 	`)
 
-	// 确保 USER 角色赋权全量 permissions 且 Scope 为 OWN
-	_, _ = db.SQL.Exec(`
-		INSERT INTO role_permissions (role_id, permission_id, scope)
-		SELECT r.id, p.id, 'OWN'
-		FROM roles r
-		CROSS JOIN permissions p
-		WHERE r.name = 'USER'
-		ON CONFLICT (role_id, permission_id) DO UPDATE SET scope = 'OWN';
-	`)
+	// Role seeds are migration-only; never overwrite administrator decisions at startup.
 
 	// 公用工作站与按角色授权（兼容尚未执行 goose 的环境）
 	_, _ = db.SQL.Exec(`ALTER TABLE workstations ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT FALSE`)

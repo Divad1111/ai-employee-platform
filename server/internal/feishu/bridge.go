@@ -29,6 +29,7 @@ type WorkspaceResolver interface {
 
 // Bridge 将飞书接入接到 Employee/Job/Message/Scheduler/Notification。
 type Bridge struct {
+	AuthorizeUser func(context.Context, string) error
 	Employees     *employee.Service
 	Jobs          *job.Service
 	Messages      *message.Service
@@ -82,20 +83,34 @@ func (b *Bridge) CreateFromFeishu(ctx context.Context, employeeID, prompt, idemp
 }
 
 func (b *Bridge) CreateFromFeishuWithAttachments(ctx context.Context, employeeID, prompt, idempotencyKey, chatID, messageID, senderOpenID string, files []input.File) (string, error) {
+	if b.Feishu == nil || !b.Feishu.EmployeeHasOpenID(employeeID, senderOpenID) || b.Feishu.BindingByEmployee(employeeID) == nil || !b.Feishu.BindingByEmployee(employeeID).Verified {
+		return "", errors.New("无权使用该数字员工")
+	}
+
+	e, err := b.Employees.Get(ctx, employeeID)
+	if err != nil {
+		return "", err
+	}
+	binding := b.Feishu.BindingByEmployee(employeeID)
+	if binding == nil || binding.OwnerUserID != e.OwnerUserID {
+		return "", errors.New("员工归属已变更，请重新确认飞书绑定")
+	}
+	userID := b.feishuUserID(ctx, senderOpenID, e)
+	if userID == "" {
+		return "", errors.New("该飞书账号未绑定平台用户，无法计入配额")
+	}
+	if b.AuthorizeUser == nil {
+		return "", errors.New("用户授权不可用")
+	}
+	if err := b.AuthorizeUser(ctx, userID); err != nil {
+		return "", err
+	}
 	_, _ = b.Messages.Send(ctx, message.SendInput{
 		SenderType: message.TypeUser, SenderID: "feishu:" + messageID,
 		ReceiverType: message.TypeEmployee, ReceiverID: employeeID,
 		Content: prompt,
 	}, "feishu", "")
 
-	e, err := b.Employees.Get(ctx, employeeID)
-	if err != nil {
-		return "", err
-	}
-	userID := b.feishuUserID(ctx, senderOpenID, e)
-	if userID == "" {
-		return "", errors.New("该飞书账号未绑定平台用户，无法计入配额")
-	}
 	if b.Quota != nil {
 		var roles []string
 		if b.Roles != nil {
@@ -171,18 +186,7 @@ func (b *Bridge) feishuUserID(ctx context.Context, senderOpenID string, target *
 	if target != nil && target.OwnerUserID != "" && b.Feishu.EmployeeHasOpenID(target.ID, senderOpenID) {
 		return target.OwnerUserID
 	}
-	boundEmp := b.Feishu.EmployeeByOpenID(senderOpenID)
-	if boundEmp == "" {
-		return ""
-	}
-	if target != nil && target.ID == boundEmp && target.OwnerUserID != "" {
-		return target.OwnerUserID
-	}
-	e, err := b.Employees.Get(ctx, boundEmp)
-	if err != nil || e == nil {
-		return ""
-	}
-	return e.OwnerUserID
+	return ""
 }
 
 // Wire 把 Bridge 挂到 Feishu Service。
@@ -190,4 +194,18 @@ func (b *Bridge) Wire() {
 	b.Feishu.Employees = b
 	b.Feishu.Jobs = b
 	b.Feishu.Commands = b
+	b.Feishu.AuthorizeActor = func(ctx context.Context, id, actor string) error {
+		e, err := b.Employees.Get(ctx, id)
+		if err != nil || e == nil {
+			return ErrNoEmployee
+		}
+		binding := b.Feishu.BindingByEmployee(id)
+		if binding == nil || !binding.Verified || binding.OwnerUserID != e.OwnerUserID || binding.FeishuOpenID != actor {
+			return errors.New("飞书身份未绑定或员工归属已变更")
+		}
+		if b.AuthorizeUser == nil {
+			return errors.New("平台用户授权不可用")
+		}
+		return b.AuthorizeUser(ctx, e.OwnerUserID)
+	}
 }

@@ -50,6 +50,9 @@ func (s *Service) AddRelease(ctx context.Context, r Release, src io.Reader) (Rel
 		return r, err
 	}
 	if src == nil {
+		if err := verifyReleaseSignature(r); err != nil {
+			return r, err
+		}
 		if err := validateURL(r.URL, true); err != nil {
 			return r, err
 		}
@@ -125,6 +128,9 @@ func (s *Service) cache(ctx context.Context, r *Release, src io.Reader) error {
 }
 
 func (s *Service) download(ctx context.Context, raw, secretID, actor string) (*http.Response, error) {
+	if err := allowedSoftwareURL(raw); err != nil {
+		return nil, err
+	}
 	if err := validateURL(raw, true); err != nil {
 		return nil, err
 	}
@@ -145,6 +151,9 @@ func (s *Service) download(ctx context.Context, raw, secretID, actor string) (*h
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	client := &http.Client{Timeout: 5 * time.Minute, Transport: s.downloadTransport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if err := allowedSoftwareURL(req.URL.String()); err != nil {
+			return err
+		}
 		if len(via) > 5 || req.URL.Scheme != "https" {
 			return fmt.Errorf("下载重定向无效")
 		}
@@ -172,6 +181,11 @@ func (s *Service) CachedPackage(ctx context.Context, id, actor string) (Release,
 	r, err := load[Release](ctx, s.Store, "release", id)
 	if err != nil {
 		return r, nil, err
+	}
+	if r.URL != "" {
+		if err := verifyReleaseSignature(r); err != nil {
+			return r, nil, err
+		}
 	}
 	if !r.Cached {
 		sw, err := load[Software](ctx, s.Store, "software", r.SoftwareID)
@@ -393,6 +407,9 @@ func (s *Service) checkSource(ctx context.Context, sw Software, actor string) ([
 		}
 		if found {
 			continue
+		}
+		if err := verifyReleaseSignature(r); err != nil {
+			return nil, err
 		}
 		if err := validateRelease(r); err != nil {
 			return nil, err

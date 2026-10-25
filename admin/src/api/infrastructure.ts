@@ -67,6 +67,7 @@ export type Release = {
   entry?: string
   url?: string
   sha256: string
+  signature?: string
   size: number
   cached: boolean
   notes?: string
@@ -142,7 +143,7 @@ export type Operation = {
   created_at: string
   updated_at: string
 }
-export type Credential = { id: string; name: string }
+export type Credential = { id: string; name: string; kind: 'pve' | 'ssh' | 'api' }
 export type Infrastructure = {
   clusters: Cluster[]
   hosts: Host[]

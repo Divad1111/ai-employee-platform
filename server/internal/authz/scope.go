@@ -68,10 +68,7 @@ func GrantsFrom(ctx context.Context) []Grant {
 func Resolve(grants []Grant, need string) Scope {
 	best := ScopeNONE
 	for _, g := range grants {
-		if g.Name == "*" {
-			return ScopeALL
-		}
-		if g.Name != need {
+		if g.Name != "*" && g.Name != need {
 			continue
 		}
 		best = wider(best, g.Scope)
@@ -101,7 +98,7 @@ func wider(a, b Scope) Scope {
 // Allowed 是否具备权限码（Scope≠NONE 或存在该码）。
 func Allowed(grants []Grant, need string) bool {
 	s := Resolve(grants, need)
-	return s != ScopeNONE || hasCode(grants, need) || hasCode(grants, "*")
+	return s != ScopeNONE
 }
 
 func hasCode(grants []Grant, need string) bool {

@@ -45,14 +45,25 @@ export function PVEPage() {
   const [credentials, setCredentials] = useState<Credential[]>([])
   const [filter, setFilter] = useState('')
   const [creating, setCreating] = useState<VMCreate | null>(null)
+  const connectionOpen = editing !== null
+  const canCredentials = canAll('infra.credential')
   const canManage = canAll('infra.manage')
   const canDeploy = canAll('infra.deploy')
   useEffect(() => {
-    if (canAll('infra.credential'))
+    let current = true
+    if (canCredentials)
       void listCredentials()
-        .then((v) => setCredentials(v.items))
-        .catch((e) => setError(errorText(e)))
-  }, [credentialsOpen, canAll, setError])
+        .then((v) => {
+          if (current) setCredentials(v.items)
+        })
+        .catch((e) => {
+          if (current) setError(errorText(e))
+        })
+    else setCredentials([])
+    return () => {
+      current = false
+    }
+  }, [credentialsOpen, connectionOpen, canCredentials, setError])
   if (!allowed) return <p>需要基础设施查看权限，且权限范围为全部资源。</p>
   const hosts = data.hosts.filter(
     (v) =>
@@ -340,9 +351,11 @@ export function PVEPage() {
                   setEditing({ ...editing, secret_id: e.target.value })
                 }
               >
-                <option value="">选择凭证</option>
+                <option value="">
+                  {canCredentials ? '选择凭证' : '需要基础设施凭证权限'}
+                </option>
                 {credentials
-                  .filter((v) => v.name.startsWith('infra.pve.'))
+                  .filter((v) => v.kind === 'pve')
                   .map((v) => (
                     <option value={v.id} key={v.id}>
                       {v.name}
@@ -350,6 +363,9 @@ export function PVEPage() {
                   ))}
               </select>
             </Field>
+            {canCredentials && !credentials.some((v) => v.kind === 'pve') && (
+              <p>尚无 PVE 凭证。可在“管理凭证”中新增，或在保险箱以 user@realm!tokenid 命名保存。</p>
+            )}
             <Field wide label="私有 CA 证书 PEM（使用公共证书时留空）">
               <textarea
                 value={editing.ca_pem}

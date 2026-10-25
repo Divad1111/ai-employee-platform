@@ -66,14 +66,14 @@ type Profile struct {
 
 // Request 决策输入。
 type Request struct {
-	ActorType   string            `json:"actor_type"` // EMPLOYEE / USER / SYSTEM
-	ActorID     string            `json:"actor_id"`
-	Action      string            `json:"action"`
-	TargetType  string            `json:"target_type"`
-	TargetID    string            `json:"target_id"`
-	ProfileID   string            `json:"profile_id"`
-	JobID       string            `json:"job_id"`
-	Context     map[string]string `json:"context"`
+	ActorType  string            `json:"actor_type"` // EMPLOYEE / USER / SYSTEM
+	ActorID    string            `json:"actor_id"`
+	Action     string            `json:"action"`
+	TargetType string            `json:"target_type"`
+	TargetID   string            `json:"target_id"`
+	ProfileID  string            `json:"profile_id"`
+	JobID      string            `json:"job_id"`
+	Context    map[string]string `json:"context"`
 }
 
 // Decision 决策输出。
@@ -104,10 +104,10 @@ type Store interface {
 
 // Engine 决策引擎。
 type Engine struct {
-	store       Store
-	audit       Auditor
-	auditAllow  bool // true=全量审计 ALLOW；false=仅 ASK/DENY
-	mu          sync.RWMutex
+	store      Store
+	audit      Auditor
+	auditAllow bool // true=全量审计 ALLOW；false=仅 ASK/DENY
+	mu         sync.RWMutex
 }
 
 // NewEngine 创建引擎。
@@ -168,6 +168,11 @@ func (e *Engine) ExportRules(ctx context.Context, profileID string) ([]*Rule, er
 // EnsureDefault 写入 §29 默认 Profile（内存/启动）。
 func EnsureDefault(store Store) error {
 	ctx := context.Background()
+	if _, err := store.GetProfile(ctx, "default"); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrProfileNotFound) {
+		return err
+	}
 	now := time.Now().UTC()
 	p := &Profile{
 		ID: "default", Name: "Default", Description: "V2 默认权限配置",

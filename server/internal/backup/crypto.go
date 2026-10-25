@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 var (
@@ -25,27 +26,36 @@ const (
 
 // CryptoManager 提供凭证加解密与备份包流式加解密
 type CryptoManager struct {
+	previous  []byte
 	masterKey []byte
+	initErr   error
 }
 
 // NewCryptoManager 初始化加密管理器
 func NewCryptoManager(keyStr string) *CryptoManager {
 	if keyStr == "" {
-		keyStr = os.Getenv("AIE_MASTER_KEY")
-	}
-	if keyStr == "" {
 		keyStr = os.Getenv("AIE_BACKUP_MASTER_KEY")
 	}
 	if keyStr == "" {
-		// 缺省使用系统安全固化种子派生（保障单机环境可开箱即用，生产环境推荐环境变量注入）
-		keyStr = "ai-employee-platform-default-master-key-v1"
+		keyStr = os.Getenv("AIE_MASTER_KEY")
+	}
+	if keyStr == "" || keyStr == "ai-employee-platform-default-master-key-v1" || (strings.EqualFold(os.Getenv("AIE_ENV"), "production") && len(keyStr) < 32) {
+		return &CryptoManager{initErr: errors.New("备份主密钥未配置或不安全，请先完成密钥迁移")}
 	}
 	h := sha256.Sum256([]byte(keyStr))
-	return &CryptoManager{masterKey: h[:]}
+	manager := &CryptoManager{masterKey: h[:]}
+	if previous := os.Getenv("AIE_BACKUP_PREVIOUS_KEY"); previous != "" {
+		old := sha256.Sum256([]byte(previous))
+		manager.previous = old[:]
+	}
+	return manager
 }
 
 // EncryptText 使用 AES-256-GCM 加密短文本（如 Destination 凭证）
 func (c *CryptoManager) EncryptText(plaintext string) (string, error) {
+	if c.initErr != nil {
+		return "", c.initErr
+	}
 	if plaintext == "" {
 		return "", nil
 	}
@@ -67,6 +77,9 @@ func (c *CryptoManager) EncryptText(plaintext string) (string, error) {
 
 // DecryptText 解密短文本
 func (c *CryptoManager) DecryptText(ciphertextBase64 string) (string, error) {
+	if c.initErr != nil {
+		return "", c.initErr
+	}
 	if ciphertextBase64 == "" {
 		return "", nil
 	}
@@ -98,6 +111,9 @@ func (c *CryptoManager) DecryptText(ciphertextBase64 string) (string, error) {
 // 若 enabled 为 false，则直接将明文流写入目标（满足用户关于支持不加密备份的要求）。
 // 若 enabled 为 true，则写入文件头 [AIEBKP01][KeyVersion 4B][Nonce 12B]，后跟 AES-GCM 密文。
 func (c *CryptoManager) EncryptArtifact(w io.Writer, r io.Reader, enabled bool, keyVersion int) (int64, error) {
+	if c.initErr != nil {
+		return 0, c.initErr
+	}
 	if !enabled {
 		// 不加密：直接直通复制
 		return io.Copy(w, r)
@@ -132,7 +148,7 @@ func (c *CryptoManager) EncryptArtifact(w io.Writer, r io.Reader, enabled bool, 
 	}
 
 	// 读取全部输入并加密（Center Server 单机快照通常在数十 MB 到数 GB 之间）
-	plainData, err := io.ReadAll(r)
+	plainData, err := readBounded(r, MaxArtifactBytes-64)
 	if err != nil {
 		return 0, fmt.Errorf("读取快照明文流失败: %w", err)
 	}
@@ -150,6 +166,9 @@ func (c *CryptoManager) EncryptArtifact(w io.Writer, r io.Reader, enabled bool, 
 // DecryptArtifact 将备份包解密写入输出。
 // 如果算法为 NONE 或数据不包含魔数，则作为明文流复制。
 func (c *CryptoManager) DecryptArtifact(w io.Writer, r io.Reader, algorithm string) error {
+	if c.initErr != nil {
+		return c.initErr
+	}
 	if algorithm == EncryptNone || algorithm == "" {
 		_, err := io.Copy(w, r)
 		return err
@@ -187,12 +206,23 @@ func (c *CryptoManager) DecryptArtifact(w io.Writer, r io.Reader, algorithm stri
 		return fmt.Errorf("读取 Nonce 失败: %w", err)
 	}
 
-	cipherData, err := io.ReadAll(r)
+	cipherData, err := readBounded(r, MaxArtifactBytes)
 	if err != nil {
 		return fmt.Errorf("读取密文流失败: %w", err)
 	}
 
 	plainData, err := gcm.Open(nil, nonce, cipherData, []byte(ArtifactMagic))
+	if err != nil && binary.BigEndian.Uint32(verBuf[:]) <= 1 && len(c.previous) > 0 {
+		oldBlock, oldErr := aes.NewCipher(c.previous)
+		if oldErr != nil {
+			return oldErr
+		}
+		oldGCM, oldErr := cipher.NewGCM(oldBlock)
+		if oldErr != nil {
+			return oldErr
+		}
+		plainData, err = oldGCM.Open(nil, nonce, cipherData, []byte(ArtifactMagic))
+	}
 	if err != nil {
 		return ErrDecryptionFailed
 	}

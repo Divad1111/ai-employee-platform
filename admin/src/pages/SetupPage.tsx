@@ -34,6 +34,7 @@ export function SetupPage() {
   const [systemName, setSystemName] = useState('AI Employee Platform')
   const [username, setUsername] = useState('admin')
   const [displayName, setDisplayName] = useState('系统超级管理员')
+  const [setupToken, setSetupToken] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
 
@@ -92,6 +93,7 @@ export function SetupPage() {
     setSubmitting(true)
     try {
       const res = await apiPost<SetupInitResp>('/setup/init', {
+        setup_token: setupToken.trim(),
         username: username.trim(),
         password,
         display_name: displayName.trim() || '系统管理员',
@@ -184,6 +186,10 @@ export function SetupPage() {
           此向导仅在空库初次部署时开放一次，创建成功后将永久关闭该接口以保障平台安全。
         </div>
 
+        <label style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+          部署初始化密钥
+          <input type="password" value={setupToken} onChange={e => setSetupToken(e.target.value)} autoComplete="off" placeholder="部署时配置的 AIE_SETUP_TOKEN" />
+        </label>
         <label style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
           <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#334155' }}>
             平台/实例名称

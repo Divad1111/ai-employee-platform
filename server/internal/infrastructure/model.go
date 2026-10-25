@@ -94,6 +94,7 @@ type Release struct {
 	Entry      string    `json:"entry,omitempty"`
 	URL        string    `json:"url,omitempty"`
 	SHA256     string    `json:"sha256"`
+	Signature  string    `json:"signature,omitempty"`
 	Size       int64     `json:"size"`
 	Cached     bool      `json:"cached"`
 	Notes      string    `json:"notes,omitempty"`

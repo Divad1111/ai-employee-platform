@@ -49,14 +49,14 @@ type Record struct {
 
 // Authority 简易 CA。
 type Authority struct {
-	mu       sync.RWMutex
-	caKey    *ecdsa.PrivateKey
-	caCert   *x509.Certificate
+	mu        sync.RWMutex
+	caKey     *ecdsa.PrivateKey
+	caCert    *x509.Certificate
 	caCertPEM []byte
 	caKeyPEM  []byte
-	byFP     map[string]*Record
-	byWS     map[string]string // workstation -> fingerprint
-	store    CertificateStore
+	byFP      map[string]*Record
+	byWS      map[string]string // workstation -> fingerprint
+	store     CertificateStore
 }
 
 // NewDevAuthority 生成开发用自签 CA。
@@ -276,28 +276,43 @@ func (a *Authority) SignCSR(workstationID string, csrPEM []byte, validDays int) 
 	st := a.store
 	a.mu.Unlock()
 	if st != nil {
-		_ = st.SaveRecord(context.Background(), rec)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := st.SaveRecord(ctx, rec)
+		cancel()
+		if err != nil {
+			a.mu.Lock()
+			delete(a.byFP, fp)
+			if a.byWS[workstationID] == fp {
+				delete(a.byWS, workstationID)
+			}
+			a.mu.Unlock()
+			return nil, err
+		}
 	}
 	return rec, nil
 }
 
 // SetStore 设置证书持久化存储，并从存储中预加载已有证书记录。
-func (a *Authority) SetStore(store CertificateStore) {
+func (a *Authority) SetStore(store CertificateStore) error {
+	if store == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	records, err := store.ListRecords(ctx)
+	if err != nil {
+		return err
+	}
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.store = store
-	a.mu.Unlock()
-	if store != nil {
-		if records, err := store.ListRecords(context.Background()); err == nil {
-			a.mu.Lock()
-			for _, r := range records {
-				a.byFP[r.Fingerprint] = r
-				if r.Status != "REVOKED" || a.byWS[r.WorkstationID] == "" {
-					a.byWS[r.WorkstationID] = r.Fingerprint
-				}
-			}
-			a.mu.Unlock()
+	for _, record := range records {
+		a.byFP[record.Fingerprint] = record
+		if previous := a.byFP[a.byWS[record.WorkstationID]]; previous == nil || record.IssuedAt.After(previous.IssuedAt) {
+			a.byWS[record.WorkstationID] = record.Fingerprint
 		}
 	}
+	return nil
 }
 
 // Revoke 吊销证书。
@@ -313,7 +328,9 @@ func (a *Authority) Revoke(fingerprint string) error {
 	st := a.store
 	a.mu.Unlock()
 	if st != nil {
-		_ = st.SaveRecord(context.Background(), rec)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return st.SaveRecord(ctx, rec)
 	}
 	return nil
 }

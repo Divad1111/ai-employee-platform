@@ -34,8 +34,9 @@ export async function apiRequest<T>(
   if (!res.ok) {
     let msg = `${res.status}`
     try {
-      const err = (await res.json()) as { error?: string }
+      const err = (await res.json()) as { error?: string; needs_mfa_enrollment?: boolean }
       if (err.error) msg = err.error
+      if (err.needs_mfa_enrollment && window.location.pathname !== "/approvals") window.location.assign("/approvals")
     } catch {
       /* ignore */
     }

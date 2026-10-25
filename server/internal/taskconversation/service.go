@@ -479,6 +479,11 @@ func (s *Service) refreshCard(ctx context.Context, id string) error {
 	if c.ChatID == "" || s.Feishu == nil {
 		return nil
 	}
+	binding := s.Feishu.BindingByEmployee(c.EmployeeID)
+	if binding == nil || !binding.Verified || binding.OwnerUserID != c.OwnerUserID || s.Feishu.AuthorizeActor == nil || s.Feishu.AuthorizeActor(ctx, c.EmployeeID, c.OwnerOpenID) != nil {
+		s.trackActive(id, false)
+		return nil
+	}
 	s.trackActive(id, !isTerminal(c.Status))
 	messages, err := s.Store.Messages(ctx, id)
 	if err != nil {
@@ -540,6 +545,9 @@ func (s *Service) HandleCardAction(ctx context.Context, event *callback.CardActi
 	}
 	if operatorID == "" || operatorID != c.OwnerOpenID {
 		return taskToast("warning", "只有发起任务的用户可以操作这张卡片"), nil
+	}
+	if s.Feishu == nil || s.Feishu.AuthorizeActor == nil || s.Feishu.AuthorizeActor(ctx, c.EmployeeID, operatorID) != nil {
+		return taskToast("warning", "当前绑定未确认或账号无权操作"), nil
 	}
 	current, err := s.Jobs.Get(ctx, c.CurrentJobID)
 	if err != nil {

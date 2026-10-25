@@ -43,14 +43,30 @@ func New(store Store, mgr *secret.Manager, vault secret.Store, root string) *Ser
 
 func (s *Service) resolve(ctx context.Context, id, actor, purpose string) (string, error) {
 	ref, err := s.Vault.Ref(id)
-	if err != nil || !strings.HasPrefix(ref.Name, "infra.") {
+	if err != nil || credentialKind(ref.Name) == "" {
 		return "", fmt.Errorf("请选择基础设施专用的保险箱凭证")
 	}
-	return s.Secrets.Access(ctx, id, "USER", actor, "", purpose)
+	// Legacy PVE refs may be named by their Token ID in the shared vault.
+	// They must never be used as an SSH password or software-source key.
+	legacyPVE := pveTokenID.MatchString(ref.Name)
+	if legacyPVE && purpose != "pve.api" && purpose != "infra.credential.reveal" {
+		return "", fmt.Errorf("该凭证仅用于 PVE API")
+	}
+	value, err := s.Secrets.Access(ctx, id, "USER", actor, "", purpose)
+	if err != nil {
+		return "", err
+	}
+	if legacyPVE && purpose == "pve.api" {
+		value = strings.TrimSpace(value)
+		if !strings.HasPrefix(value, "PVEAPIToken=") && !strings.Contains(value, "!") {
+			value = ref.Name + "=" + value
+		}
+	}
+	return value, nil
 }
 func (s *Service) validateSecret(id, kind string) error {
 	ref, err := s.Vault.Ref(id)
-	if err != nil || !strings.HasPrefix(ref.Name, "infra."+kind+".") {
+	if err != nil || credentialKind(ref.Name) != kind {
 		return fmt.Errorf("请选择 %s 类型的基础设施凭证", kind)
 	}
 	return nil
@@ -339,11 +355,32 @@ func (s *Service) DeleteCluster(ctx context.Context, id string) error {
 	return s.Store.Delete(ctx, "cluster", id)
 }
 
-func (s *Service) Credentials() []secret.Ref {
-	out := []secret.Ref{}
+// Credential contains only a vault reference and its use, never a secret value.
+type Credential struct {
+	secret.Ref
+	Kind string `json:"kind"`
+}
+
+// PVE identities use user@realm!tokenid; a credential value is not a name.
+var pveTokenID = regexp.MustCompile(`^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$`)
+
+func credentialKind(name string) string {
+	for _, kind := range []string{"pve", "ssh", "api"} {
+		if strings.HasPrefix(name, "infra."+kind+".") {
+			return kind
+		}
+	}
+	if pveTokenID.MatchString(name) {
+		return "pve"
+	}
+	return ""
+}
+
+func (s *Service) Credentials() []Credential {
+	out := []Credential{}
 	for _, r := range s.Vault.List() {
-		if strings.HasPrefix(r.Name, "infra.") {
-			out = append(out, r)
+		if kind := credentialKind(r.Name); kind != "" {
+			out = append(out, Credential{Ref: r, Kind: kind})
 		}
 	}
 	return out

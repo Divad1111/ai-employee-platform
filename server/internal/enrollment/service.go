@@ -37,6 +37,7 @@ type Store interface {
 	Save(ctx context.Context, t *Token) error
 	FindByHash(ctx context.Context, hash string) (*Token, error)
 	MarkUsed(ctx context.Context, id string) error
+	Consume(ctx context.Context, hash, workstationID string) (*Token, error)
 }
 
 // Auditor 审计。
@@ -59,7 +60,10 @@ func NewService(store Store, ca *certca.Authority, audit Auditor) *Service {
 // CreateToken 签发一次性 token（明文仅返回一次）。
 func (s *Service) CreateToken(ctx context.Context, label, createdBy, ip string, ttl time.Duration, public bool, grantRoles []string) (plain string, meta *Token, err error) {
 	if ttl <= 0 {
-		ttl = 24 * time.Hour
+		ttl = 15 * time.Minute
+	}
+	if ttl > time.Hour {
+		return "", nil, errors.New("注册令牌有效期不能超过 1 小时")
 	}
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
@@ -87,7 +91,10 @@ func (s *Service) CreateToken(ctx context.Context, label, createdBy, ip string, 
 func (s *Service) Enroll(ctx context.Context, plainToken, workstationID string, csrPEM []byte, ip string) (caPEM, certPEM string, rec *certca.Record, tokenLabel, createdBy string, public bool, grantRoles []string, err error) {
 	sum := sha256.Sum256([]byte(plainToken))
 	hash := hex.EncodeToString(sum[:])
-	t, err := s.store.FindByHash(ctx, hash)
+	if workstationID == "" || len(workstationID) > 128 || s.ca.FindByWorkstation(workstationID) != nil {
+		return "", "", nil, "", "", false, nil, ErrTokenInvalid
+	}
+	t, err := s.store.Consume(ctx, hash, workstationID)
 	if err != nil || t == nil {
 		s.audit.Log(ctx, "WORKSTATION", workstationID, "enrollment.enroll", "failed_token", ip, nil)
 		return "", "", nil, "", "", false, nil, ErrTokenInvalid
@@ -103,7 +110,6 @@ func (s *Service) Enroll(ctx context.Context, plainToken, workstationID string, 
 		s.audit.Log(ctx, "WORKSTATION", workstationID, "enrollment.enroll", "failed_sign", ip, nil)
 		return "", "", nil, "", "", false, nil, err
 	}
-	_ = s.store.MarkUsed(ctx, t.ID)
 	s.audit.Log(ctx, "WORKSTATION", workstationID, "enrollment.enroll", "success", ip, map[string]string{"fingerprint": rec.Fingerprint})
 	roles := append([]string(nil), t.GrantRoles...)
 	return string(s.ca.CAPEM()), rec.CertPEM, rec, t.Label, t.CreatedBy, t.Public, roles, nil
@@ -156,4 +162,17 @@ func (m *MemoryStore) MarkUsed(_ context.Context, id string) error {
 		h.UsedAt = t.UsedAt
 	}
 	return nil
+}
+
+func (m *MemoryStore) Consume(_ context.Context, hash, workstationID string) (*Token, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t := m.byH[hash]
+	if t == nil || !t.UsedAt.IsZero() || !time.Now().Before(t.ExpiresAt) {
+		return nil, ErrTokenInvalid
+	}
+	cp := *t
+	cp.GrantRoles = append([]string(nil), t.GrantRoles...)
+	t.UsedAt = time.Now().UTC()
+	return &cp, nil
 }

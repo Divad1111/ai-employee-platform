@@ -49,7 +49,18 @@ type entry struct {
 
 // NewMemoryVault 创建。
 func NewMemoryVault() (*MemoryVault, error) {
-	key := deriveKey(os.Getenv("AIE_SECRET_MASTER_KEY"))
+	seed := os.Getenv("AIE_SECRET_MASTER_KEY")
+	if strings.EqualFold(os.Getenv("AIE_ENV"), "production") && (len(seed) < 32 || seed == "dev-only-aie-secret-master") {
+		return nil, errors.New("生产环境缺少有效的 Secret 主密钥")
+	}
+	if seed == "" {
+		random := make([]byte, 32)
+		if _, err := rand.Read(random); err != nil {
+			return nil, err
+		}
+		seed = base64.RawURLEncoding.EncodeToString(random)
+	}
+	key := deriveKey(seed)
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -62,9 +73,6 @@ func NewMemoryVault() (*MemoryVault, error) {
 }
 
 func deriveKey(seed string) []byte {
-	if seed == "" {
-		seed = "dev-only-aie-secret-master"
-	}
 	sum := sha256.Sum256([]byte(seed))
 	return sum[:]
 }

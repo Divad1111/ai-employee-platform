@@ -57,9 +57,10 @@ func (s *Service) GetDestination(destID string) (destination.BackupDestination, 
 	rawConfigJSON := d.ConfigEncrypted
 	if rawConfigJSON != "" {
 		decrypted, err := s.Crypto.DecryptText(rawConfigJSON)
-		if err == nil && decrypted != "" {
-			rawConfigJSON = decrypted
+		if err != nil || decrypted == "" {
+			return nil, fmt.Errorf("备份目标凭据解密失败，请核对密钥或执行迁移")
 		}
+		rawConfigJSON = decrypted
 	}
 
 	switch d.Type {
@@ -93,6 +94,7 @@ func (s *Service) GetDestination(destID string) (destination.BackupDestination, 
 		}
 		return destination.NewSFTPDestination(destination.SFTPDestOptions{
 			Host:       cfg.Host,
+			HostKey:    cfg.HostKey,
 			Port:       cfg.Port,
 			Username:   cfg.Username,
 			Password:   cfg.Password,
