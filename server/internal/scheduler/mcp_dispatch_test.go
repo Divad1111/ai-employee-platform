@@ -3,6 +3,8 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"github.com/ai-employee-platform/server/internal/audit"
+	"github.com/ai-employee-platform/server/internal/employee"
 	"testing"
 	"time"
 
@@ -17,7 +19,12 @@ func TestExternalMCPAuthenticationDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	mcpSvc := mcp.NewService(mcp.NewMemoryStore(), secret.NewManager(vault, secret.NewMemoryBindings(), nil))
-	s := &Service{MCP: mcpSvc}
+	employees := employee.NewService(employee.NewMemoryStore(), audit.NewMemory(), nil)
+	e, err := employees.Create(ctx, employee.CreateInput{Name: "test", OwnerUserID: "user"}, "user", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{MCP: mcpSvc, Employees: employees}
 	for _, tc := range []struct {
 		name, transport, authType string
 		metadata                  map[string]any
@@ -29,16 +36,16 @@ func TestExternalMCPAuthenticationDispatch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		cred, err := mcpSvc.CreateCredential(ctx, mcp.CreateCredentialInput{CredentialName: tc.name, AuthType: tc.authType, SecretValue: "test-key", Metadata: tc.metadata})
+		cred, err := mcpSvc.CreateCredential(ctx, mcp.CreateCredentialInput{OwnerType: "USER", OwnerID: "user", CredentialName: tc.name, AuthType: tc.authType, SecretValue: "test-key", Metadata: tc.metadata})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := mcpSvc.BindEmployee(ctx, "EMP", mcp.BindEmployeeInput{MCPServerID: srv.ID, CredentialID: cred.ID}); err != nil {
+		if _, err := mcpSvc.BindEmployee(ctx, e.ID, mcp.BindEmployeeInput{MCPServerID: srv.ID, CredentialID: cred.ID}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// 外部 MCP 配置不应依赖内置 workflow-mcp 已启用。
-	start, err := s.buildStartJobPayload(ctx, "EMP", "hello", "workspace", "path", "")
+	start, err := s.buildStartJobPayload(ctx, e.ID, "hello", "workspace", "path", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,15 +74,20 @@ func TestExpiredMCPPreventsDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	expiry := time.Now().Add(-time.Minute)
-	cred, err := mcpSvc.CreateCredential(ctx, mcp.CreateCredentialInput{CredentialName: "expired", ExpiresAt: &expiry})
+	cred, err := mcpSvc.CreateCredential(ctx, mcp.CreateCredentialInput{OwnerType: "USER", OwnerID: "user", CredentialName: "expired", ExpiresAt: &expiry})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mcpSvc.BindEmployee(ctx, "EMP", mcp.BindEmployeeInput{MCPServerID: srv.ID, CredentialID: cred.ID}); err != nil {
+	employees := employee.NewService(employee.NewMemoryStore(), audit.NewMemory(), nil)
+	e, err := employees.Create(ctx, employee.CreateInput{Name: "test", OwnerUserID: "user"}, "user", "")
+	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Service{MCP: mcpSvc}
-	start, err := s.buildStartJobPayload(ctx, "EMP", "hello", "workspace", "path", "")
+	s := &Service{MCP: mcpSvc, Employees: employees}
+	if _, err := mcpSvc.BindEmployee(ctx, e.ID, mcp.BindEmployeeInput{MCPServerID: srv.ID, CredentialID: cred.ID}); err != nil {
+		t.Fatal(err)
+	}
+	start, err := s.buildStartJobPayload(ctx, e.ID, "hello", "workspace", "path", "")
 	if !errors.Is(err, mcp.ErrCredentialExpired) || start != nil {
 		t.Fatalf("expected rejected dispatch, got %v", err)
 	}

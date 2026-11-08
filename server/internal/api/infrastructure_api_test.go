@@ -125,6 +125,7 @@ func TestInfraCredentialRevealRequiresStepUpAndCannotReadSystemSecrets(t *testin
 
 func TestInfraUploadDownloadAndDuplicateVersion(t *testing.T) {
 	f := setupInfrastructureAPI(t)
+	f.stepUp(t)
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	_ = writer.WriteField("metadata", `{"software_id":"aew","version":"1.0.0","os":"linux","arch":"amd64","format":"binary"}`)

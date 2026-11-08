@@ -183,6 +183,9 @@ func (s *Service) buildStartJobPayload(ctx context.Context, employeeID, prompt, 
 				}
 				// 注入已绑定的身份凭证（若有）
 				if b.CredentialID != "" {
+					if s.Employees == nil {
+						return nil, fmt.Errorf("员工身份不可用")
+					}
 					e, err := s.Employees.Get(ctx, employeeID)
 					if err != nil || e == nil {
 						return nil, fmt.Errorf("员工身份不可用")

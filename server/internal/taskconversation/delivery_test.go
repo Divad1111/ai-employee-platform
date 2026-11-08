@@ -30,6 +30,8 @@ func cardTestService(t *testing.T, transport cardRoundTripper) *Service {
 	vault, _ := secret.NewMemoryVault()
 	ref, _ := vault.Put("app-secret", "fake-secret")
 	fs := feishu.NewService(vault)
+	fs.AuthorizeActor = func(context.Context, string, string) error { return nil }
+	fs.UpsertBinding(feishu.Binding{EmployeeID: "EMP", FeishuAlias: "emp", OwnerUserID: "user", FeishuOpenID: "owner", Verified: true})
 	fs.Gateway = nil // No real Feishu connection or messages in this test.
 	fs.SetConfig(feishu.Config{AppID: t.Name(), AppSecretRef: ref.ID, Enabled: true})
 	fs.SetLarkClient(lark.NewClient(t.Name(), "fake-secret", lark.WithHttpClient(&http.Client{Transport: transport})))
@@ -43,7 +45,7 @@ func createCardTask(t *testing.T, s *Service, id, chat string) *Conversation {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &Conversation{ID: id, CurrentJobID: j.ID, EmployeeID: "EMP", ChatID: chat, Status: job.StatusRunning, CreatedAt: time.Now().Add(-time.Minute)}
+	c := &Conversation{ID: id, CurrentJobID: j.ID, EmployeeID: "EMP", OwnerUserID: "user", OwnerOpenID: "owner", ChatID: chat, Status: job.StatusRunning, CreatedAt: time.Now().Add(-time.Minute)}
 	if err := s.Store.CreateTask(context.Background(), c, "hello", 0); err != nil {
 		t.Fatal(err)
 	}

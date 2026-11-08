@@ -3,6 +3,7 @@ package automation
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ai-employee-platform/server/internal/idgen"
@@ -45,7 +47,10 @@ type Service struct {
 	Quota     *quota.Service
 	Roles     UserRoles
 
-	limiter *webhookLimiter
+	ClaimReplay func(context.Context, string, time.Duration) (bool, error)
+	replayMu    sync.Mutex
+	replays     map[string]time.Time
+	limiter     *webhookLimiter
 }
 
 // New 创建服务。
@@ -720,6 +725,8 @@ func (s *Service) HandleWebhook(ctx context.Context, pathToken string, r *http.R
 	}
 
 	authOK := false
+	replayIdentity := ""
+	replayTTL := 24 * time.Hour
 	if needHMAC {
 		sec := ""
 		if cfg.SecretRef != "" && s.Vault != nil {
@@ -729,6 +736,8 @@ func (s *Service) HandleWebhook(ctx context.Context, pathToken string, r *http.R
 		sig := r.Header.Get("X-AIE-Signature")
 		if err := verifyHMAC(sec, ts, sig, string(body), time.Now().UTC(), 5*time.Minute); err == nil {
 			authOK = true
+			replayIdentity = "hmac:" + ts + ":" + strings.ToLower(strings.TrimSpace(sig))
+			replayTTL = 11 * time.Minute
 		}
 	}
 	if needBearer && !authOK {
@@ -752,11 +761,21 @@ func (s *Service) HandleWebhook(ctx context.Context, pathToken string, r *http.R
 		return nil, nil, ErrForbiddenWebhook
 	}
 
-	idem := strings.TrimSpace(r.Header.Get("X-Idempotency-Key"))
-	if idem == "" {
-		idem = "wh:" + a.ID + ":" + idgen.Raw()
-	} else {
-		idem = "wh:" + a.ID + ":" + idem
+	if replayIdentity == "" {
+		key := strings.TrimSpace(r.Header.Get("X-Idempotency-Key"))
+		if key == "" || len(key) > 256 {
+			return nil, nil, ErrForbiddenWebhook
+		}
+		replayIdentity = "bearer:" + key
+	}
+	digest := sha256.Sum256([]byte(a.ID + ":" + replayIdentity))
+	idem := fmt.Sprintf("wh:%x", digest)
+	claimed, err := s.claimWebhook(ctx, idem, replayTTL)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !claimed {
+		return nil, nil, ErrWebhookReplay
 	}
 	return s.Fire(ctx, FireRequest{
 		Automation: a, TriggerSource: "webhook", IdempotencyKey: idem,

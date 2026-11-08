@@ -34,14 +34,20 @@ func releaseEventStream(user string) {
 	}
 }
 func (d Deps) visibleBusEvent(r *http.Request, sess *auth.Session, ev eventbus.Event) bool {
-	if id := ev.Payload["job_id"]; id != "" && d.Jobs != nil {
+	if id := ev.Payload["job_id"]; id != "" {
+		if d.Jobs == nil {
+			return false
+		}
 		if d.Auth.Authorize(r.Context(), sess, "job.read") != nil {
 			return false
 		}
 		j, err := d.Jobs.Get(r.Context(), id)
 		return err == nil && j != nil && d.canAccessJob(r, sess, j, "job.read")
 	}
-	if id := ev.Payload["session_id"]; id != "" && d.Sessions != nil {
+	if id := ev.Payload["session_id"]; id != "" {
+		if d.Sessions == nil {
+			return false
+		}
 		if d.Auth.Authorize(r.Context(), sess, "session.read") != nil {
 			return false
 		}

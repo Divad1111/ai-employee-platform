@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ai-employee-platform/server/internal/audit"
 	"github.com/ai-employee-platform/server/internal/employee"
@@ -61,10 +63,11 @@ func TestParseTargetAliasAndEmpID(t *testing.T) {
 func TestVerifySignatureAndDedupe(t *testing.T) {
 	v, _ := secret.NewMemoryVault()
 	s := feishu.NewService(v)
-	s.SetConfig(feishu.Config{VerificationToken: "tok"})
+	ref, _ := v.Put("encrypt", "encrypt-test")
+	s.SetConfig(feishu.Config{VerificationToken: "tok", EncryptKeyRef: ref.ID})
 	body := `{"x":1}`
-	ts, nonce := "1", "n"
-	sum := sha256.Sum256([]byte(ts + nonce + "tok" + body))
+	ts, nonce := strconv.FormatInt(time.Now().Unix(), 10), "n"
+	sum := sha256.Sum256([]byte(ts + nonce + "encrypt-test" + body))
 	sig := hex.EncodeToString(sum[:])
 	if err := s.VerifySignature(ts, nonce, sig, body); err != nil {
 		t.Fatal(err)
@@ -83,8 +86,9 @@ func TestVerifySignatureAndDedupe(t *testing.T) {
 func TestHandleMessageIdempotentAndNotify(t *testing.T) {
 	v, _ := secret.NewMemoryVault()
 	s := feishu.NewService(v)
-	s.UpsertBinding(feishu.Binding{EmployeeID: "EMP-1", FeishuAlias: "bot"})
+	s.UpsertBinding(feishu.Binding{Verified: true, OwnerUserID: "user-1", FeishuOpenID: "ou_1", ChatID: "c1", EmployeeID: "EMP-1", FeishuAlias: "bot"})
 	fj := &fakeJobs{}
+	s.AuthorizeActor = func(context.Context, string, string) error { return nil }
 	s.Jobs = fj
 	s.Employees = fakeEmp{}
 	sender := &feishu.MemorySender{}
@@ -119,14 +123,16 @@ func TestBridgeCreatesJob(t *testing.T) {
 	msgSvc := message.NewService(message.NewMemoryStore(), aud)
 	v, _ := secret.NewMemoryVault()
 	fs := feishu.NewService(v)
-	fs.UpsertBinding(feishu.Binding{EmployeeID: e.ID, FeishuAlias: "dev", FeishuOpenID: "u1"})
+	fs.UpsertBinding(feishu.Binding{Verified: true, OwnerUserID: "user-1", ChatID: "chat", EmployeeID: e.ID, FeishuAlias: "dev", FeishuOpenID: "u1"})
 	sender := &feishu.MemorySender{}
 	fs.Sender = sender
 	notify := notification.New(fs, bus, jobSvc)
 	bridge := &feishu.Bridge{
 		Employees: empSvc, Jobs: jobSvc, Messages: msgSvc, Notify: notify, Feishu: fs,
 	}
+	bridge.AuthorizeUser = func(context.Context, string) error { return nil }
 	bridge.Wire()
+	fs.AuthorizeActor = func(context.Context, string, string) error { return nil }
 	jobID, dup, err := fs.HandleMessage(ctx, feishu.IncomingEvent{
 		EventID: "e2", MessageID: "m2", ChatID: "chat", SenderOpenID: "u1", Text: "@dev fix",
 	})
@@ -217,8 +223,9 @@ func TestResolveMentionsAndCleanPrompt(t *testing.T) {
 func TestQuotedMessageContextInjection(t *testing.T) {
 	v, _ := secret.NewMemoryVault()
 	s := feishu.NewService(v)
-	s.UpsertBinding(feishu.Binding{EmployeeID: "EMP-100", FeishuAlias: "AI员工"})
+	s.UpsertBinding(feishu.Binding{Verified: true, OwnerUserID: "user-1", FeishuOpenID: "ou_test", ChatID: "chat-grp", EmployeeID: "EMP-100", FeishuAlias: "AI员工"})
 	fj := &fakeJobs{}
+	s.AuthorizeActor = func(context.Context, string, string) error { return nil }
 	s.Jobs = fj
 	s.Employees = fakeEmp{}
 	sender := &feishu.MemorySender{}
@@ -326,8 +333,9 @@ func TestParseMessageBodyFormats(t *testing.T) {
 func TestHandleMessageRequiresExplicitMention(t *testing.T) {
 	v, _ := secret.NewMemoryVault()
 	s := feishu.NewService(v)
-	s.UpsertBinding(feishu.Binding{EmployeeID: "EMP-可乐", FeishuAlias: "可乐"})
+	s.UpsertBinding(feishu.Binding{Verified: true, OwnerUserID: "user-1", FeishuOpenID: "ou_1", EmployeeID: "EMP-可乐", FeishuAlias: "可乐"})
 	fj := &fakeJobs{}
+	s.AuthorizeActor = func(context.Context, string, string) error { return nil }
 	s.Jobs = fj
 	s.Employees = fakeEmp{}
 	sender := &feishu.MemorySender{}
@@ -395,54 +403,20 @@ func TestHandleMessageRequiresExplicitMention(t *testing.T) {
 	}
 }
 
-func TestAutoBindFromMention(t *testing.T) {
+func TestMentionNeverEstablishesAccountOwnership(t *testing.T) {
 	v, _ := secret.NewMemoryVault()
 	s := feishu.NewService(v)
-	s.UpsertBinding(feishu.Binding{EmployeeID: "e1", FeishuAlias: "可乐"})
-
-	p2p := s.AutoBindFromMention("e1", "ou_user", "oc_p2p", false)
-	if !p2p.OpenBoundNow || p2p.ChatBoundNow {
-		t.Fatalf("单聊应只绑定 OpenID: %+v", p2p)
-	}
-	if b := s.BindingByEmployee("e1"); b == nil || b.FeishuOpenID != "ou_user" || b.ChatID != "" {
-		t.Fatalf("单聊写入不符: %+v", b)
-	}
-	again := s.AutoBindFromMention("e1", "ou_user", "oc_p2p", false)
-	if again.OpenBoundNow || !strings.Contains(feishu.FormatIdentityNotice(again), "ou_user") {
-		t.Fatalf("已绑定仍应告知 OpenID: %+v %s", again, feishu.FormatIdentityNotice(again))
-	}
-
-	grp := s.AutoBindFromMention("e1", "ou_user", "oc_group", true)
-	if !grp.ChatBoundNow {
-		t.Fatalf("群聊应补默认群: %+v", grp)
-	}
-	if b := s.BindingByEmployee("e1"); b == nil || b.ChatID != "oc_group" || b.FeishuOpenID != "ou_user" {
-		t.Fatalf("群聊写入不符: %+v", b)
-	}
-	note := feishu.FormatIdentityNotice(s.AutoBindFromMention("e1", "ou_user", "oc_group", true))
-	if !strings.Contains(note, "ou_user") || !strings.Contains(note, "oc_group") || strings.Contains(note, "本次已自动绑定") {
-		t.Fatalf("已绑定回执应带两个 ID 且不再标本次绑定: %s", note)
-	}
-}
-
-func TestAutoBindSameOpenIDOnTwoEmployees(t *testing.T) {
-	v, _ := secret.NewMemoryVault()
-	s := feishu.NewService(v)
-	s.UpsertBinding(feishu.Binding{EmployeeID: "e1", FeishuAlias: "test"})
-	s.UpsertBinding(feishu.Binding{EmployeeID: "e2", FeishuAlias: "test2"})
-
-	n1 := s.AutoBindFromMention("e1", "ou_shared", "oc_p2p", false)
-	n2 := s.AutoBindFromMention("e2", "ou_shared", "oc_p2p", false)
-	if !n1.OpenBoundNow || !n2.OpenBoundNow {
-		t.Fatalf("两个员工都应自动绑定同一 OpenID: %+v %+v", n1, n2)
-	}
-	b1 := s.BindingByEmployee("e1")
-	b2 := s.BindingByEmployee("e2")
-	if b1 == nil || b2 == nil || b1.FeishuOpenID != "ou_shared" || b2.FeishuOpenID != "ou_shared" {
-		t.Fatalf("绑定结果不符: %+v %+v", b1, b2)
-	}
-	if !s.EmployeeHasOpenID("e1", "ou_shared") || !s.EmployeeHasOpenID("e2", "ou_shared") {
-		t.Fatal("同一飞书用户应同时关联两个员工")
+	for _, id := range []string{"e1", "e2"} {
+		if err := s.UpsertBinding(feishu.Binding{EmployeeID: id, FeishuAlias: id}); err != nil {
+			t.Fatal(err)
+		}
+		for _, group := range []bool{false, true} {
+			notice := s.AutoBindFromMention(id, "attacker", "chat", group)
+			binding := s.BindingByEmployee(id)
+			if notice.OpenBoundNow || notice.ChatBoundNow || binding.FeishuOpenID != "" || binding.ChatID != "" || s.EmployeeHasOpenID(id, "attacker") {
+				t.Fatal("mention granted ownership")
+			}
+		}
 	}
 }
 
@@ -455,14 +429,15 @@ func TestResolveTargetChatAndUserName(t *testing.T) {
 		t.Fatalf("无绑定期望空，得到 %s", target)
 	}
 
-	// 2. 仅有 ChatID，返回 ChatID
+	// 2. 未确认的群聊绑定不能成为通知目标
 	s.UpsertBinding(feishu.Binding{EmployeeID: "e1", FeishuAlias: "bot", ChatID: "oc_group_1"})
-	if target := s.ResolveTargetChat("e1"); target != "oc_group_1" {
+	if target := s.ResolveTargetChat("e1"); target != "" {
 		t.Fatalf("期望 oc_group_1，得到 %s", target)
 	}
 
 	// 3. 有 OpenID 时，优先返回 OpenID
-	s.UpsertBinding(feishu.Binding{EmployeeID: "e1", FeishuAlias: "bot", FeishuOpenID: "ou_user_1", ChatID: "oc_group_1"})
+	s.AuthorizeActor = func(context.Context, string, string) error { return nil }
+	s.UpsertBinding(feishu.Binding{Verified: true, OwnerUserID: "user-1", EmployeeID: "e1", FeishuAlias: "bot", FeishuOpenID: "ou_user_1", ChatID: "oc_group_1"})
 	if target := s.ResolveTargetChat("e1"); target != "ou_user_1" {
 		t.Fatalf("期望 ou_user_1，得到 %s", target)
 	}

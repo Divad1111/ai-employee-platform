@@ -141,6 +141,13 @@ func (d Deps) handleFeishuBinding(w http.ResponseWriter, r *http.Request, sess *
 		writeErr(w, code, msg)
 		return
 	}
+	e, err := d.Employees.Get(r.Context(), b.EmployeeID)
+	if err != nil || e == nil {
+		writeErr(w, http.StatusNotFound, "员工不存在")
+		return
+	}
+	b.OwnerUserID = e.OwnerUserID
+	b.Verified = true
 	if err := d.Feishu.UpsertBinding(b); err != nil {
 		if errors.Is(err, feishu.ErrAliasConflict) {
 			writeErr(w, 409, err.Error())

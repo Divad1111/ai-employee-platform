@@ -232,8 +232,8 @@ func TestWebhookHMACBearerIPIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run1.ID != run2.ID {
-		t.Fatal("相同幂等键应返回同一 run")
+	if run1.ID == run2.ID {
+		t.Fatal("两种授权方式的幂等空间应隔离，HMAC 不使用未签名的幂等请求头")
 	}
 
 	denied := false
@@ -343,4 +343,3 @@ func TestFireFallbackToEmployeeChat(t *testing.T) {
 		t.Fatalf("飞书通知应送达 ou_feishu_fallback, sent: %+v", fn.sentChats)
 	}
 }
-

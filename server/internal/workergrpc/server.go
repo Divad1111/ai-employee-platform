@@ -80,7 +80,7 @@ func NewServer(opt Options) *Server {
 
 // Ping 连通性与 mTLS 探测。
 func (s *Server) Ping(ctx context.Context, req *aiev1.PingRequest) (*aiev1.PingResponse, error) {
-	wsID, err := workstationFromCtx(ctx)
+	wsID, err := s.authorizedWorkstation(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -96,12 +96,52 @@ func (s *Server) Ping(ctx context.Context, req *aiev1.PingRequest) (*aiev1.PingR
 
 // Connect 双向流：首帧 Hello（Resume）→ 续传未确认命令；上行 Event/Heartbeat/Ack。
 func (s *Server) Connect(stream aiev1.WorkerService_ConnectServer) error {
-	wsID, err := workstationFromCtx(stream.Context())
+	wsID, err := s.authorizedWorkstation(stream.Context())
 	if err != nil {
 		return err
 	}
 
-	first, err := stream.Recv()
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+	stream = &authorizedStream{WorkerService_ConnectServer: stream, server: s, ctx: ctx}
+	type received struct {
+		msg *aiev1.WorkerToServer
+		err error
+	}
+	incoming := make(chan received)
+	go func() {
+		for {
+			msg, err := stream.Recv()
+			select {
+			case incoming <- received{msg, err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	receive := func() (*aiev1.WorkerToServer, error) {
+		for {
+			select {
+			case <-ctx.Done():
+				return nil, status.Error(codes.Canceled, "连接已关闭")
+			case <-ticker.C:
+				if _, err := s.authorizedWorkstation(stream.Context()); err != nil {
+					return nil, err
+				}
+			case item := <-incoming:
+				if _, err := s.authorizedWorkstation(stream.Context()); err != nil {
+					return nil, err
+				}
+				return item.msg, item.err
+			}
+		}
+	}
+	first, err := receive()
 	if err != nil {
 		return err
 	}
@@ -115,9 +155,6 @@ func (s *Server) Connect(stream aiev1.WorkerService_ConnectServer) error {
 
 	// Workstation 重连后事件序号从 1 重计，必须重置游标，否则 JOB_* 全部被乱序拒绝。
 	s.Events.ResetWorkstation(wsID)
-
-	ctx, cancel := context.WithCancel(stream.Context())
-	defer cancel()
 
 	sess := &connSession{wsID: wsID, stream: stream, cancel: cancel}
 	s.mu.Lock()
@@ -150,31 +187,22 @@ func (s *Server) Connect(stream aiev1.WorkerService_ConnectServer) error {
 	}
 
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-		msg, err := stream.Recv()
+		msg, err := receive()
 		if err == io.EOF {
 			return nil
 		}
 		if err != nil {
-			return nil
+			return err
 		}
 		if err := s.handleUpstream(wsID, stream, msg); err != nil {
-			// 单帧错误不拆连接；带 error 的 ACK 已回写
-			_ = err
+			return err
 		}
 	}
 }
 
 func (s *Server) handleUpstream(wsID string, stream aiev1.WorkerService_ConnectServer, msg *aiev1.WorkerToServer) error {
-	if s.CA != nil {
-		record := s.CA.FindByWorkstation(wsID)
-		if record == nil || record.Status != "ACTIVE" || !record.ExpiresAt.After(time.Now()) {
-			return status.Error(codes.Unauthenticated, "工作站证书已失效")
-		}
+	if _, err := s.authorizedWorkstation(stream.Context()); err != nil {
+		return err
 	}
 
 	switch body := msg.GetBody().(type) {
@@ -393,4 +421,40 @@ func LoadServerCertificate(ca *certca.Authority, hosts ...string) (tls.Certifica
 		return tls.Certificate{}, err
 	}
 	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+// Re-check the actual peer certificate on every RPC and frame, including sends.
+func (s *Server) authorizedWorkstation(ctx context.Context) (string, error) {
+	id, err := workstationFromCtx(ctx)
+	if err != nil {
+		return "", err
+	}
+	if s.CA == nil {
+		return "", status.Error(codes.Unauthenticated, "证书授权未就绪")
+	}
+	p, _ := peer.FromContext(ctx)
+	info := p.AuthInfo.(credentials.TLSInfo)
+	if _, _, err := s.CA.VerifyClientRaw(info.State.PeerCertificates[0].Raw); err != nil {
+		return "", status.Error(codes.Unauthenticated, "工作站证书已失效")
+	}
+	return id, nil
+}
+
+type authorizedStream struct {
+	aiev1.WorkerService_ConnectServer
+	server *Server
+	ctx    context.Context
+	sendMu sync.Mutex
+}
+
+func (s *authorizedStream) Send(frame *aiev1.ServerToWorker) error {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if s.ctx.Err() != nil {
+		return status.Error(codes.Canceled, "连接已关闭")
+	}
+	if _, err := s.server.authorizedWorkstation(s.Context()); err != nil {
+		return err
+	}
+	return s.WorkerService_ConnectServer.Send(frame)
 }

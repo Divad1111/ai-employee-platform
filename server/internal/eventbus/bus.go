@@ -32,10 +32,10 @@ type Event struct {
 
 // Bus 进程内发布/订阅 + 环形缓冲。
 type Bus struct {
-	mu       sync.RWMutex
-	subs     map[chan Event]struct{}
-	history  []Event
-	maxHist  int
+	mu      sync.RWMutex
+	subs    map[chan Event]struct{}
+	history []Event
+	maxHist int
 }
 
 // New 创建事件总线。
@@ -59,12 +59,8 @@ func (b *Bus) Publish(_ context.Context, typ string, payload map[string]string) 
 	if len(b.history) > b.maxHist {
 		b.history = b.history[len(b.history)-b.maxHist:]
 	}
-	subs := make([]chan Event, 0, len(b.subs))
+	defer b.mu.Unlock()
 	for ch := range b.subs {
-		subs = append(subs, ch)
-	}
-	b.mu.Unlock()
-	for _, ch := range subs {
 		select {
 		case ch <- ev:
 		default: // 慢消费者丢弃，避免阻塞

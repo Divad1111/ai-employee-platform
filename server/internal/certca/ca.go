@@ -351,7 +351,12 @@ func (a *Authority) FindByWorkstation(id string) *Record {
 	if fp == "" {
 		return nil
 	}
-	return a.byFP[fp]
+	rec := a.byFP[fp]
+	if rec == nil {
+		return nil
+	}
+	copy := *rec
+	return &copy
 }
 
 // DeleteWorkstation 吊销并删除指定 Workstation 的全部证书记录。

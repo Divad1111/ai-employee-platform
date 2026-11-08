@@ -479,10 +479,19 @@ func (s *Service) CheckSkill(ctx context.Context, id, localVersion string, local
 
 // CheckLocalSkills 根据客户端上报的本地技能清单做对比。
 // localSkills: [{id, cursor_name, version}, ...]
-func (s *Service) CheckLocalSkills(ctx context.Context, localSkills []map[string]string) (map[string]any, error) {
+func (s *Service) CheckLocalSkills(ctx context.Context, localSkills []map[string]string, allowed ...func(string) bool) (map[string]any, error) {
 	mcpList, err := s.store.ListSkills(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if len(allowed) > 0 && allowed[0] != nil {
+		scoped := make([]*SkillPackage, 0, len(mcpList))
+		for _, sp := range mcpList {
+			if allowed[0](sp.ID) || allowed[0](sp.CursorName) {
+				scoped = append(scoped, sp)
+			}
+		}
+		mcpList = scoped
 	}
 	localByKey := map[string]map[string]string{}
 	for _, ls := range localSkills {

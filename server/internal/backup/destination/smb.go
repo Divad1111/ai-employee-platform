@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hirochachacha/go-smb2"
+	"github.com/cloudsoda/go-smb2"
 )
 
 // SMBDestination SMB / CIFS 共享存储目标 (支持 SMB2 / SMB3)
@@ -67,7 +67,9 @@ func (s *SMBDestination) connect() (net.Conn, *smb2.Share, error) {
 		},
 	}
 
-	session, err := d.Dial(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := d.DialConn(ctx, conn, s.server)
 	if err != nil {
 		_ = conn.Close()
 		return nil, nil, fmt.Errorf("SMB 身份验证握手失败: %w", err)

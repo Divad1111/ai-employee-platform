@@ -66,7 +66,7 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any)
 	if strings.HasPrefix(name, "delete_") && (caller == nil || !caller.CanDelete) {
 		return nil, fmt.Errorf("需要全局删除权限")
 	}
-	if needWrite[name] && !strings.HasPrefix(name,"delete_") && (caller == nil || !caller.CanWrite) {
+	if needWrite[name] && !strings.HasPrefix(name, "delete_") && (caller == nil || !caller.CanWrite) {
 		return nil, fmt.Errorf("需要写权限")
 	}
 
@@ -151,6 +151,9 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any)
 		}
 		return map[string]any{"skill": sp, "skill_md": md}, nil
 	case "check_skill":
+		if caller != nil && caller.EmployeeScope != nil && !caller.EmployeeScope.InScopeSkill(str("id")) {
+			return nil, fmt.Errorf("未授权访问该技能")
+		}
 		return s.WF.CheckSkill(ctx, str("id"), str("local_version"), str("local_content_hash"))
 	case "check_local_skills":
 		var local []map[string]string
@@ -158,8 +161,25 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any)
 			b, _ := json.Marshal(raw)
 			_ = json.Unmarshal(b, &local)
 		}
+		if caller != nil && caller.EmployeeScope != nil {
+			return s.WF.CheckLocalSkills(ctx, local, caller.EmployeeScope.InScopeSkill)
+		}
 		return s.WF.CheckLocalSkills(ctx, local)
 	case "check_workflow_skills":
+		if caller != nil && caller.EmployeeScope != nil {
+			if !caller.EmployeeScope.InScopeWorkflow(str("workflow_id")) {
+				return nil, fmt.Errorf("未授权访问该工作流")
+			}
+			wf, err := s.WF.GetWorkflow(ctx, str("workflow_id"))
+			if err != nil {
+				return nil, err
+			}
+			for _, id := range wf.SkillRefs {
+				if !caller.EmployeeScope.InScopeSkill(id) {
+					return nil, fmt.Errorf("未授权访问依赖技能")
+				}
+			}
+		}
 		local := map[string]string{}
 		if raw, ok := args["local_skills"].(map[string]any); ok {
 			for k, v := range raw {

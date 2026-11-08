@@ -1,9 +1,11 @@
 package automation
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -12,8 +14,8 @@ import (
 
 // webhookLimiter 简单滑动窗口限流（按 path_token）。
 type webhookLimiter struct {
-	mu       sync.Mutex
-	hits     map[string][]time.Time
+	mu   sync.Mutex
+	hits map[string][]time.Time
 }
 
 func newWebhookLimiter() *webhookLimiter {
@@ -45,12 +47,8 @@ func (l *webhookLimiter) allow(key string, limitPerMin int, now time.Time) bool 
 	return true
 }
 
-// clientIP 从 RemoteAddr / X-Forwarded-For 取 IP。
-func clientIP(remoteAddr, xff string) string {
-	if xff != "" {
-		parts := strings.Split(xff, ",")
-		return strings.TrimSpace(parts[0])
-	}
+// clientIP only uses the address resolved by the trusted HTTP adapter.
+func clientIP(remoteAddr, _ string) string {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		return remoteAddr
@@ -130,7 +128,7 @@ func verifyBearer(expected, header string) error {
 	if strings.HasPrefix(strings.ToLower(h), "bearer ") {
 		h = strings.TrimSpace(h[7:])
 	}
-	if h == "" || h != expected {
+	if h == "" || !hmac.Equal([]byte(h), []byte(expected)) {
 		return ErrForbiddenWebhook
 	}
 	return nil
@@ -152,4 +150,33 @@ func computeHMAC(secret, timestamp, body string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(timestamp + "." + body))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// ErrWebhookReplay rejects a previously authenticated request.
+var ErrWebhookReplay = errors.New("webhook request already used")
+
+func (s *Service) claimWebhook(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	if s.ClaimReplay != nil {
+		return s.ClaimReplay(ctx, key, ttl)
+	}
+	s.replayMu.Lock()
+	defer s.replayMu.Unlock()
+	now := time.Now()
+	for k, expires := range s.replays {
+		if !expires.After(now) {
+			delete(s.replays, k)
+		}
+	}
+	if _, exists := s.replays[key]; exists {
+		return false, nil
+	}
+	// Fail closed rather than evict live replay protection under load.
+	if len(s.replays) >= 10000 {
+		return false, ErrRateLimited
+	}
+	if s.replays == nil {
+		s.replays = make(map[string]time.Time)
+	}
+	s.replays[key] = now.Add(ttl)
+	return true, nil
 }

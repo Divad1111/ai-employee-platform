@@ -44,6 +44,7 @@ func TestManagerBindResolveAccessAudit(t *testing.T) {
 }
 
 func TestFileVaultRoundTrip(t *testing.T) {
+	t.Setenv("AIE_SECRET_MASTER_KEY", "test-master-key-at-least-32-characters")
 	dir := t.TempDir()
 	fv, err := secret.NewFileVault(dir)
 	if err != nil {

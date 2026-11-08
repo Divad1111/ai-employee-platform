@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ai-employee-platform/server/internal/api"
 	"github.com/ai-employee-platform/server/internal/audit"
@@ -51,10 +56,19 @@ func setupM6(t *testing.T) (http.Handler, string, *feishu.MemorySender, *reliabi
 	sender := &feishu.MemorySender{}
 	fs := feishu.NewService(vault)
 	fs.Sender = sender
-	fs.SetConfig(feishu.Config{VerificationToken: "vt", Enabled: true})
+	fs.Gateway = nil
+	var seen sync.Map
+	fs.ClaimEvent = func(_ context.Context, key string, _ time.Duration) (bool, error) {
+		_, loaded := seen.LoadOrStore(key, true)
+		return !loaded, nil
+	}
+	ref, _ := vault.Put("encrypt", "encrypt-test")
+	appRef, _ := vault.Put("app-secret", "test-secret")
+	fs.SetConfig(feishu.Config{AppID: "test-app", AppSecretRef: appRef.ID, VerificationToken: "vt", EncryptKeyRef: ref.ID, Enabled: true})
 	notify := notification.New(fs, bus, jobSvc)
 	sched := scheduler.New(jobSvc, empSvc, wss, presence, nil)
 	bridge := &feishu.Bridge{Employees: empSvc, Jobs: jobSvc, Messages: msgSvc, Scheduler: sched, Notify: notify, Feishu: fs}
+	bridge.AuthorizeUser = func(context.Context, string) error { return nil }
 	bridge.Wire()
 	h := api.NewRouter(api.Deps{
 		Auth: authSvc, Enrollment: enrollment.NewService(enrollment.NewMemoryStore(), ca, auditor), CA: ca,
@@ -94,7 +108,7 @@ func TestFeishuWebhookChallengeAndJob(t *testing.T) {
 	// URL challenge
 	body := []byte(`{"type":"url_verification","token":"vt","challenge":"c123"}`)
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/integrations/feishu/events", bytes.NewReader(body)))
+	h.ServeHTTP(rr, signedFeishuRequest(body))
 	if rr.Code != 200 {
 		t.Fatal(rr.Body.String())
 	}
@@ -111,28 +125,34 @@ func TestFeishuWebhookChallengeAndJob(t *testing.T) {
 
 	// 携带正确 Token 的合法消息事件
 	msgBody := []byte(`{
-	  "header":{"event_id":"eid-1","event_type":"im.message.receive_v1","token":"vt"},
-	  "event":{"message":{"chat_id":"oc_1","message_id":"om_1","content":"{\"text\":\"@dev fix bug\"}"},
+	  "schema":"2.0", "header":{"event_id":"eid-1","event_type":"im.message.receive_v1","token":"vt"},
+	  "event":{"message":{"chat_id":"oc_1","chat_type":"p2p","message_type":"text","message_id":"om_1","content":"{\"text\":\"@dev fix bug\"}"},
 	           "sender":{"sender_id":{"open_id":"ou_1"}}}
 	}`)
 	rr = httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/integrations/feishu/events", bytes.NewReader(msgBody))
+	req := signedFeishuRequest(msgBody)
 	h.ServeHTTP(rr, req)
 	if rr.Code != 200 {
 		t.Fatal(rr.Body.String())
 	}
 	var out map[string]any
 	_ = json.Unmarshal(rr.Body.Bytes(), &out)
-	if out["job_id"] == "" || out["duplicate"] == true {
-		t.Fatal(out)
+	code, listedJobs := doJSON(t, h, http.MethodGet, "/api/jobs", tok, nil)
+	jobs, _ := listedJobs["items"].([]any)
+	if code != 200 || len(jobs) != 1 {
+		t.Fatal("expected one job from signed event", code, listedJobs, out)
 	}
-	jobID := out["job_id"].(string)
+	jobID := jobs[0].(map[string]any)["id"].(string)
 	// 重复 event 幂等
 	rr = httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/integrations/feishu/events", bytes.NewReader(msgBody)))
+	h.ServeHTTP(rr, signedFeishuRequest(msgBody))
 	_ = json.Unmarshal(rr.Body.Bytes(), &out)
-	if out["duplicate"] != true {
-		t.Fatal(out)
+	if rr.Code != http.StatusOK {
+		t.Fatal(rr.Code, out)
+	}
+	_, afterReplay := doJSON(t, h, http.MethodGet, "/api/jobs", tok, nil)
+	if len(afterReplay["items"].([]any)) != 1 {
+		t.Fatal("duplicate Feishu event created another job", afterReplay)
 	}
 	// Scheduler 可能已到 STARTING；推进到 SUCCESS 应飞书回复
 	code, cur := doJSON(t, h, http.MethodGet, "/api/jobs/"+jobID, tok, nil)
@@ -412,4 +432,19 @@ func TestFeishuBindingListScopedToOwner(t *testing.T) {
 			t.Fatalf("仅本人权限不能删除归属未知的残留绑定: %d %v", code, denied)
 		}
 	}
+}
+
+func signedFeishuRequest(body []byte) *http.Request {
+	encrypted, err := larkcore.EncryptedEventMsg(context.Background(), json.RawMessage(body), "encrypt-test")
+	if err != nil {
+		panic(err)
+	}
+	body, _ = json.Marshal(map[string]string{"encrypt": encrypted})
+	r := httptest.NewRequest(http.MethodPost, "/api/integrations/feishu/events", bytes.NewReader(body))
+	ts, nonce := strconv.FormatInt(time.Now().Unix(), 10), "test-nonce"
+	sum := sha256.Sum256([]byte(ts + nonce + "encrypt-test" + string(body)))
+	r.Header.Set("X-Lark-Request-Timestamp", ts)
+	r.Header.Set("X-Lark-Request-Nonce", nonce)
+	r.Header.Set("X-Lark-Signature", hex.EncodeToString(sum[:]))
+	return r
 }

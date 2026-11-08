@@ -28,8 +28,8 @@ import (
 	"github.com/ai-employee-platform/server/internal/reliability"
 	"github.com/ai-employee-platform/server/internal/secret"
 	"github.com/ai-employee-platform/server/internal/session"
-	"github.com/ai-employee-platform/server/internal/workstation"
 	"github.com/ai-employee-platform/server/internal/workspace"
+	"github.com/ai-employee-platform/server/internal/workstation"
 )
 
 func setupM9(t *testing.T) (http.Handler, string, *audit.Memory, *auth.MemoryUserStore) {
@@ -59,11 +59,11 @@ func setupM9(t *testing.T) (http.Handler, string, *audit.Memory, *auth.MemoryUse
 	met.JobSuccess.Store(3)
 	h := api.NewRouter(api.Deps{
 		Auth: authSvc, Enrollment: enrollment.NewService(enrollment.NewMemoryStore(), ca, auditor), CA: ca,
-		Employees: employee.NewService(employee.NewMemoryStore(), auditor, bus),
+		Employees:    employee.NewService(employee.NewMemoryStore(), auditor, bus),
 		Workspaces:   workspace.NewService(workspace.NewMemoryStore(), auditor),
 		Workstations: workstation.NewService(ca, reliability.NewPresence(5, 15), nil),
 		Sessions:     session.NewService(session.NewMemoryStore(), auditor, bus),
-		Jobs: jobSvc, Messages: message.NewService(message.NewMemoryStore(), auditor),
+		Jobs:         jobSvc, Messages: message.NewService(message.NewMemoryStore(), auditor),
 		Bus: bus, Audit: auditor, Secrets: vault, SecretMgr: mgr,
 		Permission: eng, PermissionStore: permStore, Approvals: apr,
 		Artifacts: art, Registry: reg, Metrics: met,
@@ -72,9 +72,11 @@ func setupM9(t *testing.T) (http.Handler, string, *audit.Memory, *auth.MemoryUse
 }
 
 func TestMetricsEndpointScrapable(t *testing.T) {
-	h, _, _, _ := setupM9(t)
+	h, token, _, _ := setupM9(t)
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	h.ServeHTTP(rr, req)
 	if rr.Code != 200 {
 		t.Fatal(rr.Code, rr.Body.String())
 	}

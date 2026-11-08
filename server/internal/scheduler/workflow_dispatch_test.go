@@ -37,7 +37,7 @@ func TestExpiredCredentialCanBeCorrectedAndRescheduled(t *testing.T) {
 		t.Fatal(err)
 	}
 	empSvc := employee.NewService(employee.NewMemoryStore(), aud, bus)
-	e, err := empSvc.Create(ctx, employee.CreateInput{Name: "Alice", WorkstationID: "WS-1", WorkspaceID: ws.ID}, "u", "")
+	e, err := empSvc.Create(ctx, employee.CreateInput{Name: "Alice", OwnerUserID: "u", WorkstationID: "WS-1", WorkspaceID: ws.ID}, "u", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestExpiredCredentialCanBeCorrectedAndRescheduled(t *testing.T) {
 		t.Fatal(err)
 	}
 	expiry := time.Now().Add(-time.Minute)
-	cred, err := mcpSvc.CreateCredential(ctx, mcp.CreateCredentialInput{CredentialName: "jira", AuthType: mcp.AuthTypeToken, SecretValue: "test-key", ExpiresAt: &expiry})
+	cred, err := mcpSvc.CreateCredential(ctx, mcp.CreateCredentialInput{OwnerType: "USER", OwnerID: "u", CredentialName: "jira", AuthType: mcp.AuthTypeToken, SecretValue: "test-key", ExpiresAt: &expiry})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestScheduleJobWithWorkflowMCP(t *testing.T) {
 	ws, _ := wsSvc.Create(ctx, workspace.CreateInput{WorkstationID: "WS-1", Path: "/path/to/project"}, "u", "")
 
 	empSvc := employee.NewService(employee.NewMemoryStore(), aud, bus)
-	e, _ := empSvc.Create(ctx, employee.CreateInput{Name: "Alice", WorkstationID: "WS-1", WorkspaceID: ws.ID}, "u", "")
+	e, _ := empSvc.Create(ctx, employee.CreateInput{Name: "Alice", OwnerUserID: "u", WorkstationID: "WS-1", WorkspaceID: ws.ID}, "u", "")
 
 	ca, _ := certca.NewDevAuthority()
 	presence := reliability.NewPresence(5, 15)

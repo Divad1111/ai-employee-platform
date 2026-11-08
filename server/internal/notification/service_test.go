@@ -123,7 +123,8 @@ func TestTerminalNotifyFallbackToEmployeeBinding(t *testing.T) {
 	fs := feishu.NewService(vault)
 	sender := &feishu.MemorySender{}
 	fs.Sender = sender
-	fs.UpsertBinding(feishu.Binding{EmployeeID: "EMP-BIND", FeishuAlias: "tester", FeishuOpenID: "ou_tester_bind"})
+	fs.AuthorizeActor = func(context.Context, string, string) error { return nil }
+	fs.UpsertBinding(feishu.Binding{OwnerUserID: "u", Verified: true, EmployeeID: "EMP-BIND", FeishuAlias: "tester", FeishuOpenID: "ou_tester_bind"})
 	bus := eventbus.New(5)
 	jobSvc := job.NewService(job.NewMemoryStore(), audit.NewMemory(), bus)
 	j, _, err := jobSvc.Create(ctx, job.CreateInput{
@@ -143,4 +144,3 @@ func TestTerminalNotifyFallbackToEmployeeBinding(t *testing.T) {
 		t.Fatalf("未显式绑 chat 时应自动回退到员工 open_id: %+v", sender.Sent)
 	}
 }
-

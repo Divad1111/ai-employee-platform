@@ -271,6 +271,23 @@ steps:
 		t.Fatalf("expected unauthorized get_workflow error: %+v", outDenied)
 	}
 
+	for _, check := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"check_skill", map[string]any{"id": "skill.secret"}},
+		{"check_workflow_skills", map[string]any{"workflow_id": "wf-forbidden"}},
+	} {
+		denied := callTool(t, h, empTok.Secret, check.name, check.args)
+		if denied["isError"] != true {
+			t.Fatalf("%s leaked scope: %v", check.name, denied)
+		}
+	}
+	batch := callTool(t, h, empTok.Secret, "check_local_skills", map[string]any{})
+	encoded, _ := json.Marshal(batch)
+	if strings.Contains(string(encoded), "skill.secret") {
+		t.Fatalf("batch skill metadata leaked: %s", encoded)
+	}
 	// 3. get_workflow 已授权成功
 	outAllowed := callTool(t, h, empTok.Secret, "get_workflow", map[string]any{"id": "wf-allowed"})
 	if isErr, _ := outAllowed["isError"].(bool); isErr {

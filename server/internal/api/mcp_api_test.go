@@ -92,7 +92,11 @@ func TestCredentialsAndBindingsAPI(t *testing.T) {
 	}
 
 	// 3. POST /api/employees/:id/mcp-bindings 绑定员工与 MCP
-	empID := "EMP-TEST-001"
+	empCode, emp := doJSON(t, h, "POST", "/api/employees", tok, map[string]string{"name": "credential-owner"})
+	if empCode != 201 {
+		t.Fatal(empCode, emp)
+	}
+	empID := emp["id"].(string)
 	code, bndBody := doJSON(t, h, "POST", fmt.Sprintf("/api/employees/%s/mcp-bindings", empID), tok, map[string]any{
 		"mcp_server_id": "mcp-workflow",
 		"credential_id": credID,

@@ -13,26 +13,34 @@ import (
 
 func resourceEventValidator(jobs *job.Service, sessions *session.Service, employees *employee.Service) func(string, *aiev1.Event) error {
 	return func(ws string, ev *aiev1.Event) error {
+		if ev == nil || jobs == nil || sessions == nil || employees == nil {
+			return fmt.Errorf("事件授权服务不可用")
+		}
 		ctx := context.Background()
-		var p map[string]string
+		var p struct {
+			JobID       string `json:"job_id"`
+			EmployeeID  string `json:"employee_id"`
+			SessionID   string `json:"session_id"`
+			WorkspaceID string `json:"workspace_id"`
+		}
 		if ev.PayloadJson != "" {
 			if err := json.Unmarshal([]byte(ev.PayloadJson), &p); err != nil {
 				return err
 			}
 		}
 		if ev.JobId == "" {
-			ev.JobId = p["job_id"]
-		} else if p["job_id"] != "" && p["job_id"] != ev.JobId {
+			ev.JobId = p.JobID
+		} else if p.JobID != "" && p.JobID != ev.JobId {
 			return fmt.Errorf("任务 ID 不一致")
 		}
 		if ev.EmployeeId == "" {
-			ev.EmployeeId = p["employee_id"]
-		} else if p["employee_id"] != "" && p["employee_id"] != ev.EmployeeId {
+			ev.EmployeeId = p.EmployeeID
+		} else if p.EmployeeID != "" && p.EmployeeID != ev.EmployeeId {
 			return fmt.Errorf("员工 ID 不一致")
 		}
 		if ev.SessionId == "" {
-			ev.SessionId = p["session_id"]
-		} else if p["session_id"] != "" && p["session_id"] != ev.SessionId {
+			ev.SessionId = p.SessionID
+		} else if p.SessionID != "" && p.SessionID != ev.SessionId {
 			return fmt.Errorf("会话 ID 不一致")
 		}
 		if strings.HasPrefix(ev.Type.String(), "EVENT_TYPE_JOB_") && ev.JobId == "" {
@@ -49,7 +57,7 @@ func resourceEventValidator(jobs *job.Service, sessions *session.Service, employ
 			}
 			ev.EmployeeId = j.EmployeeID
 			jobAuthorized = true
-			if p["workspace_id"] != "" && p["workspace_id"] != j.WorkspaceID {
+			if p.WorkspaceID != "" && p.WorkspaceID != j.WorkspaceID {
 				return fmt.Errorf("工作区与任务不符")
 			}
 		}

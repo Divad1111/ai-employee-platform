@@ -2,7 +2,7 @@
 # 设计依据：§71、§72
 # 支持 linux/amd64 与 linux/arm64（适配群晖 DSM Container Manager 等平台）
 
-FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm AS build
 ARG TARGETOS
 ARG TARGETARCH
 ENV GOTOOLCHAIN=auto

@@ -32,7 +32,7 @@ func TestAttachmentStageIsolationAndJobPersistence(t *testing.T) {
 	jobs := job.NewService(job.NewMemoryStore(), audit.NewMemory(), eventbus.New(20))
 	conversations := taskconversation.NewService(taskconversation.NewMemoryStore(), fs, jobs, nil)
 	fs.SetTaskConversationHandler(conversations)
-	fs.Jobs = &feishu.Bridge{Employees: employees, Jobs: jobs, Messages: message.NewService(message.NewMemoryStore(), audit.NewMemory()), Feishu: fs, Conversations: conversations}
+	fs.Jobs = &feishu.Bridge{AuthorizeUser: func(context.Context, string) error { return nil }, Employees: employees, Jobs: jobs, Messages: message.NewService(message.NewMemoryStore(), audit.NewMemory()), Feishu: fs, Conversations: conversations}
 	png, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jE/kAAAAASUVORK5CYII=")
 	resources := 0
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

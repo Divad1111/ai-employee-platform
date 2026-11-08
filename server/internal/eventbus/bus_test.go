@@ -25,3 +25,19 @@ func TestPublishSubscribeAndHistory(t *testing.T) {
 		t.Fatal("历史缺失")
 	}
 }
+
+func TestPublishUnsubscribeConcurrent(t *testing.T) {
+	b := eventbus.New(10)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1000; i++ {
+			b.Publish(context.Background(), "test", nil)
+		}
+	}()
+	for i := 0; i < 1000; i++ {
+		ch := b.Subscribe(1)
+		b.Unsubscribe(ch)
+	}
+	<-done
+}

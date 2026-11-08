@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log"
 	"time"
 )
 
@@ -78,4 +79,25 @@ func Claim(ctx context.Context, db *sql.DB, key string, ttl time.Duration) (bool
 		return false, nil
 	}
 	return err == nil, err
+}
+
+// StartReplayCleanup only deletes expired claims; live protection survives restarts.
+func StartReplayCleanup(ctx context.Context, db *sql.DB) {
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			_, err := db.ExecContext(cleanupCtx, `DELETE FROM security_replay_keys WHERE expires_at < NOW()`)
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				log.Printf("Replay cleanup failed: %v", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 }

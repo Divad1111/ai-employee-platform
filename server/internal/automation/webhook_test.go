@@ -126,9 +126,9 @@ func TestIPAllowlistAndCIDR(t *testing.T) {
 	}
 }
 
-func TestClientIPPrefersXFF(t *testing.T) {
-	if got := clientIP("10.0.0.1:1234", "203.0.113.9, 10.0.0.1"); got != "203.0.113.9" {
-		t.Fatalf("XFF 应取首个 IP, got %q", got)
+func TestClientIPIgnoresUntrustedXFF(t *testing.T) {
+	if got := clientIP("10.0.0.1:1234", "203.0.113.9, 10.0.0.1"); got != "10.0.0.1" {
+		t.Fatalf("不得信任未经验证的 XFF, got %q", got)
 	}
 	if got := clientIP("127.0.0.1:9999", ""); got != "127.0.0.1" {
 		t.Fatalf("RemoteAddr 解析失败: %q", got)
@@ -172,6 +172,7 @@ func TestWebhookUnknownPathAndDisabled(t *testing.T) {
 	req2 := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}"))
 	req2.RemoteAddr = "127.0.0.1:1"
 	req2.Header.Set("Authorization", "Bearer "+secrets["bearer_token"])
+	req2.Header.Set("X-Idempotency-Key", "test-bearer")
 	if _, _, err := svc.HandleWebhook(ctx, cfg.PathToken, req2, []byte("{}")); !errors.Is(err, ErrForbiddenWebhook) {
 		t.Fatalf("禁用规则应 Forbidden, got %v", err)
 	}
@@ -233,6 +234,7 @@ func TestWebhookBearerOnlyRejectsBadHMAC(t *testing.T) {
 	req2 := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
 	req2.RemoteAddr = "1.1.1.1:1"
 	req2.Header.Set("Authorization", "Bearer "+secrets["bearer_token"])
+	req2.Header.Set("X-Idempotency-Key", "test-bearer")
 	if _, _, err := svc.HandleWebhook(ctx, cfg.PathToken, req2, []byte(body)); err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +363,7 @@ func TestWebhookCIDRAllowlist(t *testing.T) {
 	}
 }
 
-func TestWebhookXFFUsedForAllowlist(t *testing.T) {
+func TestWebhookXFFCannotBypassAllowlist(t *testing.T) {
 	svc, _, _ := newTestSvc(t)
 	ctx := context.Background()
 	_, secrets, cfg := createWebhook(t, svc, `{"auth_modes":["bearer"],"ip_allowlist":["203.0.113.50"],"rate_limit_per_min":60}`)
@@ -372,8 +374,8 @@ func TestWebhookXFFUsedForAllowlist(t *testing.T) {
 	req.Header.Set("X-Forwarded-For", "203.0.113.50, 10.0.0.1")
 	req.Header.Set("Authorization", "Bearer "+secrets["bearer_token"])
 	req.Header.Set("X-Idempotency-Key", "xff")
-	if _, _, err := svc.HandleWebhook(ctx, cfg.PathToken, req, []byte("{}")); err != nil {
-		t.Fatal("应按 XFF 首 IP 校验白名单", err)
+	if _, _, err := svc.HandleWebhook(ctx, cfg.PathToken, req, []byte("{}")); !errors.Is(err, ErrForbiddenWebhook) {
+		t.Fatal("伪造 XFF 必须被拒绝", err)
 	}
 }
 

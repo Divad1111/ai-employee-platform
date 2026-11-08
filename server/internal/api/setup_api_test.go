@@ -13,6 +13,7 @@ import (
 )
 
 func TestSetupAPI_Workflow(t *testing.T) {
+	t.Setenv("AIE_SETUP_TOKEN", "test-setup-token-at-least-32-characters")
 	auditor := audit.NewMemory()
 	users := auth.NewMemoryUserStore() // 未初始化
 	authSvc := auth.NewService(users, auth.NewMemorySessionStore(), auditor)
@@ -45,6 +46,7 @@ func TestSetupAPI_Workflow(t *testing.T) {
 			"password": "123", // 太短
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/setup/init", bytes.NewReader(body))
+		req.Header.Set("X-Setup-Token", "test-setup-token-at-least-32-characters")
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 
@@ -63,6 +65,7 @@ func TestSetupAPI_Workflow(t *testing.T) {
 			"system_name":  "AI Employee Platform",
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/setup/init", bytes.NewReader(body))
+		req.Header.Set("X-Setup-Token", "test-setup-token-at-least-32-characters")
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 
@@ -101,6 +104,7 @@ func TestSetupAPI_Workflow(t *testing.T) {
 			"password": "SuperSecurePass123!",
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/setup/init", bytes.NewReader(body))
+		req.Header.Set("X-Setup-Token", "test-setup-token-at-least-32-characters")
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 
@@ -123,6 +127,22 @@ func TestSetupAPI_Workflow(t *testing.T) {
 		_ = json.Unmarshal(rec.Body.Bytes(), &me)
 		if me["username"] != "rootadmin" {
 			t.Fatalf("expected rootadmin, got %#v", me)
+		}
+	}
+}
+
+func TestSetupRequiresDeploymentToken(t *testing.T) {
+	t.Setenv("AIE_SETUP_TOKEN", "test-setup-token-at-least-32-characters")
+	users := auth.NewMemoryUserStore()
+	auditor := audit.NewMemory()
+	handler := api.NewRouter(api.Deps{Auth: auth.NewService(users, auth.NewMemorySessionStore(), auditor), Audit: auditor})
+	for _, key := range []string{"", "wrong"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/setup/init", bytes.NewBufferString(`{"username":"attacker","password":"StrongPassword123!"}`))
+		req.Header.Set("X-Setup-Token", key)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("setup without deployment secret: %d", rr.Code)
 		}
 	}
 }

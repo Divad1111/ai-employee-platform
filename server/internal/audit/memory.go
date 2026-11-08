@@ -62,6 +62,13 @@ func (m *Memory) Log(_ context.Context, actorType, actorID, action, result, ip s
 			}
 		}
 	}
+	// Keep development/test storage bounded as well. Production uses PostgreSQL.
+	if len(m.entries) >= 10000 {
+		for i := 0; i < 2500; i++ {
+			m.entries[i] = Entry{}
+		}
+		m.entries = m.entries[2500:]
+	}
 	m.entries = append(m.entries, Entry{
 		ID:         m.nextID,
 		ActorType:  actorType,

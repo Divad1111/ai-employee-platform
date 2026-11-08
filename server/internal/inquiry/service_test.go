@@ -12,6 +12,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/feishu"
 	"github.com/ai-employee-platform/server/internal/inquiry"
 	"github.com/ai-employee-platform/server/internal/job"
+	"github.com/ai-employee-platform/server/internal/secret"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 )
 
@@ -86,16 +87,18 @@ func (m *mockChatResolver) GetChat(jobID string) string {
 func TestHandleInquiryEventAndCardAction(t *testing.T) {
 	ctx := context.Background()
 	cmdPusher := &mockCommandPusher{}
-	jobMgr := &mockJobManager{jobs: map[string]*job.Job{"JOB-1": {ID: "JOB-1", Status: job.StatusRunning}}}
+	jobMgr := &mockJobManager{jobs: map[string]*job.Job{"JOB-1": {ID: "JOB-1", EmployeeID: "EMP-1", WorkstationID: "WS-1", Status: job.StatusRunning}}}
 	empGetter := &mockEmployeeGetter{emps: map[string]*employee.Employee{"EMP-1": {ID: "EMP-1", Name: "小智"}}}
 	chatResolver := &mockChatResolver{chats: map[string]string{"JOB-1": "oc_test_chat"}}
 
 	// 创建 feishu 服务带 memory sender
-	fsSvc := feishu.NewService(nil)
+	vault, _ := secret.NewMemoryVault()
+	fsSvc := feishu.NewService(vault)
 	memSender := &feishu.MemorySender{}
 	fsSvc.Sender = memSender
 
 	svc := inquiry.NewService(cmdPusher, jobMgr, empGetter, fsSvc, chatResolver)
+	svc.ApproverForJob = func(context.Context, string) string { return "ou_tester" }
 	fsSvc.SetInquiryHandler(svc)
 
 	// 1. 模拟工作站上报 EVENT_TYPE_JOB_INQUIRY
@@ -143,7 +146,7 @@ func TestHandleInquiryEventAndCardAction(t *testing.T) {
 	cardActionEv := &callback.CardActionTriggerEvent{
 		Event: &callback.CardActionTriggerRequest{
 			Operator: &callback.Operator{
-				OpenID: "ou_user_123",
+				OpenID: "ou_tester",
 			},
 			Action: &callback.CallBackAction{
 				Value: map[string]interface{}{
@@ -190,15 +193,17 @@ func TestHandleInquiryEventAndCardAction(t *testing.T) {
 func TestCheckChatReplyNumericAndText(t *testing.T) {
 	ctx := context.Background()
 	cmdPusher := &mockCommandPusher{}
-	jobMgr := &mockJobManager{jobs: map[string]*job.Job{"JOB-2": {ID: "JOB-2", Status: job.StatusRunning}}}
+	jobMgr := &mockJobManager{jobs: map[string]*job.Job{"JOB-2": {ID: "JOB-2", EmployeeID: "EMP-2", WorkstationID: "WS-2", Status: job.StatusRunning}}}
 	empGetter := &mockEmployeeGetter{emps: map[string]*employee.Employee{"EMP-2": {ID: "EMP-2", Name: "小爱"}}}
 	chatResolver := &mockChatResolver{chats: map[string]string{"JOB-2": "oc_chat_reply"}}
 
-	fsSvc := feishu.NewService(nil)
+	vault, _ := secret.NewMemoryVault()
+	fsSvc := feishu.NewService(vault)
 	memSender := &feishu.MemorySender{}
 	fsSvc.Sender = memSender
 
 	svc := inquiry.NewService(cmdPusher, jobMgr, empGetter, fsSvc, chatResolver)
+	svc.ApproverForJob = func(context.Context, string) string { return "ou_tester" }
 	fsSvc.SetInquiryHandler(svc)
 
 	// 1. 工作站上报请示
@@ -222,7 +227,7 @@ func TestCheckChatReplyNumericAndText(t *testing.T) {
 	})
 
 	// 2. 测试在会话中直接回复数字 "1"
-	handled, err := svc.CheckChatReply(ctx, "oc_chat_reply", "1", "ou_tester")
+	handled, err := svc.CheckChatReply(ctx, "oc_chat_reply", "INQ-2 1", "ou_tester")
 	if err != nil {
 		t.Fatalf("CheckChatReply 失败: %v", err)
 	}
@@ -245,19 +250,21 @@ func TestCheckChatReplyNumericAndText(t *testing.T) {
 	}
 
 	// 再次回复应该返回 false (因为已经被 resolved)
-	handledAgain, _ := svc.CheckChatReply(ctx, "oc_chat_reply", "1", "ou_tester")
+	handledAgain, _ := svc.CheckChatReply(ctx, "oc_chat_reply", "INQ-2 1", "ou_tester")
 	if handledAgain {
 		t.Errorf("已处理的请示不应该再次被匹配处理")
 	}
 
 	// 3. 测试文本模糊匹配
+	inqPayload["inquiry_id"] = "INQ-2-next"
+	plBytes, _ = json.Marshal(inqPayload)
 	svc.HandleInquiryEvent(ctx, "WS-2", &aiev1.Event{
 		JobId:       "JOB-2",
 		EmployeeId:  "EMP-2",
 		Type:        aiev1.EventType_EVENT_TYPE_JOB_INQUIRY,
 		PayloadJson: string(plBytes),
 	})
-	handledText, err := svc.CheckChatReply(ctx, "oc_chat_reply", "我选取消", "ou_tester")
+	handledText, err := svc.CheckChatReply(ctx, "oc_chat_reply", "INQ-2-next 我选取消", "ou_tester")
 	if err != nil || !handledText {
 		t.Fatalf("文本包含 '取消' 应该匹配选项，handled=%v, err=%v", handledText, err)
 	}
@@ -271,11 +278,12 @@ func TestCheckChatReplyNumericAndText(t *testing.T) {
 func TestHandleCardAction_InvalidOrDuplicate(t *testing.T) {
 	ctx := context.Background()
 	cmdPusher := &mockCommandPusher{}
-	jobMgr := &mockJobManager{jobs: map[string]*job.Job{"JOB-3": {ID: "JOB-3", Status: job.StatusRunning}}}
+	jobMgr := &mockJobManager{jobs: map[string]*job.Job{"JOB-3": {ID: "JOB-3", EmployeeID: "EMP-3", WorkstationID: "WS-3", Status: job.StatusRunning}}}
 	empGetter := &mockEmployeeGetter{emps: map[string]*employee.Employee{}}
 	chatResolver := &mockChatResolver{chats: map[string]string{}}
 
 	svc := inquiry.NewService(cmdPusher, jobMgr, empGetter, nil, chatResolver)
+	svc.ApproverForJob = func(context.Context, string) string { return "ou_tester" }
 
 	// 1. 测试 nil 或 非 resolve_inquiry 事件
 	resp, err := svc.HandleCardAction(ctx, nil)
@@ -297,7 +305,7 @@ func TestHandleCardAction_InvalidOrDuplicate(t *testing.T) {
 
 	// 2. 模拟先注册一个请示
 	ev := &aiev1.Event{
-		JobId: "JOB-3",
+		JobId:       "JOB-3",
 		PayloadJson: `{"inquiry_id":"INQ-3","options":[{"optionId":"opt-yes","name":"是"},{"optionId":"opt-no","name":"否"}]}`,
 	}
 	svc.HandleInquiryEvent(ctx, "WS-3", ev)
@@ -305,6 +313,7 @@ func TestHandleCardAction_InvalidOrDuplicate(t *testing.T) {
 	// 首次点击
 	cardEv := &callback.CardActionTriggerEvent{
 		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_tester"},
 			Action: &callback.CallBackAction{
 				Value: map[string]interface{}{
 					"action":      "resolve_inquiry",
@@ -337,22 +346,27 @@ func TestHandleInquiryEvent_FallbackChatAndNoChat(t *testing.T) {
 	empGetter := &mockEmployeeGetter{emps: map[string]*employee.Employee{}}
 	chatResolver := &mockChatResolver{chats: map[string]string{}}
 
-	fsSvc := feishu.NewService(nil)
+	vault, _ := secret.NewMemoryVault()
+	fsSvc := feishu.NewService(vault)
 	memSender := &feishu.MemorySender{}
 	fsSvc.Sender = memSender
 
+	fsSvc.AuthorizeActor = func(context.Context, string, string) error { return nil }
+	jobMgr.jobs["JOB-FB"] = &job.Job{ID: "JOB-FB", EmployeeID: "EMP-FALLBACK", WorkstationID: "WS-FB", Status: job.StatusRunning}
+	jobMgr.jobs["JOB-NOCHAT"] = &job.Job{ID: "JOB-NOCHAT", EmployeeID: "EMP-UNKNOWN", WorkstationID: "WS-NOCHAT", Status: job.StatusRunning}
 	// 预置员工别名绑定到飞书
 	fsSvc.UpsertBinding(feishu.Binding{
-		EmployeeID:   "EMP-FALLBACK",
+		OwnerUserID: "user", Verified: true, EmployeeID: "EMP-FALLBACK", FeishuAlias: "fallback",
 		FeishuOpenID: "ou_bound_user",
 	})
 
 	svc := inquiry.NewService(cmdPusher, jobMgr, empGetter, fsSvc, chatResolver)
+	svc.ApproverForJob = func(context.Context, string) string { return "ou_tester" }
 
 	// 1. chatResolver 找不到，fallback 到员工绑定的 OpenID
 	ev := &aiev1.Event{
-		JobId:      "JOB-FB",
-		EmployeeId: "EMP-FALLBACK",
+		JobId:       "JOB-FB",
+		EmployeeId:  "EMP-FALLBACK",
 		PayloadJson: `{"inquiry_id":"INQ-FB","message":"测试fallback","options":[{"optionId":"1","name":"A"}]}`,
 	}
 	svc.HandleInquiryEvent(ctx, "WS-FB", ev)
@@ -363,8 +377,8 @@ func TestHandleInquiryEvent_FallbackChatAndNoChat(t *testing.T) {
 
 	// 2. 没有任何绑定的未配置员工，不应 panic 崩溃
 	evNoChat := &aiev1.Event{
-		JobId:      "JOB-NOCHAT",
-		EmployeeId: "EMP-UNKNOWN",
+		JobId:       "JOB-NOCHAT",
+		EmployeeId:  "EMP-UNKNOWN",
 		PayloadJson: `{"inquiry_id":"INQ-NOCHAT","message":"无chat测试"}`,
 	}
 	svc.HandleInquiryEvent(ctx, "WS-NOCHAT", evNoChat)
@@ -385,7 +399,7 @@ func TestCheckChatReply_NoMatch(t *testing.T) {
 
 	// 模拟已存在请示，选项为 [同意, 拒绝]
 	ev := &aiev1.Event{
-		JobId: "JOB-NOMATCH",
+		JobId:       "JOB-NOMATCH",
 		PayloadJson: `{"inquiry_id":"INQ-NM","chat_id":"oc_test_nm","options":[{"optionId":"yes","name":"同意"},{"optionId":"no","name":"拒绝"}]}`,
 	}
 	svc.HandleInquiryEvent(ctx, "WS-NM", ev)
@@ -405,4 +419,3 @@ func TestCheckChatReply_NoMatch(t *testing.T) {
 		t.Fatalf("空文本不应匹配")
 	}
 }
-

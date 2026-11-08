@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"context"
+	"github.com/ai-employee-platform/server/internal/audit"
+	"github.com/ai-employee-platform/server/internal/employee"
 	"testing"
 
 	"github.com/ai-employee-platform/server/internal/mcp"
@@ -18,14 +20,22 @@ func TestDispatchFollowsLinkedCredentialChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cred, err := svc.CreateCredential(ctx, mcp.CreateCredentialInput{CredentialName: "linked", AuthType: mcp.AuthTypeBasic, SecretValue: "user:pass"})
+	cred, err := svc.CreateCredential(ctx, mcp.CreateCredentialInput{OwnerType: "USER", OwnerID: "user", CredentialName: "linked", AuthType: mcp.AuthTypeBasic, SecretValue: "user:pass"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = svc.BindEmployee(ctx, "EMP-test", mcp.BindEmployeeInput{MCPServerID: srv.ID, CredentialID: cred.ID}); err != nil {
 		t.Fatal(err)
 	}
-	s := &Service{MCP: svc}
+	employees := employee.NewService(employee.NewMemoryStore(), audit.NewMemory(), nil)
+	e, err := employees.Create(ctx, employee.CreateInput{Name: "test", OwnerUserID: "user"}, "user", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.BindEmployee(ctx, e.ID, mcp.BindEmployeeInput{MCPServerID: srv.ID, CredentialID: cred.ID}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{MCP: svc, Employees: employees}
 	for _, tc := range []struct {
 		authType, secret, header, want string
 		metadata                       map[string]any
@@ -38,7 +48,7 @@ func TestDispatchFollowsLinkedCredentialChanges(t *testing.T) {
 		if _, err := svc.UpdateCredential(ctx, cred.ID, mcp.CreateCredentialInput{AuthType: tc.authType, SecretValue: tc.secret, Metadata: tc.metadata}); err != nil {
 			t.Fatal(err)
 		}
-		payload, err := s.buildStartJobPayload(ctx, "EMP-test", "hello", "ws", "path", "")
+		payload, err := s.buildStartJobPayload(ctx, e.ID, "hello", "ws", "path", "")
 		if err != nil {
 			t.Fatal(err)
 		}

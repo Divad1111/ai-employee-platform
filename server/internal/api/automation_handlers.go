@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -237,14 +238,19 @@ func (d Deps) handleAutomationWebhook(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "automation 未启用")
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "读取 body 失败")
+		writeErr(w, http.StatusRequestEntityTooLarge, "请求体超过限制或读取失败")
 		return
 	}
-	run, j, err := d.Automation.HandleWebhook(r.Context(), r.PathValue("path_token"), r, body)
+	forwarded := r.Clone(r.Context())
+	forwarded.RemoteAddr = net.JoinHostPort(clientIP(r), "0")
+	forwarded.Header.Del("X-Forwarded-For")
+	run, j, err := d.Automation.HandleWebhook(r.Context(), r.PathValue("path_token"), forwarded, body)
 	if err != nil {
 		switch {
+		case errors.Is(err, automation.ErrWebhookReplay):
+			writeErr(w, http.StatusConflict, "请求已使用")
 		case errors.Is(err, automation.ErrNotFound):
 			writeErr(w, http.StatusNotFound, "webhook 不存在")
 		case errors.Is(err, automation.ErrRateLimited):

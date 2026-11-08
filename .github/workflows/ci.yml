@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24.x"
+          go-version: "1.27.3"
           cache: false
       - name: Install buf + protoc plugins
         run: |
@@ -40,6 +40,18 @@ jobs:
           go build -o bin/server ./cmd/server
           go build -o bin/migrate ./cmd/migrate
 
+  security:
+    name: Dependency security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.3"
+          cache: false
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./server/... ./workstation/...
+
   workstation:
     name: Workstation (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -51,7 +63,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24.x"
+          go-version: "1.27.3"
           cache: false
       - name: Workstation tidy & test
         working-directory: workstation
@@ -79,7 +91,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24.x"
+          go-version: "1.27.3"
           cache: false
       - name: Build cross-platform binaries
         working-directory: workstation
@@ -116,5 +128,6 @@ jobs:
           cache: npm
           cache-dependency-path: admin/package-lock.json
       - run: npm ci
+      - run: npm audit --audit-level=low
       - run: npm run lint
       - run: npm run build

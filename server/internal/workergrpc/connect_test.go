@@ -25,7 +25,7 @@ func TestConnectResumeHeartbeatEvent(t *testing.T) {
 	cmds := reliability.NewCommandStore(0)
 	events := reliability.NewEventStore(0)
 	presence := reliability.NewPresence(5, 15)
-	gs, lis, _, err := workergrpc.ListenAndServeWith("127.0.0.1:0", ca, srvCert, workergrpc.Options{
+	gs, lis, _, err := workergrpc.ListenAndServeWith("127.0.0.1:0", ca, srvCert, workergrpc.Options{ValidateEvent: func(string, *aiev1.Event) error { return nil },
 		CA: ca, Commands: cmds, Events: events, Presence: presence,
 	})
 	if err != nil {
@@ -165,7 +165,7 @@ func TestServerRestartKeepsCommandStore(t *testing.T) {
 	wsID := "WS-RESTART"
 	cmd, _, _ := cmds.Enqueue(wsID, aiev1.CommandType_COMMAND_TYPE_SYNC_WORKSPACE, "", "", `{}`)
 
-	gs1, lis1, _, err := workergrpc.ListenAndServeWith("127.0.0.1:0", ca, srvCert, workergrpc.Options{
+	gs1, lis1, _, err := workergrpc.ListenAndServeWith("127.0.0.1:0", ca, srvCert, workergrpc.Options{ValidateEvent: func(string, *aiev1.Event) error { return nil },
 		CA: ca, Commands: cmds,
 	})
 	if err != nil {
@@ -174,7 +174,7 @@ func TestServerRestartKeepsCommandStore(t *testing.T) {
 	gs1.Stop()
 	_ = lis1
 
-	gs2, lis2, _, err := workergrpc.ListenAndServeWith("127.0.0.1:0", ca, srvCert, workergrpc.Options{
+	gs2, lis2, _, err := workergrpc.ListenAndServeWith("127.0.0.1:0", ca, srvCert, workergrpc.Options{ValidateEvent: func(string, *aiev1.Event) error { return nil },
 		CA: ca, Commands: cmds,
 	})
 	if err != nil {

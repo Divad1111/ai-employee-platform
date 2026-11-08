@@ -281,6 +281,9 @@ func main() {
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
 	defer sweepCancel()
 	workerSvc.StartPresenceSweeper(sweepCtx, time.Second)
+	if pgSQL != nil {
+		statepg.StartReplayCleanup(sweepCtx, pgSQL)
+	}
 
 	sched := scheduler.New(jobSvc, empSvc, wsNodeSvc, presence, workerSvc)
 	sched.SetWorkspaces(wsSvc)
@@ -299,6 +302,11 @@ func main() {
 
 	quotaSvc := quota.NewService(quotaStore)
 	autoSvc := automation.New(autoStore, jobSvc, sched, vault, auditor)
+	if pgSQL != nil {
+		autoSvc.ClaimReplay = func(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+			return statepg.Claim(ctx, pgSQL, "automation:"+key, ttl)
+		}
+	}
 	autoSvc.SetNotify(automation.FeishuBridge{Svc: feishuSvc}, notifySvc)
 	sched.OnTerminal = func(ctx context.Context, j *job.Job) {
 		taskConversationSvc.OnJobStatus(ctx, j.ID, j.Status, j.Result)
@@ -702,7 +710,7 @@ func main() {
 	mux.Handle("/", httpHandler)
 	mux.Handle("/mcp", mcpSrv.Handler())
 	httpSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: api.SecureHTTP(mux, cfg),
-		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 120 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	go func() {
 		fmt.Printf("HTTP 监听 %s\n", cfg.HTTPAddr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

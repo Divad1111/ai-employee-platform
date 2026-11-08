@@ -41,7 +41,13 @@ func commandFixture(t *testing.T) (*feishu.Service, *feishu.MemorySender, *emplo
 	ws := workstation.NewService(ca, presence, nil)
 	bridge := &feishu.Bridge{Employees: employees, Feishu: fs, Workstations: ws}
 	fs.Commands, fs.Employees = bridge, bridge
-	fs.UpsertBinding(feishu.Binding{EmployeeID: e.ID, FeishuAlias: "test3", FeishuOpenID: "owner"})
+	fs.AuthorizeActor = func(_ context.Context, employeeID, openID string) error {
+		if employeeID != e.ID || openID != "owner" {
+			return fmt.Errorf("unauthorized")
+		}
+		return nil
+	}
+	fs.UpsertBinding(feishu.Binding{Verified: true, OwnerUserID: "user", ChatID: "chat", EmployeeID: e.ID, FeishuAlias: "test3", FeishuOpenID: "owner"})
 	conversations := taskconversation.NewService(taskconversation.NewMemoryStore(), fs, nil, nil)
 	conversations.Employees, conversations.Workstations = employees, ws
 	fs.SetTaskConversationHandler(conversations)
@@ -101,7 +107,7 @@ func TestEmployeeControlAuthorizationAndPersistence(t *testing.T) {
 			if _, _, err := fs.HandleMessage(ctx, ev); err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(sender.Sent[0].Content, "未绑定") || fs.EmployeeHasOpenID(id, "stranger") {
+			if (!strings.Contains(sender.Sent[0].Content, "未绑定") && !strings.Contains(sender.Sent[0].Content, "无权")) || fs.EmployeeHasOpenID(id, "stranger") {
 				t.Fatal("control implicitly granted permission")
 			}
 			e, _ := employees.Get(ctx, id)
