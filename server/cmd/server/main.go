@@ -286,6 +286,9 @@ func main() {
 	}
 
 	sched := scheduler.New(jobSvc, empSvc, wsNodeSvc, presence, workerSvc)
+	assignmentAuth := api.Deps{Config: cfg, Auth: authSvc, WSMembers: wsMembers, WSShare: wsShare}
+	sched.AuthorizeAssignment = assignmentAuth.AuthorizeAssignment
+
 	sched.SetWorkspaces(wsSvc)
 	var taskConversationStore taskconversation.Store = taskconversation.NewMemoryStore()
 	if pgSQL != nil {

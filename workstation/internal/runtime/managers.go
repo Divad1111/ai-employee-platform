@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -142,8 +141,9 @@ func (m *Managers) EnsureEmployee(id, name, provider string) (*Employee, error) 
 	if e, ok := m.employees[id]; ok {
 		return e, nil
 	}
-	dir := filepath.Join(m.Paths.WorkspaceRoot(), id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	dir, err := m.secureWorkspacePath(id, "")
+	dir = filepath.Dir(dir)
+	if err != nil {
 		return nil, err
 	}
 	e := &Employee{ID: id, Name: name, Provider: provider, Dir: dir}
@@ -158,10 +158,11 @@ func (m *Managers) EnsureEmployee(id, name, provider string) (*Employee, error) 
 func (m *Managers) EnsureWorkspace(id, employeeID, path string) (*Workspace, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if path == "" {
-		path = filepath.Join(m.Paths.WorkspaceRoot(), employeeID, "workspace")
+	if old := m.workspaces[id]; old != nil && old.EmployeeID != employeeID {
+		return nil, fmt.Errorf("工作区已属于其他员工")
 	}
-	if err := os.MkdirAll(path, 0o755); err != nil {
+	path, err := m.secureWorkspacePath(employeeID, path)
+	if err != nil {
 		return nil, err
 	}
 	w := &Workspace{ID: id, EmployeeID: employeeID, Path: path}
@@ -184,6 +185,10 @@ func (m *Managers) StartSessionWithMCP(ctx context.Context, sessID, employeeID, 
 		}
 	}
 	w := m.workspaces[workspaceID]
+	if w != nil && w.EmployeeID != employeeID {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("无权使用其他员工的工作区")
+	}
 	if w != nil && w.LockedBy != "" && w.LockedBy != sessID {
 		m.mu.Unlock()
 		return nil, ErrLocked
@@ -211,6 +216,10 @@ func (m *Managers) StartSessionWithMCP(ctx context.Context, sessID, employeeID, 
 
 	prov, err := m.Registry.Get(provider)
 	if err != nil {
+		m.markSession(sessID, SessUnknown)
+		return nil, err
+	}
+	if _, err := m.secureWorkspacePath(employeeID, wsPath); err != nil {
 		m.markSession(sessID, SessUnknown)
 		return nil, err
 	}

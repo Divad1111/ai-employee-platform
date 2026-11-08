@@ -50,7 +50,10 @@ jobs:
           go-version: "1.27.3"
           cache: false
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
-      - run: govulncheck ./server/... ./workstation/...
+      - run: govulncheck ./...
+        working-directory: server
+      - run: govulncheck ./...
+        working-directory: workstation
 
   workstation:
     name: Workstation (${{ matrix.os }})
@@ -131,3 +134,13 @@ jobs:
       - run: npm audit --audit-level=low
       - run: npm run lint
       - run: npm run build
+      - name: Browser security regressions
+        env:
+          PLAYWRIGHT_CHANNEL: chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/aie-browser" playwright@1.65.0 --no-audit --no-fund
+          "$RUNNER_TEMP/aie-browser/node_modules/.bin/playwright" install --with-deps chromium
+          export PLAYWRIGHT_MODULE_PATH="$RUNNER_TEMP/aie-browser/node_modules/playwright"
+          node tests/security.browser.cjs
+          ASSET_UI_START_SERVER=1 ASSET_UI_PREVIEW=1 node tests/skillAssets.browser.cjs
+          BACKUP_UI_START_SERVER=1 node tests/backups.browser.cjs

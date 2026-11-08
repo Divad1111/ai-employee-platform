@@ -64,6 +64,8 @@ type Service struct {
 	TaskQueue    taskQueueGate
 	// Maintenance 在基础设施维护期间暂停分配新任务，已有任务可以正常结束。
 	Maintenance func(context.Context, string) (bool, error)
+	// AuthorizeAssignment 在实际派发时复核当前用户和节点授权。
+	AuthorizeAssignment func(context.Context, *job.Job, *employee.Employee, string) error
 	// OnTerminal 调度器自行把任务打到终态时回调，用于向飞书回执失败。
 	OnTerminal         func(ctx context.Context, j *job.Job)
 	WorkflowMCP        *workflowmcp.Service
@@ -175,6 +177,17 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job
 	if s.Workspaces != nil && j.WorkspaceID != "" {
 		if wsp, err := s.Workspaces.Get(ctx, j.WorkspaceID); err == nil && wsp != nil {
 			workspacePath = wsp.Path
+		}
+	}
+	if s.Workspaces != nil && j.WorkspaceID != "" {
+		wsp, err := s.Workspaces.Get(ctx, j.WorkspaceID)
+		if err != nil || wsp.WorkstationID != wsID || (wsp.EmployeeID != "" && wsp.EmployeeID != emp.ID) {
+			return nil, errors.New("工作区、员工与工作站不一致")
+		}
+	}
+	if s.AuthorizeAssignment != nil {
+		if err := s.AuthorizeAssignment(ctx, j, emp, wsID); err != nil {
+			return nil, err
 		}
 	}
 	// 先校验运行时凭证，失败时保留任务可重试状态，避免卡在 ASSIGNED。

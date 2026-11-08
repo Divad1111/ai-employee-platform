@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ai-employee-platform/workstation/internal/runtimeenv"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,8 +37,9 @@ func (p *Provider) ListModels(ctx context.Context) ([]providers.Model, error) {
 
 func listFallbackModels(ctx context.Context, bin string) ([]providers.Model, error) {
 	cmd := exec.CommandContext(ctx, bin, "models")
+	cmd.Env = runtimeenv.Base()
 	if userHome := findUserHome(); userHome != "" {
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(runtimeenv.Base(),
 			"USERPROFILE="+userHome,
 			"HOME="+userHome,
 			"LOCALAPPDATA="+filepath.Join(userHome, "AppData", "Local"),
@@ -64,8 +66,9 @@ func defaultCursorModels() []providers.Model {
 
 func listACPModels(ctx context.Context, bin string) ([]providers.Model, error) {
 	cmd := exec.CommandContext(ctx, bin, "acp")
+	cmd.Env = runtimeenv.Base()
 	if userHome := findUserHome(); userHome != "" {
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(runtimeenv.Base(),
 			"USERPROFILE="+userHome,
 			"HOME="+userHome,
 			"LOCALAPPDATA="+filepath.Join(userHome, "AppData", "Local"),

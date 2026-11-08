@@ -440,12 +440,18 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 		if startJob != nil && startJob.GetProvider() != "" {
 			provider = startJob.GetProvider()
 		}
-		_, _ = d.Runtime.EnsureEmployee(empID, empID, provider)
+		if _, err := d.Runtime.EnsureEmployee(empID, empID, provider); err != nil {
+			return err
+		}
 
 		// 确保工作区视图（使用 Control Plane 下发的本机路径，禁止静默落到默认目录）
 		wsID := payload.WorkspaceID
 		if wsID != "" {
-			_, _ = d.Runtime.EnsureWorkspace(wsID, empID, payload.WorkspacePath)
+			workspace, err := d.Runtime.EnsureWorkspace(wsID, empID, payload.WorkspacePath)
+			if err != nil {
+				return err
+			}
+			payload.WorkspacePath = workspace.Path
 		}
 
 		// 将会话 MCP 配置转为 []any

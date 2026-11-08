@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ai-employee-platform/workstation/internal/runtimeenv"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -287,6 +288,7 @@ func buildCommand(ctx context.Context, agentCmd string, args []string, dir strin
 	} else {
 		cmd = exec.CommandContext(ctx, agentCmd, args...)
 	}
+	cmd.Env = runtimeenv.Base()
 	if dir != "" {
 		cmd.Dir = dir
 	}

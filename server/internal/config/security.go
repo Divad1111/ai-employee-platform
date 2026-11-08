@@ -31,6 +31,11 @@ func (c *Config) validateSecurity() error {
 	if err != nil || len(db.Password) < 20 || db.Password == "aie" || strings.Contains(db.Password, "CHANGE_ME") {
 		return fmt.Errorf("生产数据库必须配置至少 20 字符的随机密码")
 	}
+	if db.Host != "postgres" && db.Host != "localhost" && db.Host != "127.0.0.1" && db.Host != "::1" {
+		if db.TLSConfig == nil || db.TLSConfig.InsecureSkipVerify || db.TLSConfig.ServerName == "" || len(db.Fallbacks) > 0 {
+			return fmt.Errorf("生产远程数据库必须使用 sslmode=verify-full 并验证服务器证书")
+		}
+	}
 	public, err := url.Parse(c.PublicServerURL)
 	if err != nil || public.Scheme != "https" || public.Host == "" || public.User != nil {
 		return fmt.Errorf("生产 AIE_PUBLIC_SERVER_URL 必须为可信 HTTPS 地址")

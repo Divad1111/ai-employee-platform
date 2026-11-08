@@ -3,18 +3,15 @@
  * 所有数据访问必须经 REST，禁止前端直连数据库。
  */
 
-const TOKEN_KEY = 'aie_admin_token'
-
-/** 读取本地会话 token */
-export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY)
+const SESSION_KEY = 'aie_browser_session'
+// 清除旧版本保存的 Bearer Token，升级后重新登录。
+localStorage.removeItem('aie_admin_token')
+export function hasSession(): boolean { return localStorage.getItem(SESSION_KEY) === '1' }
+export function setSessionPresent(present: boolean): void {
+  if (present) localStorage.setItem(SESSION_KEY, '1')
+  else localStorage.removeItem(SESSION_KEY)
 }
-
-/** 保存 token */
-export function setToken(token: string | null): void {
-  if (token) localStorage.setItem(TOKEN_KEY, token)
-  else localStorage.removeItem(TOKEN_KEY)
-}
+export function browserHeaders(): Record<string, string> { return { 'X-AIE-Browser': '1' } }
 
 /** 发起 JSON 请求 */
 export async function apiRequest<T>(
@@ -23,8 +20,7 @@ export async function apiRequest<T>(
 ): Promise<T> {
   const headers = new Headers(opts.headers)
   headers.set('Accept', 'application/json')
-  const token = getToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
+  headers.set('X-AIE-Browser', '1')
   let body = opts.body
   if (opts.json !== undefined) {
     headers.set('Content-Type', 'application/json')
@@ -43,7 +39,7 @@ export async function apiRequest<T>(
     // 二次认证密码错误不能清掉当前登录会话。
     const wrongPassword = msg.includes('密码错误')
     if (res.status === 401 && !wrongPassword) {
-      setToken(null)
+      setSessionPresent(false)
     }
     throw new Error(msg)
   }

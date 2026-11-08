@@ -5,7 +5,7 @@
  * - Webhook：创建后密钥卡片；列表展示鉴权/限流等
  */
 import { FormEvent, Fragment, type ReactNode, useEffect, useMemo, useState } from 'react'
-import { apiGet, getToken } from '../api/client'
+import { apiGet } from '../api/client'
 import {
   Automation,
   AutomationRun,
@@ -215,8 +215,7 @@ export function AutomationsPage() {
   async function ensureMe() {
     try {
       const me = await apiGet<{ id: string; username: string; roles: string[] }>('/auth/me')
-      const token = getToken()
-      if (token) setSession(token, { id: me.id, username: me.username, roles: me.roles ?? [] })
+      setSession({ id: me.id, username: me.username, roles: me.roles ?? [] })
       setWritable(rolesCanWrite(me.roles))
     } catch {
       setWritable(rolesCanWrite(getUser()?.roles))

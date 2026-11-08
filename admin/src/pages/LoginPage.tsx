@@ -49,7 +49,7 @@ export function LoginPage() {
         password,
         ...(totp ? { totp } : {}),
       })
-      setSession(data.token, data.user)
+      setSession(data.user)
       nav('/', { replace: true })
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : '登录认证失败，请检查账号密码'

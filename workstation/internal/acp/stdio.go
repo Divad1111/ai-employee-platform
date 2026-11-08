@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ai-employee-platform/workstation/internal/runtimeenv"
 	"io"
 	"os"
 	"os/exec"
@@ -138,7 +139,7 @@ func (s *StdioSession) Start(ctx context.Context) error {
 	if s.workDir != "" {
 		cmd.Dir = s.workDir
 	}
-	cmd.Env = append(os.Environ(), s.env...)
+	cmd.Env = append(runtimeenv.Base(), s.env...)
 	cmd.Stderr = os.Stderr
 
 	stdin, err := cmd.StdinPipe()

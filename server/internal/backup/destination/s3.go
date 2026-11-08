@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -50,6 +51,9 @@ func NewS3Destination(opts S3Options) (*S3Destination, error) {
 	} else if strings.HasPrefix(ep, "http://") {
 		ep = strings.TrimPrefix(ep, "http://")
 		useSSL = false
+	}
+	if strings.EqualFold(os.Getenv("AIE_ENV"), "production") && !useSSL {
+		return nil, fmt.Errorf("生产 S3 备份必须使用 HTTPS")
 	}
 	ep = strings.TrimRight(ep, "/")
 

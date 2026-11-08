@@ -79,3 +79,7 @@ docker compose run --rm migrate -dir /migrations status
 由于所有数据已映射到宿主机本地 `./data/`：
 - **热备份**：可以直接使用 `docker exec -t aie-postgres pg_dumpall -c -U aie > backup.sql`
 - **冷备份**：在停止容器状态下，直接打包备份宿主机上的 `./data` 目录即可。
+
+## 2026-11-08 安全升级
+
+升级控制面、Admin 与工作站前请阅读 [安全修复及迁移说明](../docs/SECURITY_FIXES_2026-11-08.md)。本次涉及 Cookie 会话、员工专属工作目录、生产工作站租户隔离、管理权限和远端 TLS 要求。

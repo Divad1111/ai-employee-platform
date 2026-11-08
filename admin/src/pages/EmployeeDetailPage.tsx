@@ -620,7 +620,7 @@ export function EmployeeDetailPage() {
           <div style={{ marginTop: '1rem', padding: '1rem', background: '#f8fafc', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-md)' }}>
             <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: 'var(--brand-700)' }}>快速新建项目工作区</h4>
             <p style={{ margin: '0 0 0.75rem', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-              将登记到上方已选工作站节点上的本机路径{wsId ? `（${wsId}）` : '；请先选择工作站'}
+              路径必须位于该员工专属目录内；将登记到所选工作站{wsId ? `（${wsId}）` : '；请先选择工作站'}
             </p>
             <form onSubmit={onCreateWsQuick} style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
               <input

@@ -247,7 +247,7 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*Session, err
 		sess.StepUpUntil = time.Time{}
 	}
 	sess.Roles = append([]string(nil), u.Roles...)
-	sess.MFARequired = s.EnforceAdminMFA && AdminRoles(u.Roles)
+	sess.MFARequired = s.RequiresMFA(ctx, u.Roles)
 
 	return sess, nil
 }
@@ -322,13 +322,8 @@ func (s *Service) StepUp(ctx context.Context, token, password, ip string, ttl ti
 	if err != nil {
 		return nil, err
 	}
-	u, err := s.users.FindByUsername(ctx, sess.Username)
-	if err != nil || u == nil {
-		return nil, ErrInvalidCredentials
-	}
-	if bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)) != nil {
-		s.audit.Log(ctx, "USER", sess.UserID, "auth.step_up", "failed", ip, nil)
-		return nil, ErrInvalidCredentials
+	if err := s.VerifyPassword(ctx, sess.Username, password); err != nil {
+		return nil, err
 	}
 	if ttl <= 0 {
 		ttl = 10 * time.Minute
@@ -343,11 +338,18 @@ func (s *Service) StepUp(ctx context.Context, token, password, ip string, ttl ti
 
 // VerifyPassword 校验用户密码（TOTP 注册等场景）。
 func (s *Service) VerifyPassword(ctx context.Context, username, password string) error {
+	if !s.limiter.Allow("reauth:user:" + username) {
+		return ErrReauthLimited
+	}
 	u, err := s.users.FindByUsername(ctx, username)
 	if err != nil || u == nil {
 		return ErrInvalidCredentials
 	}
+	if u.Status != StatusActive {
+		return ErrUserDisabled
+	}
 	if bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)) != nil {
+		s.audit.Log(ctx, "USER", u.ID, "auth.reauthenticate", "failed", "", nil)
 		return ErrInvalidCredentials
 	}
 	return nil
@@ -869,7 +871,9 @@ func (m *MemoryUserStore) DeleteRole(_ context.Context, name string) error {
 func (m *MemoryUserStore) SoftDelete(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
- if len(m.users)>0{m.initialized=true}
+	if len(m.users) > 0 {
+		m.initialized = true
+	}
 	uname := m.byID[id]
 	if uname == "" {
 		return errors.New("用户不存在")

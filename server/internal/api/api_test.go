@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -237,34 +238,29 @@ func TestAPIEmployeeJobSessionMessageFlow(t *testing.T) {
 func TestAPISSEReceivesJobEvent(t *testing.T) {
 	h, tok := setupAPI(t)
 	_, emp := doJSON(t, h, http.MethodPost, "/api/employees", tok, map[string]string{"name": "S"})
-	empID := emp["id"].(string)
-
-	ctx, cancel := context.WithCancel(context.Background())
+	server := httptest.NewServer(h)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/api/events", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	rr := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		h.ServeHTTP(rr, req)
-		close(done)
-	}()
-	time.Sleep(50 * time.Millisecond)
-	doJSON(t, h, http.MethodPost, "/api/jobs", tok, map[string]any{
-		"employee_id": empID, "prompt": "x", "idempotency_key": "sse-1",
-	})
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(rr.Body.String(), "job.status") {
-			cancel()
-			<-done
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	code, body := doJSON(t, h, http.MethodPost, "/api/jobs", tok, map[string]any{"employee_id": emp["id"], "prompt": "x", "idempotency_key": "sse-1"})
+	if code != 201 {
+		t.Fatal(code, body)
+	}
+	// 通过真实流读取事件，避免测试并发读写非线程安全的 ResponseRecorder。
+	scanner := bufio.NewScanner(response.Body)
+	for scanner.Scan() {
+		if strings.Contains(scanner.Text(), "job.status") {
 			return
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
-	cancel()
-	<-done
-	t.Fatalf("SSE 未收到 job.status: %s", rr.Body.String())
+	t.Fatalf("未收到任务事件: %v", scanner.Err())
 }
 
 func TestWorkspaceUnbindAndDeleteStepUp(t *testing.T) {

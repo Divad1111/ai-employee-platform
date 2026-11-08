@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ai-employee-platform/workstation/internal/runtimeenv"
 	"os/exec"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ func (p *Provider) ListModels(ctx context.Context) ([]providers.Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, info.Path, "app-server", "--listen", "stdio://")
+	cmd.Env = runtimeenv.Base()
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

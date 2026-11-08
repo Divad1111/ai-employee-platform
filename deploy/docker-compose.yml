@@ -4,6 +4,9 @@
 
 services:
   postgres:
+    cpus: ${AIE_POSTGRES_CPUS:-2}
+    mem_limit: ${AIE_POSTGRES_MEMORY:-1g}
+    pids_limit: 256
     image: ${AIE_POSTGRES_IMAGE:-postgres:16-alpine}
     container_name: aie-postgres
     restart: unless-stopped
@@ -50,6 +53,9 @@ services:
         condition: service_healthy
 
   control-plane:
+    cpus: ${AIE_CONTROL_PLANE_CPUS:-2}
+    mem_limit: ${AIE_CONTROL_PLANE_MEMORY:-2g}
+    pids_limit: 256
     image: ${AIE_CONTROL_PLANE_IMAGE:?请指定控制面镜像版本或 digest}
     container_name: aie-control-plane
     restart: unless-stopped
@@ -94,6 +100,9 @@ services:
         condition: service_completed_successfully
 
   admin-web:
+    cpus: ${AIE_ADMIN_WEB_CPUS:-1}
+    mem_limit: ${AIE_ADMIN_WEB_MEMORY:-128m}
+    pids_limit: 128
     image: ${AIE_ADMIN_IMAGE:?请指定管理页镜像版本或 digest}
     container_name: aie-admin
     restart: unless-stopped
@@ -103,6 +112,9 @@ services:
       - control-plane
 
   gateway:
+    cpus: ${AIE_GATEWAY_CPUS:-1}
+    mem_limit: ${AIE_GATEWAY_MEMORY:-256m}
+    pids_limit: 128
     image: ${AIE_GATEWAY_IMAGE:-caddy:2-alpine}
     profiles: [public]
     restart: unless-stopped

@@ -1,5 +1,5 @@
 /** 基础设施 REST 客户端。令牌只放请求头，SSH 使用单次短时票据。 */
-import { apiGet, apiPost, apiPut, apiRequest, getToken } from './client'
+import { apiGet, apiPost, apiPut, apiRequest } from './client'
 
 export type Cluster = {
   id: string
@@ -214,7 +214,7 @@ export async function addRelease(v: Partial<Release>, file?: File) {
 }
 export async function downloadRelease(v: Release) {
   const res = await fetch(`/api${root}/releases/${v.id}/download`, {
-    headers: { Authorization: `Bearer ${getToken() || ''}` },
+    headers: { 'X-AIE-Browser': '1' },
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))

@@ -153,7 +153,7 @@ func (s *Server) authenticate(r *http.Request) (*Caller, error) {
 			if s.Auth.Authorize(r.Context(), session, "workflow.read") != nil {
 				return nil, auth.ErrForbidden
 			}
-			if s.Auth.EnforceAdminMFA && auth.AdminRoles(u.Roles) {
+			if s.Auth.RequiresMFA(r.Context(), u.Roles) {
 				return nil, fmt.Errorf("管理员请使用已完成双因子验证的 Web 会话")
 			}
 			c.CanWrite = t.Scope == mcpauth.ScopeAdmin && s.Auth.AuthorizeAll(r.Context(), session, "workflow.write") == nil

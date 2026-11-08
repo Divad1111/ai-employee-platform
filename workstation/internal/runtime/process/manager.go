@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ai-employee-platform/workstation/internal/runtimeenv"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -172,9 +173,7 @@ func (OSRunner) Start(ctx context.Context, spec Spec) (int, func() error, func()
 	if spec.WorkDir != "" {
 		cmd.Dir = spec.WorkDir
 	}
-	if len(spec.Env) > 0 {
-		cmd.Env = append(os.Environ(), spec.Env...)
-	}
+	cmd.Env = append(runtimeenv.Base(), spec.Env...)
 	if err := cmd.Start(); err != nil {
 		return 0, nil, nil, err
 	}

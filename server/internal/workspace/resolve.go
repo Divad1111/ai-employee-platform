@@ -101,3 +101,22 @@ func sameLocalPath(a, b string) bool {
 	}
 	return norm(a) == norm(b)
 }
+
+// LookupReference 以 ID 或同一节点的本机路径查找现有工作区，不创建或修改记录。
+func (s *Service) LookupReference(ctx context.Context, ref, node string) (*Workspace, error) {
+	if w, err := s.store.Get(ctx, ref); err == nil && w != nil {
+		return w, nil
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	rows, err := s.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range rows {
+		if w.WorkstationID == node && sameLocalPath(w.Path, ref) {
+			return w, nil
+		}
+	}
+	return nil, ErrNotFound
+}

@@ -386,6 +386,10 @@ type setupInitReq struct {
 }
 
 func (d Deps) handleSetupInit(w http.ResponseWriter, r *http.Request) {
+	if !validCookieRequest(r) {
+		writeErr(w, 403, "浏览器请求来源校验失败")
+		return
+	}
 	if d.Auth == nil {
 		writeErr(w, http.StatusServiceUnavailable, "认证服务未就绪")
 		return
@@ -448,7 +452,7 @@ func (d Deps) handleSetupInit(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"status":      "ok",
-		"token":       sess.Token,
+		"token":       d.browserSession(w, r, sess),
 		"expires_at":  sess.ExpiresAt,
 		"system_name": req.SystemName,
 		"user": map[string]any{
@@ -467,6 +471,10 @@ type loginReq struct {
 }
 
 func (d Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if !validCookieRequest(r) {
+		writeErr(w, 403, "浏览器请求来源校验失败")
+		return
+	}
 	var req loginReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效请求体")
@@ -513,7 +521,7 @@ func (d Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token":      sess.Token,
+		"token":      d.browserSession(w, r, sess),
 		"expires_at": sess.ExpiresAt,
 		"user": map[string]any{
 			"id":       sess.UserID,
@@ -525,6 +533,7 @@ func (d Deps) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) handleLogout(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	_ = d.Auth.Logout(r.Context(), sess.Token, clientIP(r))
+	clearBrowserSession(w, r, d.Config)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -813,11 +822,18 @@ func (d Deps) handleCreateEmployee(w http.ResponseWriter, r *http.Request, sess 
 		writeErr(w, http.StatusBadRequest, "无效请求体")
 		return
 	}
+	if !d.scopeAll(r, sess, "employee.write") && in.OwnerUserID != "" && in.OwnerUserID != sess.UserID {
+		writeErr(w, 403, "不能为其他用户创建员工")
+		return
+	}
 	if in.OwnerUserID == "" {
 		in.OwnerUserID = sess.UserID
 	}
 	if err := d.ensureWSAccessForEmployee(r.Context(), sess, in.WorkstationID, in.OwnerUserID); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if !d.authorizeWorkspaceRef(w, r, sess, in.WorkspaceID, in.WorkstationID, "employee.write") {
 		return
 	}
 	if resolved, err := d.resolveEmployeeWorkspace(r.Context(), in.WorkspaceID, in.WorkstationID, "", sess.UserID, clientIP(r)); err != nil {
@@ -890,6 +906,21 @@ func (d Deps) handleUpdateEmployee(w http.ResponseWriter, r *http.Request, sess 
 	}
 	if v, ok := raw["workstation_id"].(string); ok {
 		in.WorkstationID = &v
+	}
+	node := existing.WorkstationID
+	if in.WorkstationID != nil {
+		node = *in.WorkstationID
+	}
+	if err := d.ensureWSAccessForEmployee(r.Context(), sess, node, sess.UserID); err != nil {
+		writeErr(w, 403, err.Error())
+		return
+	}
+	ref := existing.WorkspaceID
+	if v, ok := raw["workspace_id"].(string); ok {
+		ref = v
+	}
+	if !d.authorizeWorkspaceRef(w, r, sess, ref, node, "employee.write") {
+		return
 	}
 	if v, ok := raw["workspace_id"].(string); ok {
 		node := existing.WorkstationID
@@ -996,6 +1027,9 @@ func (d Deps) handleCreateWorkspace(w http.ResponseWriter, r *http.Request, sess
 			return
 		}
 	}
+	if !d.authorizeWorkspaceEmployee(w, r, sess, in.EmployeeID, in.WorkstationID) {
+		return
+	}
 	ws, err := d.Workspaces.Create(r.Context(), in, sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -1034,6 +1068,17 @@ func (d Deps) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request, sess
 		Branch        string `json:"branch"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	node := body.WorkstationID
+	if node == "" {
+		node = ws.WorkstationID
+	}
+	if !d.scopeAll(r, sess, "workspace.write") && !d.userIDMayUseWorkstation(r.Context(), sess.UserID, node, sess.Roles) {
+		writeErr(w, 403, "无权使用目标工作站")
+		return
+	}
+	if !d.authorizeWorkspaceEmployee(w, r, sess, ws.EmployeeID, node) {
+		return
+	}
 	res, err := d.Workspaces.Update(r.Context(), r.PathValue("id"), body.WorkstationID, body.Path, body.Repository, body.Branch, sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -1059,6 +1104,9 @@ func (d Deps) handleBindWorkspace(w http.ResponseWriter, r *http.Request, sess *
 		writeErr(w, http.StatusBadRequest, "无效请求体")
 		return
 	}
+	if !d.authorizeWorkspaceEmployee(w, r, sess, ws.EmployeeID, ws.WorkstationID) || !d.authorizeWorkspaceEmployee(w, r, sess, body.EmployeeID, ws.WorkstationID) {
+		return
+	}
 	var res *workspace.Workspace
 	if strings.TrimSpace(body.EmployeeID) == "" {
 		res, err = d.Workspaces.UnbindEmployee(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r))
@@ -1080,6 +1128,9 @@ func (d Deps) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request, sess
 	}
 	if !d.canWriteWorkspace(r, sess, ws) {
 		writeErr(w, http.StatusForbidden, "无权删除该工作区")
+		return
+	}
+	if !d.authorizeWorkspaceEmployee(w, r, sess, ws.EmployeeID, ws.WorkstationID) {
 		return
 	}
 	if err := d.Workspaces.Delete(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r)); err != nil {
@@ -1196,6 +1247,24 @@ func (d Deps) handleCreateSession(w http.ResponseWriter, r *http.Request, sess *
 			return
 		}
 	}
+	if in.EmployeeID != "" && d.Employees != nil {
+		e, err := d.Employees.Get(r.Context(), in.EmployeeID)
+		if err != nil {
+			writeErr(w, 400, "员工不存在")
+			return
+		}
+		if in.WorkstationID != "" && e.WorkstationID != "" && in.WorkstationID != e.WorkstationID {
+			writeErr(w, 403, "工作站与员工不一致")
+			return
+		}
+		ref := in.WorkspaceID
+		if ref == "" {
+			ref = e.WorkspaceID
+		}
+		if !d.authorizeWorkspaceRef(w, r, sess, ref, e.WorkstationID, "session.write") {
+			return
+		}
+	}
 	s, err := d.Sessions.Create(r.Context(), in, sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
@@ -1299,6 +1368,25 @@ func (d Deps) handleCreateJob(w http.ResponseWriter, r *http.Request, sess *auth
 		}
 		if in.EmployeeID == "" && (in.WorkstationID == "" || !d.userIDMayUseWorkstation(r.Context(), sess.UserID, in.WorkstationID, sess.Roles)) {
 			writeErr(w, http.StatusForbidden, "无权在该工作站创建任务")
+			return
+		}
+	}
+	if in.EmployeeID != "" && d.Employees != nil {
+		e, err := d.Employees.Get(r.Context(), in.EmployeeID)
+		if err != nil {
+			writeErr(w, 400, "员工不存在")
+			return
+		}
+		node := e.WorkstationID
+		if in.WorkstationID != "" && in.WorkstationID != node {
+			writeErr(w, 403, "任务工作站与员工不一致")
+			return
+		}
+		ref := in.WorkspaceID
+		if ref == "" {
+			ref = e.WorkspaceID
+		}
+		if !d.authorizeWorkspaceRef(w, r, sess, ref, node, "job.write") {
 			return
 		}
 	}
@@ -1547,6 +1635,10 @@ func (d Deps) requireSuperAdmin(next authed) authed {
 
 func (d Deps) requireAuth(next authed) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !validCookieRequest(r) {
+			writeErr(w, 403, "浏览器请求来源校验失败")
+			return
+		}
 		sess, err := d.Auth.Authenticate(r.Context(), bearer(r))
 		if err != nil {
 			if err == auth.ErrUserDisabled {
@@ -1554,6 +1646,9 @@ func (d Deps) requireAuth(next authed) http.HandlerFunc {
 				return
 			}
 			writeErr(w, http.StatusUnauthorized, "未登录")
+			return
+		}
+		if !d.checkReauthRate(w, r, sess) {
 			return
 		}
 		next(w, r, sess)
@@ -1599,7 +1694,13 @@ func bearer(r *http.Request) string {
 	if strings.HasPrefix(strings.ToLower(h), "bearer ") {
 		return strings.TrimSpace(h[7:])
 	}
-	return r.Header.Get("X-Session-Token")
+	if token := r.Header.Get("X-Session-Token"); token != "" {
+		return token
+	}
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		return c.Value
+	}
+	return ""
 }
 
 func (d Deps) auditUser(r *http.Request, sess *auth.Session, action string, meta map[string]string) {

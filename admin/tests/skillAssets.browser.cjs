@@ -18,9 +18,10 @@ const sha = bytes => createHash('sha256').update(bytes).digest('hex')
       await new Promise(resolve => setTimeout(resolve, 100))
     }
   }
-  const browser = await chromium.launch({ channel: 'chrome', headless: true })
+  const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true })
   const page = await browser.newPage({ viewport: { width: 1440, height: 1050 } })
   const errors = []
+    await require('./browserSecurity.cjs').enforceCSP(page, errors)
   const consoleErrors = []
   page.on('pageerror', error => errors.push(error.message))
   page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
@@ -38,7 +39,7 @@ const sha = bytes => createHash('sha256').update(bytes).digest('hex')
   const commits = []
   let reindexes = 0
   let failIndex = false
-  await page.addInitScript(() => localStorage.setItem('aie_admin_token', 'isolated-ui-test'))
+  await page.addInitScript(() => localStorage.setItem('aie_browser_session', '1'))
   await page.route(url => url.pathname.startsWith('/api/'), async route => {
     const req = route.request(); const url = new URL(req.url()); const suffix = url.pathname.replace(/^\/api/, '')
     const json = (body, status = 200) => route.fulfill({ status, json: body })
@@ -66,11 +67,16 @@ const sha = bytes => createHash('sha256').update(bytes).digest('hex')
     return json({ items: [] })
   })
   const edit = async text => {
+    await waitFor(() => page.getByRole('button', { name: '新建文件', exact: true }).isEnabled())
     const input = page.locator('.skill-assets-content .monaco-editor textarea').first()
     await input.waitFor({ state: 'attached' })
     await waitFor(() => input.isEditable())
-    await input.focus()
-    await page.keyboard.press('Control+A'); await page.keyboard.insertText(text)
+    // React 在切换文件后会异步同步 Monaco 模型；等待两帧再输入，避免写入被旧值覆盖。
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    await input.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A')
+    await page.keyboard.insertText(text)
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    await waitFor(async () => (await page.locator('.skill-assets-content .view-lines').innerText()).replace(/\u00a0/g, ' ').trim() === text.trim())
   }
   const select = name => page.locator('.skill-tree-file').filter({ hasText: name }).click()
   const waitFor = async predicate => { for (let i = 0; i < 100; i++) { if (await predicate()) return; await page.waitForTimeout(50) } throw new Error('Condition timed out') }

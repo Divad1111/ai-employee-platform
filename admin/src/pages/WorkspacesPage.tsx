@@ -236,7 +236,7 @@ export function WorkspacesPage() {
           {
             step: '2',
             title: '配置绝对物理路径 (Path)',
-            desc: '填写真实磁盘路径（如 F:\\ai-employee-test 或 /home/project），禁止隐式随机落盘。',
+            desc: '填写该员工专属目录内的绝对路径（工作站的员工根目录 / 员工ID / 项目目录）；根目录之外或符号链接路径将被拒绝。',
             tag: '路径挂载',
           },
           {

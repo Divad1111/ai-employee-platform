@@ -10,9 +10,9 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-
 // TestLoadDefaults 验证未设置环境变量时使用开发默认值。
 func TestLoadDefaults(t *testing.T) {
+	t.Setenv("AIE_ENV", "development")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load 失败: %v", err)
@@ -57,8 +57,6 @@ func TestPgxConnString(t *testing.T) {
 	}
 	_ = db.Close()
 
-
-
 	// 3. url.URL with UserPassword
 	u := &url.URL{
 		Scheme:   "postgres",
@@ -76,7 +74,6 @@ func TestPgxConnString(t *testing.T) {
 			cfgGenerated.User, cfgGenerated.Password, cfgGenerated.Host, cfgGenerated.Database)
 	}
 }
-
 
 func TestLoadDatabaseDSN(t *testing.T) {
 	t.Setenv("AIE_DATABASE_URL", "")
@@ -96,5 +93,10 @@ func TestLoadDatabaseDSN(t *testing.T) {
 	}
 }
 
-
-
+func TestUnsetEnvironmentFailsClosed(t *testing.T) {
+	t.Setenv("AIE_ENV", "")
+	t.Setenv("AIE_SECRET_MASTER_KEY", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("missing production secrets accepted")
+	}
+}

@@ -1,5 +1,5 @@
 /** 工作流MCP 前端类型与 API */
-import { apiDelete, apiGet, apiPost, apiPut, getToken, setToken } from './client'
+import { apiDelete, apiGet, apiPost, apiPut, setSessionPresent } from './client'
 import { rebuildSavedIndex } from './savedIndex'
 
 export type Workflow = {
@@ -91,13 +91,11 @@ export async function listSkillAssets(id: string): Promise<SkillAssetIndex> {
 }
 
 export async function readSkillAsset(id: string, path: string): Promise<{ blob: Blob; revision: number }> {
-  const headers = new Headers()
-  const token = getToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
+  const headers = new Headers({ 'X-AIE-Browser': '1' })
   const res = await fetch(`/api/workflow-mcp/skills/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`, { headers })
   if (!res.ok) {
     const body = await res.json().catch(() => ({})) as { error?: string }
-    if (res.status === 401) setToken(null)
+    if (res.status === 401) setSessionPresent(false)
     if (res.status === 409) throw new SkillAssetConflict('资产已被其他人更新，请比较最新内容后重试')
     throw new Error(body.error || `读取文件失败 (${res.status})`)
   }
@@ -113,13 +111,11 @@ export async function patchSkillAssets(id: string, revision: number, writes: { p
   })
   body.append('manifest', JSON.stringify({ revision, writes: operations, deletes }))
   // Keep the status so the editor can preserve drafts and offer conflict resolution.
-  const headers = new Headers()
-  const token = getToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
+  const headers = new Headers({ 'X-AIE-Browser': '1' })
   const res = await fetch(`/api/workflow-mcp/skills/${encodeURIComponent(id)}/assets`, { method: 'PATCH', headers, body })
   const result = await res.json() as { error?: string; changed: boolean; revision: number; content_hash: string; skill: SkillPackage; files: SkillAsset[] }
   if (!res.ok) {
-    if (res.status === 401) setToken(null)
+    if (res.status === 401) setSessionPresent(false)
     if (res.status === 409) throw new SkillAssetConflict('技能包已被其他人更新，本地草稿已保留')
     throw new Error(result.error || `保存失败 (${res.status})`)
   }
@@ -214,11 +210,9 @@ export async function importWorkflowMCPZip(file: File) {
   const fd = new FormData()
   fd.append('file', file)
   const headers = new Headers({ Accept: 'application/json' })
-  const token = getToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
   // 不要手动设 Content-Type，由浏览器带 multipart boundary
   const res = await fetch('/api/workflow-mcp/import', { method: 'POST', headers, body: fd })
-  if (res.status === 401) setToken(null)
+  if (res.status === 401) setSessionPresent(false)
   if (!res.ok) {
     let msg = `${res.status}`
     try {

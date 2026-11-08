@@ -219,104 +219,145 @@ func TestAutoPolicyCannotBypassDeployPermission(t *testing.T) {
 }
 
 func TestInfraConsolePTYUsesOneUseTicket(t *testing.T) {
-	f := setupInfrastructureAPI(t)
-	f.stepUp(t)
-	_, private, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signer, _ := ssh.NewSignerFromKey(private)
-	config := &ssh.ServerConfig{PasswordCallback: func(_ ssh.ConnMetadata, _ []byte) (*ssh.Permissions, error) { return nil, nil }}
-	config.AddHostKey(signer)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	go func() {
-		for {
-			conn, err := listener.Accept()
+	for _, revoke := range []string{"none", "logout", "disable", "roles", "password"} {
+		t.Run(revoke, func(t *testing.T) {
+			f := setupInfrastructureAPI(t)
+			f.stepUp(t)
+			_, private, err := ed25519.GenerateKey(rand.Reader)
 			if err != nil {
-				return
+				t.Fatal(err)
 			}
+			signer, _ := ssh.NewSignerFromKey(private)
+			config := &ssh.ServerConfig{PasswordCallback: func(_ ssh.ConnMetadata, _ []byte) (*ssh.Permissions, error) { return nil, nil }}
+			config.AddHostKey(signer)
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
 			go func() {
-				server, channels, requests, err := ssh.NewServerConn(conn, config)
-				if err != nil {
-					conn.Close()
-					return
-				}
-				defer server.Close()
-				go ssh.DiscardRequests(requests)
-				for next := range channels {
-					channel, requests, err := next.Accept()
+				for {
+					conn, err := listener.Accept()
 					if err != nil {
 						return
 					}
 					go func() {
-						defer channel.Close()
-						for req := range requests {
-							switch req.Type {
-							case "pty-req":
-								_ = req.Reply(true, nil)
-							case "shell":
-								_ = req.Reply(true, nil)
-								_, _ = io.Copy(channel, channel)
+						server, channels, requests, err := ssh.NewServerConn(conn, config)
+						if err != nil {
+							conn.Close()
+							return
+						}
+						defer server.Close()
+						go ssh.DiscardRequests(requests)
+						for next := range channels {
+							channel, requests, err := next.Accept()
+							if err != nil {
 								return
-							case "window-change":
-								_ = req.Reply(true, nil)
-							default:
-								_ = req.Reply(false, nil)
 							}
+							go func() {
+								defer channel.Close()
+								for req := range requests {
+									switch req.Type {
+									case "pty-req":
+										_ = req.Reply(true, nil)
+									case "shell":
+										_ = req.Reply(true, nil)
+										_, _ = io.Copy(channel, channel)
+										return
+									case "window-change":
+										_ = req.Reply(true, nil)
+									default:
+										_ = req.Reply(false, nil)
+									}
+								}
+							}()
 						}
 					}()
 				}
 			}()
-		}
-	}()
-	credential, err := f.service.SaveCredential(context.Background(), "ssh", "console", `{"password":"test-only"}`, "admin", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, port, _ := net.SplitHostPort(listener.Addr().String())
-	number, _ := strconv.Atoi(port)
-	host, err := f.service.SaveHost(context.Background(), infrastructure.Host{Name: "console", Address: "127.0.0.1", SSHPort: number, SSHUser: "test", SecretID: credential.ID, HostKey: ssh.FingerprintSHA256(signer.PublicKey()), OS: "linux", Arch: "amd64"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rr := f.request("POST", "/api/infrastructure/hosts/"+host.ID+"/terminal-ticket", nil)
-	if rr.Code != 200 {
-		t.Fatal(rr.Code, rr.Body.String())
-	}
-	var ticket struct {
-		Ticket string `json:"ticket"`
-	}
-	_ = json.Unmarshal(rr.Body.Bytes(), &ticket)
-	server := httptest.NewServer(f.handler)
-	defer server.Close()
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/infrastructure/terminal?ticket=" + ticket.Ticket
-	headers := http.Header{"Origin": []string{server.URL}}
-	ws, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ws.Close()
-	_ = ws.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if err := ws.WriteJSON(map[string]any{"type": "input", "data": "terminal-echo\n"}); err != nil {
-		t.Fatal(err)
-	}
-	_, content, err := ws.ReadMessage()
-	if err != nil || !strings.Contains(string(content), "terminal-echo") {
-		t.Fatal(string(content), err)
-	}
-	ws.Close()
-	second, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer second.Close()
-	_ = second.SetReadDeadline(time.Now().Add(5 * time.Second))
-	_, content, _ = second.ReadMessage()
-	if !strings.Contains(string(content), "票据无效") {
-		t.Fatal("ticket was reused", string(content))
+			credential, err := f.service.SaveCredential(context.Background(), "ssh", "console", `{"password":"test-only"}`, "admin", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, port, _ := net.SplitHostPort(listener.Addr().String())
+			number, _ := strconv.Atoi(port)
+			host, err := f.service.SaveHost(context.Background(), infrastructure.Host{Name: "console", Address: "127.0.0.1", SSHPort: number, SSHUser: "test", SecretID: credential.ID, HostKey: ssh.FingerprintSHA256(signer.PublicKey()), OS: "linux", Arch: "amd64"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rr := f.request("POST", "/api/infrastructure/hosts/"+host.ID+"/terminal-ticket", nil)
+			if rr.Code != 200 {
+				t.Fatal(rr.Code, rr.Body.String())
+			}
+			var ticket struct {
+				Ticket string `json:"ticket"`
+			}
+			_ = json.Unmarshal(rr.Body.Bytes(), &ticket)
+			server := httptest.NewServer(f.handler)
+			defer server.Close()
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/infrastructure/terminal?ticket=" + ticket.Ticket
+			headers := http.Header{"Origin": []string{server.URL}}
+			ws, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ws.Close()
+			_ = ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if err := ws.WriteJSON(map[string]any{"type": "input", "data": "terminal-echo\n"}); err != nil {
+				t.Fatal(err)
+			}
+			_, content, err := ws.ReadMessage()
+			if err != nil || !strings.Contains(string(content), "terminal-echo") {
+				t.Fatal(string(content), err)
+			}
+			if revoke != "none" {
+				pending := f.request("POST", "/api/infrastructure/hosts/"+host.ID+"/terminal-ticket", nil)
+				if pending.Code != 200 {
+					t.Fatal(pending.Code, pending.Body.String())
+				}
+				var outstanding struct {
+					Ticket string `json:"ticket"`
+				}
+				_ = json.Unmarshal(pending.Body.Bytes(), &outstanding)
+				ctx := context.Background()
+				current, _ := f.auth.Authenticate(ctx, f.token)
+				switch revoke {
+				case "logout":
+					_ = f.auth.Logout(ctx, f.token, "")
+				case "disable":
+					user, _ := f.users.FindByID(ctx, current.UserID)
+					user.Status = auth.StatusDisabled
+					_ = f.users.Update(ctx, user)
+				case "roles":
+					_ = f.users.SetRoles(ctx, current.UserID, []string{"VIEWER"})
+				case "password":
+					user, _ := f.users.FindByID(ctx, current.UserID)
+					user.PasswordHash, _ = auth.HashPassword("new-password-123")
+					_ = f.users.Update(ctx, user)
+				}
+				_ = ws.SetReadDeadline(time.Now().Add(4 * time.Second))
+				if _, _, err := ws.ReadMessage(); err == nil {
+					t.Fatal("撤权后 SSH 连接仍可用")
+				}
+				ctx, cancel := context.WithTimeout(ctx, time.Second)
+				defer cancel()
+				if client, _, err := f.service.OpenTerminal(ctx, outstanding.Ticket); err == nil {
+					client.Close()
+					t.Fatal("撤权后旧票据仍可用")
+				}
+				return
+			}
+			ws.Close()
+			second, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer second.Close()
+			_ = second.SetReadDeadline(time.Now().Add(5 * time.Second))
+			_, content, _ = second.ReadMessage()
+			if !strings.Contains(string(content), "票据无效") {
+				t.Fatal("ticket was reused", string(content))
+			}
+		})
 	}
 }

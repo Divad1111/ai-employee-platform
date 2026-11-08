@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ai-employee-platform/workstation/internal/runtimeenv"
 	"io"
 	"os/exec"
 	"strings"
@@ -118,6 +119,7 @@ func (s *appServerSession) Start(ctx context.Context) error {
 	// Windows services otherwise inherit System32. The app-server process and
 	// its sandbox helpers must start from the same workspace as thread/start.
 	cmd.Dir = s.workspace
+	cmd.Env = runtimeenv.Base()
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return err

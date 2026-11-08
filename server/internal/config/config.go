@@ -31,10 +31,10 @@ type Config struct {
 	PublicServerURL string
 }
 
-// Load 从环境变量加载配置，缺省使用开发默认值。
+// Load 从环境变量加载配置，缺省启用生产安全要求。
 func Load() (*Config, error) {
 	cfg := &Config{
-		Env:         getenv("AIE_ENV", "development"),
+		Env:         getenv("AIE_ENV", "production"),
 		HTTPAddr:    getenv("AIE_HTTP_ADDR", "127.0.0.1:8080"),
 		GRPCAddr:    getenv("AIE_GRPC_ADDR", "127.0.0.1:9090"),
 		DatabaseURL: LoadDatabaseDSN(),

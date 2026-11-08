@@ -219,10 +219,11 @@ type terminalTicket struct {
 	HostID  string
 	Actor   string
 	Expires time.Time
+	Check   func(context.Context) error
 }
 
 // TerminalTicket 返回短时、一次性连接票据，URL 中不携带管理员会话令牌。
-func (s *Service) TerminalTicket(ctx context.Context, host, actor string) (string, error) {
+func (s *Service) TerminalTicket(ctx context.Context, host, actor string, checks ...func(context.Context) error) (string, error) {
 	h, err := s.Host(ctx, host)
 	if err != nil {
 		return "", err
@@ -238,7 +239,11 @@ func (s *Service) TerminalTicket(ctx context.Context, host, actor string) (strin
 			delete(s.tickets, id)
 		}
 	}
-	s.tickets[ticket] = terminalTicket{HostID: host, Actor: actor, Expires: time.Now().Add(30 * time.Second)}
+	var check func(context.Context) error
+	if len(checks) > 0 {
+		check = checks[0]
+	}
+	s.tickets[ticket] = terminalTicket{HostID: host, Actor: actor, Expires: time.Now().Add(30 * time.Second), Check: check}
 	return ticket, nil
 }
 
@@ -250,6 +255,11 @@ func (s *Service) OpenTerminal(ctx context.Context, ticket string) (*ssh.Client,
 	s.ticketMu.Unlock()
 	if !ok || time.Now().After(t.Expires) {
 		return nil, "", fmt.Errorf("终端票据无效或已过期")
+	}
+	if t.Check != nil {
+		if err := t.Check(ctx); err != nil {
+			return nil, "", err
+		}
 	}
 	h, err := s.Host(ctx, t.HostID)
 	if err != nil {
@@ -263,6 +273,28 @@ func (s *Service) OpenTerminal(ctx context.Context, ticket string) (*ssh.Client,
 	if !ok {
 		_ = remote.Close()
 		return nil, "", fmt.Errorf("当前执行器不支持终端")
+	}
+	if t.Check != nil {
+		if err := t.Check(ctx); err != nil {
+			_ = session.client.Close()
+			return nil, "", err
+		}
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					_ = session.client.Close()
+					return
+				case <-ticker.C:
+					if t.Check(ctx) != nil {
+						_ = session.client.Close()
+						return
+					}
+				}
+			}
+		}()
 	}
 	return session.client, t.Actor, nil
 }

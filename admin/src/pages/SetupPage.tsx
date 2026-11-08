@@ -101,7 +101,7 @@ export function SetupPage() {
       })
 
       setSuccess('首次部署初始化成功！正在自动登录并进入管控中心…')
-      setSession(res.token, res.user)
+      setSession(res.user)
 
       setTimeout(() => {
         nav('/', { replace: true })

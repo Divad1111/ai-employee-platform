@@ -17,14 +17,15 @@ const { spawn } = require('node:child_process')
         await new Promise(resolve => setTimeout(resolve, 100))
       }
     }
-    browser = await chromium.launch({ channel: 'chrome', headless: true })
+    browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true })
     const page = await browser.newPage({ viewport: { width: 1440, height: 1050 }, timezoneId: 'Asia/Shanghai' })
     const errors = []
+    await require('./browserSecurity.cjs').enforceCSP(page, errors)
     page.on('pageerror', error => errors.push(error.message))
     const stamp = '2026-10-23T16:30:45Z'
     const shown = '2026/10/24 00:30:45'
     const run = { id: 'run-1', backup_id: 'snapshot-1', scope: 'FULL', status: 'SUCCESS', trigger_type: 'MANUAL', created_at: stamp, updated_at: stamp, duration_ms: 1000, artifact_size: 1024, file_count: 3, checksum: 'abc', destinations: [], manifest: {} }
-    await page.addInitScript(() => localStorage.setItem('aie_admin_token', 'isolated-ui-test'))
+    await page.addInitScript(() => localStorage.setItem('aie_browser_session', '1'))
     await page.route(url => url.pathname.startsWith('/api/'), route => {
       const suffix = new URL(route.request().url()).pathname.replace(/^\/api/, '')
       const fixtures = {

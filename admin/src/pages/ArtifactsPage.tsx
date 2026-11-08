@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { apiGet, getToken } from '../api/client'
+import { apiGet, browserHeaders } from '../api/client'
 import { IconPackage, IconRefresh } from '../components/Icons'
 import { EntityName } from '../components/EntityName'
 import { MarkdownView } from '../components/MarkdownView'
@@ -64,9 +64,8 @@ export function ArtifactsPage() {
   }
 
   const loadText = async (id: string) => {
-    const tok = getToken()
     const res = await fetch(`/api/artifacts/${id}/download`, {
-      headers: tok ? { Authorization: `Bearer ${tok}` } : {},
+      headers: browserHeaders(),
     })
     if (!res.ok) throw new Error(`读取失败 (状态码: ${res.status})`)
     return res.text()
@@ -80,9 +79,8 @@ export function ArtifactsPage() {
   }
 
   const download = (id: string, name: string) => {
-    const tok = getToken()
     void fetch(`/api/artifacts/${id}/download`, {
-      headers: tok ? { Authorization: `Bearer ${tok}` } : {},
+      headers: browserHeaders(),
     })
       .then(async (res) => {
         if (!res.ok) throw new Error(`下载失败 (状态码: ${res.status})`)

@@ -129,6 +129,10 @@ func (d Deps) handleInfrastructure(w http.ResponseWriter, r *http.Request, _ *au
 	writeJSON(w, 200, map[string]any{"clusters": clusters, "hosts": hosts, "software": software, "releases": releases, "installations": installs, "policies": policies, "operations": ops, "workstation_states": states})
 }
 func (d Deps) handleInfraCluster(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	if !d.scopeAll(r, sess, "infra.credential") {
+		writeErr(w, 403, "配置凭据目标需要全局凭据管理权限")
+		return
+	}
 	var v infrastructure.Cluster
 	if !infraDecode(w, r, &v) {
 		return
@@ -161,6 +165,10 @@ func (d Deps) handleInfraDeleteCluster(w http.ResponseWriter, r *http.Request, s
 	w.WriteHeader(204)
 }
 func (d Deps) handleInfraHost(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	if !d.scopeAll(r, sess, "infra.credential") {
+		writeErr(w, 403, "配置凭据目标需要全局凭据管理权限")
+		return
+	}
 	var v infrastructure.Host
 	if !infraDecode(w, r, &v) {
 		return
@@ -196,6 +204,10 @@ func (d Deps) handleInfraProbe(w http.ResponseWriter, r *http.Request, _ *auth.S
 	writeJSON(w, 200, map[string]string{"fingerprint": key})
 }
 func (d Deps) handleInfraSoftware(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+	if !d.scopeAll(r, sess, "infra.credential") {
+		writeErr(w, 403, "配置凭据目标需要全局凭据管理权限")
+		return
+	}
 	var v infrastructure.Software
 	if !infraDecode(w, r, &v) {
 		return
@@ -341,7 +353,16 @@ func (d Deps) handleInfraReveal(w http.ResponseWriter, r *http.Request, sess *au
 	writeJSON(w, 200, map[string]string{"value": value})
 }
 func (d Deps) handleInfraTerminalTicket(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
-	ticket, err := d.Infrastructure.TerminalTicket(r.Context(), r.PathValue("id"), sess.UserID)
+	ticket, err := d.Infrastructure.TerminalTicket(r.Context(), r.PathValue("id"), sess.UserID, func(ctx context.Context) error {
+		current, err := d.Auth.Authenticate(ctx, sess.Token)
+		if err != nil {
+			return err
+		}
+		if d.Auth.AuthorizeAll(ctx, current, "infra.console") != nil || (current.MFARequired && (d.Approvals == nil || !d.Approvals.TOTPEnabled(ctx, current.UserID))) {
+			return auth.ErrForbidden
+		}
+		return nil
+	})
 	if err != nil {
 		infraError(w, err)
 		return

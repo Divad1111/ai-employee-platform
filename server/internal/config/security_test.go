@@ -39,3 +39,19 @@ func TestProductionSecurityRequirements(t *testing.T) {
 		}
 	})
 }
+
+func TestProductionRemoteDatabaseRequiresVerifiedTLS(t *testing.T) {
+	for k, v := range map[string]string{"AIE_SECRET_MASTER_KEY": "secret-independent-12345678901234567890", "AIE_BACKUP_MASTER_KEY": "backup-independent-12345678901234567890", "AIE_SETUP_TOKEN": "setup-independent-12345678901234567890", "AIE_MASTER_KEY": "", "AIE_DEV_SEED_ADMIN": ""} {
+		t.Setenv(k, v)
+	}
+	for _, mode := range []string{"disable", "require", "prefer"} {
+		cfg := &Config{Env: "production", DatabaseURL: "postgres://test:strong-database-password-123@db.example.com/test?sslmode=" + mode, PublicServerURL: "https://example.com"}
+		if cfg.validateSecurity() == nil {
+			t.Errorf("accepted unverified remote database: %s", mode)
+		}
+	}
+	cfg := &Config{Env: "production", DatabaseURL: "postgres://test:strong-database-password-123@db.example.com/test?sslmode=verify-full", PublicServerURL: "https://example.com"}
+	if err := cfg.validateSecurity(); err != nil {
+		t.Fatal(err)
+	}
+}

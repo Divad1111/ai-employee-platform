@@ -88,6 +88,7 @@ func SecureHTTP(next http.Handler, cfg *config.Config) http.Handler {
 				return
 			}
 		}
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")

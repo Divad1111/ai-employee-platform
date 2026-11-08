@@ -1,8 +1,8 @@
 /**
- * 登录会话：token 持久化到 localStorage，刷新保持登录。
+ * 登录会话：HttpOnly Cookie 持久化，前端只保存会话存在标记，刷新保持登录。
  */
 
-import { getToken, setToken } from '../api/client'
+import { hasSession, setSessionPresent } from '../api/client'
 
 export type SessionUser = {
   id: string
@@ -13,19 +13,19 @@ export type SessionUser = {
 let user: SessionUser | null = null
 
 export function isAuthenticated(): boolean {
-  return Boolean(getToken())
+  return hasSession()
 }
 
 export function getUser(): SessionUser | null {
   return user
 }
 
-export function setSession(token: string, next: SessionUser): void {
-  setToken(token)
+export function setSession(next: SessionUser): void {
+  setSessionPresent(true)
   user = next
 }
 
 export function clearSession(): void {
-  setToken(null)
+  setSessionPresent(false)
   user = null
 }
