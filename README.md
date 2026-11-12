@@ -26,7 +26,7 @@ ai-employee-platform/
 
 | 组件 | 版本 |
 |------|------|
-| Go | ≥ 1.22（本机建议与 CI 一致） |
+| Go | 服务端 ≥ 1.25.0；工作站 ≥ 1.22.7（以各模块 `go.mod` 为准） |
 | Node.js | ≥ 20 |
 | PostgreSQL | 16（M1+，本地可用 Docker） |
 
@@ -81,17 +81,29 @@ npm run build    # 生产构建
 完整的生产与开发环境部署步骤，请参考：
 👉 **[安装配置中心服务器与 Workstation 部署手册](docs/DEPLOYMENT_GUIDE.md)**
 
+环境变量逐项说明、Windows PowerShell/CMD、macOS、Linux、群晖 DSM 的密码和密钥生成步骤：**[.env 配置与密钥生成手册](docs/ENV_CONFIGURATION.md)**。已有部署升级先阅读 **[安全加固与旧数据迁移](docs/SECURITY_HARDENING_2026-10-25.md)**，保留原密钥。
+
 PVE 集群、Linux 虚拟机、软件部署与自动更新：**[PVE 与软件管理手册](docs/PVE_SOFTWARE_GUIDE.md)**。
 
-### 容器一键启动
-```bash
-# 启动中心服务器栈（PostgreSQL + Control Plane + Admin Web）
-cd deploy
-docker compose up --build -d
+### 容器启动（首次安装）
 
-# 浏览器访问首次部署向导，配置初始超级管理员
-open http://localhost:8088/setup
+先准备可访问的 HTTPS 域名及证书入口。下面使用内置 Caddy 网关，要求宿主机的 80/443 可用；内网 IP、群晖反向代理、离线导入及已有部署升级见完整部署手册。已有部署保留现有 `.env` 和密钥，不要重新生成。
+
+```bash
+cd deploy
+
+# 仅首次安装：生成独立随机密钥；替换为你的域名
+sh ./generate-env.sh --domain employee.example.com \
+  --server-image aie-control-plane:local \
+  --admin-image aie-admin:local
+
+# 从源码构建，并启用 HTTPS 网关（普通 up 不会启动 gateway）
+docker compose -f docker-compose.yml -f docker-compose.build.yml --profile public up --build -d
 ```
+
+上述是 macOS/Linux/群晖的系统 Shell 命令（需 OpenSSL）；Windows 使用 `generate-env.ps1 -Domain ... -ServerImage ... -AdminImage ...`，完整 PowerShell/CMD 命令见环境配置手册。首次配置无需安装 Python。
+
+浏览器访问 `https://employee.example.com/setup`，输入 `.env` 中的 `AIE_SETUP_TOKEN` 创建管理员，然后前往审批中心完成 TOTP 绑定。远程工作站接入前，还需在 `.env` 中将 `AIE_GRPC_BIND_IP` 设为服务器的内网 IP，并在防火墙中允许工作站来源访问 gRPC 端口，再重建 `control-plane`。默认 HTTP、管理后台和 gRPC 宿主机端口只绑定回环，PostgreSQL 不发布宿主机端口。
 
 ### 工作站快速接入（以 macOS / Linux 为例）
 ```bash
@@ -100,13 +112,14 @@ cd workstation && go build -o bin/aew ./cmd/aew
 
 # 2. 在 Web 后台生成接入 Token 后注册工作站
 AIE_DATA_DIR="$HOME/.aie" ./bin/aew register \
-  --server http://127.0.0.1:8080 \
-  --token "<ENROLL_TOKEN>" \
-  --grpc-target "127.0.0.1:9090"
+  --server https://employee.example.com \
+  --token "<ENROLL_TOKEN>"
 
 # 3. 启动常驻守护进程
 AIE_DATA_DIR="$HOME/.aie" ./bin/aew daemon
 ```
+
+注册令牌默认 15 分钟、最长 60 分钟、单次使用。远程注册强制 HTTPS，并校验证书；`register` 会自动保存 HTTP 地址和探测到的 gRPC 端口，不支持 `--grpc-target`。使用独立 gRPC 主机时，在注册后修改工作站 `config/config.yaml` 的 `control_plane.endpoint`。
 
 ## 当前进度
 

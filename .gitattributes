@@ -1,0 +1,2 @@
+# POSIX 脚本在 Windows 检出后也必须保留 LF，才能在 Linux / 群晖直接运行。
+deploy/*.sh text eol=lf
