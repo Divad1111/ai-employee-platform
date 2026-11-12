@@ -83,8 +83,9 @@ func setupM6(t *testing.T) (http.Handler, string, *feishu.MemorySender, *reliabi
 func TestFeishuWebhookChallengeAndJob(t *testing.T) {
 	h, tok, sender, presence := setupM6(t)
 	// 建 Employee + 绑定
+	configureTestRoots(t, h, tok, "WS-1")
 	code, ws := doJSON(t, h, http.MethodPost, "/api/workspaces", tok, map[string]string{
-		"workstation_id": "WS-1", "path": "/repo",
+		"workstation_id": "WS-1", "root_path": "/projects", "path": "repo",
 	})
 	if code != 201 {
 		t.Fatal(ws)

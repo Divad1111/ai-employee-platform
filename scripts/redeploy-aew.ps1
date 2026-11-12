@@ -1,109 +1,52 @@
 param(
-    [string]$ServiceName = 'AIEmployeeWorkstation'
+    [string]$Binary = (Join-Path (Split-Path -Parent $PSScriptRoot) 'workstation\bin\aew.exe'),
+    [string]$Build = (Join-Path (Split-Path -Parent $PSScriptRoot) 'bin\aew-new.exe')
 )
-
 $ErrorActionPreference = 'Stop'
-$taskRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
-$taskSource = Join-Path $taskRoot 'bin\aew-new.exe'
-$taskTarget = Join-Path $taskRoot 'workstation\bin\aew.exe'
-$taskCLI = Join-Path $taskRoot 'bin\aew.exe'
-$taskBackup = Join-Path $taskRoot 'bin\aew-before-redeploy.exe'
-$taskResult = Join-Path $taskRoot 'bin\aew-redeploy-result.json'
-$taskName = 'AIEmployeeWorkstation-UserSession'
-$taskLauncher = Join-Path $taskRoot 'scripts\start-aew-user-session.ps1'
-$taskUserSession = $false
-$taskWasStopped = $false
-$taskReplaced = $false
-$taskReport = @{ success = $false; service = $ServiceName; target = $taskTarget; backup = $taskBackup }
-
-function Get-WorkspaceDaemon {
-    @(Get-CimInstance Win32_Process -Filter "Name='aew.exe'" | Where-Object {
-        $_.SessionId -gt 0 -and $_.ExecutablePath -and
-        [StringComparer]::OrdinalIgnoreCase.Equals($_.ExecutablePath, $taskTarget) -and
-        $_.CommandLine -match '(?i)(?:^|\s)daemon(?:\s|$)'
-    })
+$target = (Get-Item -LiteralPath $Binary).FullName
+$source = (Get-Item -LiteralPath $Build).FullName
+if ($source -eq $target) { throw 'Source and installed executable must differ.' }
+$backup = "$target.before-$(Get-Date -Format yyyyMMdd-HHmmssfff)"
+Copy-Item -LiteralPath $target -Destination $backup
+$legacy = Get-CimInstance Win32_Service -Filter "Name='AIEmployeeWorkstation'"
+if ($legacy -and $legacy.State -eq 'Running') {
+    if ($legacy.PathName -notmatch '^(?:"(?<exe>[^"]+)"|(?<exe>.*?\.exe))(?:\s|$)') { throw 'Unexpected legacy service path.' }
+    $registered = Get-Item -LiteralPath $Matches['exe']
+    $serviceTarget = if ($registered.LinkType -eq 'SymbolicLink') { $registered.Target } else { $registered.FullName }
+    if ($serviceTarget -ne $target) { throw 'Legacy service belongs to a different installation.' }
+    Set-Service -Name $legacy.Name -StartupType Disabled
+    Stop-Service -Name $legacy.Name
+    (Get-Service $legacy.Name).WaitForStatus('Stopped',[TimeSpan]::FromSeconds(30))
+} else {
+    & $source service stop
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot stop the installed user task.' }
 }
-
-function Stop-WorkspaceDaemon {
-    if ($taskUserSession) {
-        Stop-ScheduledTask -TaskName $taskName
-        foreach ($taskDaemon in (Get-WorkspaceDaemon)) {
-            Stop-Process -Id $taskDaemon.ProcessId -Force -ErrorAction SilentlyContinue
-            Wait-Process -Id $taskDaemon.ProcessId -Timeout 10 -ErrorAction SilentlyContinue
-        }
-        if (@(Get-WorkspaceDaemon).Count -gt 0) { throw 'Workspace daemon did not stop' }
-    } else {
-        Stop-Service -Name $ServiceName
-        (Get-Service -Name $ServiceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+# Task Scheduler can report Ready while Windows still holds the old image.
+$deadline = [DateTime]::UtcNow.AddSeconds(20)
+do {
+    try {
+        $handle = [IO.File]::Open($target, 'Open', 'ReadWrite', 'None')
+        $handle.Dispose()
+        break
+    } catch [IO.IOException] {
+        if ([DateTime]::UtcNow -ge $deadline) { throw }
+        Start-Sleep -Milliseconds 250
     }
-}
-
-function Start-WorkspaceDaemon {
-    if ($taskUserSession) {
-        Start-ScheduledTask -TaskName $taskName
-        $taskDeadline = [DateTime]::UtcNow.AddSeconds(15)
-        do {
-            if ((Get-ScheduledTask -TaskName $taskName).State -eq 'Running' -and @(Get-WorkspaceDaemon).Count -eq 1) { return }
-            Start-Sleep -Milliseconds 250
-        } while ([DateTime]::UtcNow -lt $taskDeadline)
-        throw 'AEW did not start in the logged-in user session'
-    } else {
-        Start-Service -Name $ServiceName
-        (Get-Service -Name $ServiceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
-    }
-}
-
+} while ($true)
+$replaced = $false
 try {
-    if (-not (Test-Path -LiteralPath $taskSource -PathType Leaf)) { throw "Build missing: $taskSource" }
-    $taskService = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
-    if ($null -eq $taskService) { throw "Service not found: $ServiceName" }
-    if ($taskService.PathName -notmatch '^(?:"(?<exe>[^"]+)"|(?<exe>.*?\.exe))(?:\s|$)') { throw 'Cannot resolve service executable' }
-    $taskRegisteredPath = [IO.Path]::GetFullPath($Matches['exe'])
-    if (-not [StringComparer]::OrdinalIgnoreCase.Equals($taskRegisteredPath, $taskTarget)) {
-        throw "Service executable does not match the verified workspace target: $taskRegisteredPath"
-    }
-    $taskScheduled = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if ($taskScheduled) {
-        $taskArguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$taskLauncher`""
-        if (@($taskScheduled.Actions).Count -ne 1 -or
-            $taskScheduled.Actions.Arguments -ne $taskArguments -or
-            $taskScheduled.Actions.WorkingDirectory -ne $taskRoot -or
-            $taskScheduled.Principal.LogonType -ne 'Interactive') {
-            throw 'Scheduled task does not match the verified workspace launcher'
-        }
-        if ($taskService.State -ne 'Stopped') { throw 'Stop the service before using the user-session launcher' }
-        $taskUserSession = $true
-        $taskReport.mode = 'user-session'
-        $taskReport.task = $taskName
-    } else { $taskReport.mode = 'service' }
-
-    $taskExpectedHash = (Get-FileHash -LiteralPath $taskSource -Algorithm SHA256).Hash
-    Copy-Item -LiteralPath $taskTarget -Destination $taskBackup -Force
-    $taskWasStopped = $true
-    Stop-WorkspaceDaemon
-    $taskReplaced = $true
-    Copy-Item -LiteralPath $taskSource -Destination $taskTarget -Force
-    Copy-Item -LiteralPath $taskSource -Destination $taskCLI -Force
-    if ((Get-FileHash -LiteralPath $taskTarget -Algorithm SHA256).Hash -ne $taskExpectedHash) { throw 'Installed AEW hash mismatch' }
-    Start-WorkspaceDaemon
-    $taskReport.success = $true
-    $taskReport.sha256 = $taskExpectedHash
-    if ($taskUserSession) { $taskReport.status = (Get-ScheduledTask -TaskName $taskName).State.ToString() }
-    else { $taskReport.status = (Get-Service -Name $ServiceName).Status.ToString() }
+    Copy-Item -LiteralPath $source -Destination $target -Force
+    $replaced = $true
+    if ((Get-FileHash -LiteralPath $target).Hash -ne (Get-FileHash -LiteralPath $source).Hash) { throw 'Installed binary hash mismatch.' }
+    & $target service install
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot register the user logon task.' }
+    & $target service start
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot start the user logon task.' }
 } catch {
-    $taskReport.error = $_.Exception.Message
-    if ($taskWasStopped) {
-        try {
-            if ($taskReplaced) {
-                Stop-WorkspaceDaemon
-                Copy-Item -LiteralPath $taskBackup -Destination $taskTarget -Force
-                Copy-Item -LiteralPath $taskBackup -Destination $taskCLI -Force
-            }
-            Start-WorkspaceDaemon
-            $taskReport.rolled_back = $true
-        } catch { $taskReport.rollback_error = $_.Exception.Message }
-    }
-} finally {
-    $taskReport | ConvertTo-Json | Set-Content -LiteralPath $taskResult -Encoding UTF8
+    if ($replaced) { Copy-Item -LiteralPath $backup -Destination $target -Force }
+    # Always use the user task, including when rolling back to an old executable.
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $task = Get-ScheduledTask -TaskName "AIEmployeeWorkstation-UserSession-$sid" -ErrorAction SilentlyContinue
+    if ($task) { Start-ScheduledTask -InputObject $task }
+    throw
 }
-if (-not $taskReport.success) { exit 1 }

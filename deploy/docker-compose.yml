@@ -124,7 +124,13 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Caddyfile 必须预先存在为文件，缺失时直接报错，避免自动创建同名目录。
+      - type: bind
+        source: ./Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind:
+          create_host_path: false
       - gateway_data:/data
       - gateway_config:/config
     networks:

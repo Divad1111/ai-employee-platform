@@ -1,0 +1,30 @@
+.user-password-form {
+  max-width: 720px;
+}
+
+.user-password-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.user-password-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.user-password-fields input {
+  width: 100%;
+  min-width: 0;
+}
+
+@media (max-width: 600px) {
+  .user-password-fields {
+    grid-template-columns: 1fr;
+  }
+}

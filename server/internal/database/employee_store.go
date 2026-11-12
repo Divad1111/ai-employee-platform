@@ -162,26 +162,66 @@ func (s *PostgresEmployeeStore) Delete(ctx context.Context, id string) error {
 	}
 	defer tx.Rollback()
 
-	// 1. 检查该数字员工是否有处于 RUNNING 或 DISPATCHED 的任务
-	var runningCount int
-	_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE employee_id = $1 AND status IN ('RUNNING', 'DISPATCHED')`, id).Scan(&runningCount)
+	// Lock the employee before inspecting jobs. New references must wait until
+	// this transaction finishes, and existing jobs cannot change state mid-delete.
+	var employeeID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM employees WHERE id = $1 FOR UPDATE`, id).Scan(&employeeID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return employee.ErrNotFound
+		}
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT status FROM jobs WHERE employee_id = $1 ORDER BY id FOR UPDATE`, id)
+	if err != nil {
+		return err
+	}
+	runningCount := 0
+	for rows.Next() {
+		var status string
+		if err := rows.Scan(&status); err != nil {
+			rows.Close()
+			return err
+		}
+		switch status {
+		case "ASSIGNED", "STARTING", "RUNNING", "DISPATCHED", "BLOCKED", "WAITING_APPROVAL", "UNKNOWN":
+			runningCount++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
 	if runningCount > 0 {
 		return fmt.Errorf("无法删除数字员工：该员工当前仍有 %d 个正在执行的任务，请先取消任务或等待完成", runningCount)
 	}
 
-	// 2. 清理历史 jobs（包含 job_events 级联）与 sessions
-	_, _ = tx.ExecContext(ctx, `DELETE FROM jobs WHERE employee_id = $1`, id)
-	_, _ = tx.ExecContext(ctx, `DELETE FROM sessions WHERE employee_id = $1`, id)
-
-	// 3. 解绑绑定的 workspaces（设置 employee_id 为 NULL）
-	_, _ = tx.ExecContext(ctx, `UPDATE workspaces SET employee_id = NULL WHERE employee_id = $1`, id)
+	// Remove owned conversation history before the employee, while retaining
+	// approval records and jobs belonging to other employees without dangling links.
+	statements := []string{
+		`DELETE FROM task_conversations WHERE employee_id = $1`,
+		`UPDATE approval_requests SET job_id = NULL WHERE job_id IN (SELECT id FROM jobs WHERE employee_id = $1)`,
+		`UPDATE jobs SET parent_job_id = NULL WHERE parent_job_id IN (SELECT id FROM jobs WHERE employee_id = $1)`,
+		`DELETE FROM jobs WHERE employee_id = $1`,
+		`UPDATE jobs SET session_id = NULL WHERE session_id IN (SELECT id FROM sessions WHERE employee_id = $1)`,
+		`DELETE FROM sessions WHERE employee_id = $1`,
+		`UPDATE workspaces SET employee_id = NULL WHERE employee_id = $1`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement, id); err != nil {
+			return fmt.Errorf("清理数字员工关联记录失败: %w", err)
+		}
+	}
 
 	// 4. 删除员工记录（自动级联清理 employee_skills, employee_knowledge, employee_feishu_bindings）
 	res, err := tx.ExecContext(ctx, `DELETE FROM employees WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
 	if n == 0 {
 		return employee.ErrNotFound
 	}

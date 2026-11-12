@@ -110,6 +110,9 @@ func TestEmployeeControlAuthorizationAndPersistence(t *testing.T) {
 			if (!strings.Contains(sender.Sent[0].Content, "未绑定") && !strings.Contains(sender.Sent[0].Content, "无权")) || fs.EmployeeHasOpenID(id, "stranger") {
 				t.Fatal("control implicitly granted permission")
 			}
+			if !strings.Contains(sender.Sent[0].Content, "open_id") || !strings.Contains(sender.Sent[0].Content, "stranger") {
+				t.Fatal("unauthorized control reply must include the sender's OpenID")
+			}
 			e, _ := employees.Get(ctx, id)
 			if e.DefaultModel != "model-old" || e.SessionGeneration != 0 {
 				t.Fatal("unauthorized control changed configuration")

@@ -74,6 +74,7 @@ export function AppRouter() {
             <Route path="/skills" element={<Navigate to="/mcp-servers/workflow-mcp" replace />} />
             <Route path="/knowledge" element={<Navigate to="/mcp-servers/workflow-mcp" replace />} />
             <Route path="/permissions" element={<Navigate to="/" replace />} />
+            <Route path="/profile" element={<UserDetailPage self />} />
             <Route path="/users" element={<UsersPage />} />
             <Route path="/users/:id" element={<UserDetailPage />} />
             <Route path="/roles" element={<RolesPage />} />

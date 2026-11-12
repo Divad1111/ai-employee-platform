@@ -120,6 +120,13 @@ func (s *Service) sendCommandReply(ctx context.Context, chatID, content string) 
 	return s.Sender.Send(ctx, Reply{ChatID: chatID, Content: NewMarkdownCard("员工助手", CardTemplateBlue, content, "AI Employee 企业员工协同平台").MustJSON()})
 }
 
+func withSenderOpenID(content, openID string) string {
+	if openID = strings.TrimSpace(openID); openID != "" {
+		content += "\n\n你的飞书 open_id：`" + openID + "`\n请将此 ID 填入管理页面的「飞书 OpenID」。"
+	}
+	return content
+}
+
 func commandHelp(_ *Service, _ context.Context, _ IncomingEvent, _ string, args []string) string {
 	if len(args) != 0 {
 		return "用法: `/help`\n\n" + commandHelpMarkdown()
@@ -324,7 +331,7 @@ func commandNewSession(s *Service, ctx context.Context, ev IncomingEvent, scope 
 
 func (s *Service) employeeControl(ctx context.Context, ev IncomingEvent, id, command string) string {
 	if !s.TaskSenderAllowed(id, ev.SenderOpenID, ev.ChatID, !isP2PChat(ev.ChatType)) || s.AuthorizeActor == nil || s.AuthorizeActor(ctx, id, ev.SenderOpenID) != nil {
-		return "当前飞书账号未绑定该 AI 员工, 不能修改会话或模型。请在后台完成身份绑定。"
+		return withSenderOpenID("当前飞书账号未绑定该 AI 员工, 不能修改会话或模型。请在后台完成身份绑定。", ev.SenderOpenID)
 	}
 	s.mu.RLock()
 	handler := s.TaskConversations

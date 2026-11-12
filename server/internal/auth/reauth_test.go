@@ -68,3 +68,31 @@ func TestReauthenticationIsRateLimitedWithoutInvalidatingSession(t *testing.T) {
 		t.Fatal("rate limiting destroyed login", err)
 	}
 }
+
+func TestScopedUserPermissionsDoNotRequireAdministratorMFA(t *testing.T) {
+	ctx := context.Background()
+	users := auth.NewMemoryUserStore()
+	s := auth.NewService(users, auth.NewMemorySessionStore(), audit.NewMemory())
+	s.EnforceAdminMFA = true
+	for _, role := range []string{"USER", "OPERATOR", "VIEWER"} {
+		if s.RequiresMFA(ctx, []string{role}) {
+			t.Errorf("ordinary %s role requires administrator MFA", role)
+		}
+	}
+	for _, code := range []string{"user.update", "secret.write", "enrollment.write", "workflow.write", "approval.approve"} {
+		for _, scope := range []string{"OWN", "ASSIGNED", "ALL"} {
+			name := strings.ToUpper(code) + "_" + scope
+			if err := users.CreateRole(ctx, name, "", []auth.PermissionGrant{{Code: code, Scope: scope}}); err != nil {
+				t.Fatal(err)
+			}
+			if got := s.RequiresMFA(ctx, []string{name}); got != (scope == "ALL") {
+				t.Errorf("%s %s: MFA=%v", code, scope, got)
+			}
+		}
+	}
+	for _, roles := range [][]string{{"ADMIN"}, {"SUPER_ADMIN"}, {"USER", "ADMIN"}} {
+		if !s.RequiresMFA(ctx, roles) {
+			t.Errorf("administrator roles bypass MFA: %v", roles)
+		}
+	}
+}

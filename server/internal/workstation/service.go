@@ -16,6 +16,7 @@ import (
 
 // View 列表/详情视图。
 type View struct {
+	WorkspaceRoots  []string                 `json:"workspace_roots"`
 	ID              string                   `json:"id"`
 	Name            string                   `json:"name"`
 	Status          string                   `json:"status"`
@@ -38,6 +39,8 @@ type ModelOption struct {
 
 // MetaStore 可选的名称等元数据。
 type MetaStore interface {
+	WorkspaceRoots(context.Context, string) ([]string, error)
+	SetWorkspaceRoots(context.Context, string, []string) error
 	Upsert(ctx context.Context, id, name string) error
 	GetName(ctx context.Context, id string) string
 	ListIDs(ctx context.Context) []string
@@ -109,6 +112,7 @@ func (s *Service) List(ctx context.Context) []View {
 // Get 详情。
 func (s *Service) Get(ctx context.Context, id string) View {
 	v := View{ID: id, Name: s.Meta.GetName(ctx, id), Status: reliability.StatusUnknown}
+	v.WorkspaceRoots, _ = s.Meta.WorkspaceRoots(ctx, id)
 	if v.Name == "" {
 		v.Name = id
 	}
@@ -245,13 +249,14 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 // MemoryMeta 元数据。
 type MemoryMeta struct {
 	mu       sync.RWMutex
+	roots    map[string][]string
 	names    map[string]string
 	models   map[string]map[string][]ModelOption
 	modelsAt map[string]time.Time
 }
 
 func NewMemoryMeta() *MemoryMeta {
-	return &MemoryMeta{names: map[string]string{}, models: map[string]map[string][]ModelOption{}, modelsAt: map[string]time.Time{}}
+	return &MemoryMeta{roots: map[string][]string{}, names: map[string]string{}, models: map[string]map[string][]ModelOption{}, modelsAt: map[string]time.Time{}}
 }
 
 func (m *MemoryMeta) SaveModelCache(_ context.Context, id string, models map[string][]ModelOption) error {
@@ -315,8 +320,21 @@ func (m *MemoryMeta) ListIDs(_ context.Context) []string {
 func (m *MemoryMeta) Delete(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	delete(m.roots, id)
 	delete(m.names, id)
 	delete(m.models, id)
 	delete(m.modelsAt, id)
+	return nil
+}
+
+func (m *MemoryMeta) WorkspaceRoots(_ context.Context, id string) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]string(nil), m.roots[id]...), nil
+}
+func (m *MemoryMeta) SetWorkspaceRoots(_ context.Context, id string, roots []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.roots[id] = append([]string(nil), roots...)
 	return nil
 }

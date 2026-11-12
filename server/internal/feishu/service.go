@@ -1378,7 +1378,8 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 		return "", false, s.sendCommandReply(ctx, ev.ChatID, "请在目标员工后填写任务需求。\n\n"+mentionGuidance(s.boundAliases()))
 	}
 	if !s.TaskSenderAllowed(empID, ev.SenderOpenID, ev.ChatID, !isP2PChat(ev.ChatType)) {
-		return "", false, s.sendCommandReply(ctx, ev.ChatID, "无权使用该数字员工。请先在管理页面绑定你的飞书账号及允许使用的群聊。")
+		reply := withSenderOpenID("无权使用该数字员工。请先在管理页面绑定你的飞书账号及允许使用的群聊。", ev.SenderOpenID)
+		return "", false, s.sendCommandReply(ctx, ev.ChatID, reply)
 	}
 	if s.AuthorizeActor == nil {
 		return "", false, s.sendCommandReply(ctx, ev.ChatID, "员工授权服务不可用")

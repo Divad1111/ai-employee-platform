@@ -1,3 +1,8 @@
+{
+    # IP 访问通常不发送 SNI；容器端口映射后需用部署地址选择证书。
+    default_sni {$AIE_DOMAIN}
+}
+
 {$AIE_DOMAIN} {
     header {
         Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"

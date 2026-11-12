@@ -21,12 +21,12 @@ func (s *Service) RequiresMFA(ctx context.Context, roles []string) bool {
 		return true
 	}
 	for _, g := range grants {
-		if g.Scope == "NONE" {
+		if strings.EqualFold(g.Scope, "NONE") {
 			continue
 		}
 		_, action, _ := strings.Cut(g.Code, ".")
 		mutation := action == "write" || action == "create" || action == "update" || action == "delete" || action == "manage" || action == "grant" || action == "restore" || action == "approve" || action == "deploy" || action == "console"
-		if (g.Scope == "ALL" && mutation) || g.Code == "*" || strings.HasPrefix(g.Code, "infra.") || strings.HasPrefix(g.Code, "backup.") || strings.HasPrefix(g.Code, "secret.") || strings.HasPrefix(g.Code, "role.") || strings.HasPrefix(g.Code, "system.") || strings.HasPrefix(g.Code, "enrollment.") || strings.HasPrefix(g.Code, "permission.") || g.Code == "approval.approve" || (strings.HasPrefix(g.Code, "user.") && g.Code != "user.read") {
+		if g.Code == "*" || (strings.EqualFold(g.Scope, "ALL") && mutation) {
 			return true
 		}
 	}

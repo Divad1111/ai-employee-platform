@@ -22,6 +22,12 @@ func (s *Service) ResolveBinding(ctx context.Context, ref, workstationID, employ
 		return "", nil
 	}
 	if w, err := s.store.Get(ctx, ref); err == nil && w != nil {
+		if w.OwnerUserID != "" {
+			if w.WorkstationID != workstationID && workstationID != "" {
+				return "", ErrInvalidInput
+			}
+			return w.ID, nil
+		}
 		if err := s.ensureOwner(ctx, w.ID, w.EmployeeID, employeeID); err != nil {
 			return "", err
 		}
@@ -114,7 +120,7 @@ func (s *Service) LookupReference(ctx context.Context, ref, node string) (*Works
 		return nil, err
 	}
 	for _, w := range rows {
-		if w.WorkstationID == node && sameLocalPath(w.Path, ref) {
+		if w.OwnerUserID == "" && w.WorkstationID == node && sameLocalPath(w.Path, ref) {
 			return w, nil
 		}
 	}

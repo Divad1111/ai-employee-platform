@@ -37,14 +37,12 @@ func Detect() Paths {
 
 	// 1. 优先检测当前用户目录下的已注册身份
 	if userAie != "" {
+		if runtime.GOOS == "windows" {
+			return &devPaths{root: userAie}
+		}
 		if _, err := os.Stat(filepath.Join(userAie, "identity", "workstation-id")); err == nil {
 			return &devPaths{root: userAie}
 		}
-	}
-
-	// 1.5. 若在系统服务/SYSTEM账户下运行且自身无身份，自动查找宿主机已有用户注册的身份
-	if uRoot := findFirstUserAie(); uRoot != "" {
-		return &devPaths{root: uRoot}
 	}
 
 	// 2. 检查系统标准路径是否存在已注册身份

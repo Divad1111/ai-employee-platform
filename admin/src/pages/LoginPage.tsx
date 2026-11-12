@@ -2,7 +2,7 @@
  * 登录页：现代化全屏科技质感设计。
  */
 import { FormEvent, useEffect, useState } from 'react'
-import { Link, Navigate, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { apiGet, apiPost } from '../api/client'
 import { isAuthenticated, setSession } from '../stores/session'
 
@@ -13,6 +13,8 @@ type LoginResp = {
 
 export function LoginPage() {
   const nav = useNavigate()
+  const location = useLocation()
+  const message = typeof location.state?.message === 'string' ? location.state.message : ''
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [totp, setTotp] = useState('')
@@ -73,6 +75,8 @@ export function LoginPage() {
           <h1>系统管理员登录</h1>
           <p>数字员工集中管控中心 · 安全鉴权入口</p>
         </div>
+
+        {message && <p className="ok-msg" role="status">{message}</p>}
 
         <label style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
           <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#334155' }}>管理员账号</span>

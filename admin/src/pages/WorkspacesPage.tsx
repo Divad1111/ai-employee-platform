@@ -1,6 +1,6 @@
 /**
  * Workspaces 项目工作区管理与绑定。
- * 创建流程：先选工作站节点，再填写该节点上的本机绝对路径。
+ * 选择工作站根目录与项目目录名，按用户管理共享绑定。
  */
 import { FormEvent, useEffect, useMemo, useState } from 'react'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../api/client'
@@ -15,6 +15,9 @@ import { formatDateTime } from '../lib/time'
 type Workspace = {
   id: string
   workstation_id: string
+  root_path?: string
+  user_directory?: string
+  owner_user_id?: string
   employee_id: string
   path: string
   repository: string
@@ -25,11 +28,15 @@ type Workspace = {
 }
 
 type Employee = {
+  workstation_id: string
+  workspace_id: string
+  owner_user_id: string
   id: string
   name: string
 }
 
 type Workstation = {
+  workspace_roots?: string[]
   id: string
   name: string
   status: string
@@ -42,6 +49,7 @@ export function WorkspacesPage() {
   const [employees, setEmployees] = useState<Employee[]>([])
   const [workstations, setWorkstations] = useState<Workstation[]>([])
   const [workstationId, setWorkstationId] = useState('')
+  const [rootPath,setRootPath] = useState('')
   const [path, setPath] = useState('')
   const [repository, setRepository] = useState('')
   const [branch, setBranch] = useState('main')
@@ -89,12 +97,12 @@ export function WorkspacesPage() {
 
   const empOptions = useMemo(
     () =>
-      employees.map((e) => ({
+      employees.filter(e => !e.workstation_id || e.workstation_id === workstationId).map((e) => ({
         value: e.id,
         label: e.name,
         keywords: e.id,
       })),
-    [employees],
+    [employees,workstationId],
   )
 
   useEffect(() => {
@@ -104,6 +112,7 @@ export function WorkspacesPage() {
   function resetWorkspaceForm() {
     setEditingId(null)
     setWorkstationId('')
+    setRootPath('')
     setPath('')
     setRepository('')
     setBranch('main')
@@ -113,6 +122,7 @@ export function WorkspacesPage() {
   function startEdit(w: Workspace) {
     setEditingId(w.id)
     setWorkstationId(w.workstation_id || '')
+    setRootPath(w.root_path || '')
     setPath(w.path || '')
     setRepository(w.repository || '')
     setBranch(w.branch || 'main')
@@ -127,19 +137,20 @@ export function WorkspacesPage() {
     setError('')
     setMsg('')
     if (!workstationId.trim()) {
-      setError('请先选择工作站节点，再填写该节点上的本机路径')
+      setError('请先选择工作站节点和根目录')
       return
     }
     const body = {
       workstation_id: workstationId.trim(),
-      path: path.trim(),
+      root_path:rootPath,
+      path,
       repository: repository.trim(),
       branch: branch.trim() || 'main',
     }
     try {
       if (editingId) {
         await apiPatch(`/workspaces/${editingId}`, body)
-        await apiPost(`/workspaces/${editingId}/bind`, { employee_id: employeeId.trim() })
+        if (employeeId) await apiPost(`/workspaces/${editingId}/bind`, { employee_id: employeeId })
         setMsg('工作区已更新')
       } else {
         await apiPost('/workspaces', {
@@ -155,12 +166,12 @@ export function WorkspacesPage() {
     }
   }
 
-  async function onBind(wsId: string, empId: string) {
+  async function onBind(wsId: string, empId: string, detach = false) {
     setError('')
     setMsg('')
     try {
-      await apiPost(`/workspaces/${wsId}/bind`, { employee_id: empId })
-      setMsg(empId ? '工作区绑定更新成功' : '已解除工作区绑定')
+      await apiPost(`/workspaces/${wsId}/bind`, { employee_id: empId, detach })
+      setMsg(empId && !detach ? '工作区绑定更新成功' : '已解除工作区绑定')
       await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : '绑定员工失败')
@@ -225,7 +236,7 @@ export function WorkspacesPage() {
 
       <PageFeatureGuide
         title="项目工作区挂载与代码安全隔离架构指引"
-        summary="Workspace 显式声明宿主机上的绝对路径与代码仓库属性，确保 AI Agent 仅在授权工程目录内读写代码。"
+        summary="选择工作站根目录，系统会在账号目录下创建或复用项目目录。"
         steps={[
           {
             step: '1',
@@ -235,14 +246,14 @@ export function WorkspacesPage() {
           },
           {
             step: '2',
-            title: '配置绝对物理路径 (Path)',
-            desc: '填写该员工专属目录内的绝对路径（工作站的员工根目录 / 员工ID / 项目目录）；根目录之外或符号链接路径将被拒绝。',
+            title: '选择根目录并填写项目目录名',
+            desc: '目录名只能有一级，例如 test。用户目录由系统根据账号自动确定。',
             tag: '路径挂载',
           },
           {
             step: '3',
             title: '专属数字员工绑定 (Owner)',
-            desc: '与数字员工建立一对一绑定关系，飞书派单给该员工时自动锁定并加载本工作区。',
+            desc: '同一用户的多个数字员工可以绑定同一项目。',
             tag: '上下文锁定',
           },
         ]}
@@ -256,24 +267,24 @@ export function WorkspacesPage() {
         <div className="panel-header">
           <div>
             <h2>{editingId ? '编辑工作区' : '新建项目工作区'}</h2>
-            <p>{editingId ? '修改工作站、路径、仓库和绑定员工后保存' : '先选择工作站节点，再填写该节点上的本机绝对路径；路径只在所选节点上有效'}</p>
+            <p>{editingId ? '修改工作站、路径、仓库和绑定员工后保存' : '选择工作站、根目录，再填写项目目录名'}</p>
           </div>
         </div>
         <form className="inline-form" onSubmit={onSubmit}>
           <SearchableSelect
             value={workstationId}
-            onChange={setWorkstationId}
+            onChange={value => {setWorkstationId(value);setRootPath('');setEmployeeId('')}}
             options={nodeOptions}
             placeholder="① 选择或搜索工作站…"
             required
             style={{ minWidth: 220 }}
           />
+          <select aria-label="工作站根目录" value={rootPath} onChange={e=>setRootPath(e.target.value)} required={!editingId || !!items.find(w=>w.id===editingId)?.owner_user_id} disabled={!!editingId && !items.find(w=>w.id===editingId)?.owner_user_id}>
+            <option value="">{editingId && !rootPath ? '旧版绝对路径' : '选择根目录'}</option>
+            {(selectedNode?.workspace_roots || []).map(root=><option key={root}>{root}</option>)}
+          </select>
           <input
-            placeholder={
-              selectedNode
-                ? `② ${selectedNode.name || selectedNode.id} 上的本机绝对路径`
-                : '② 先选工作站，再填本机绝对路径'
-            }
+            placeholder="项目目录名，例如 test"
             value={path}
             onChange={(e) => setPath(e.target.value)}
             style={{ flex: 2, minWidth: '280px' }}
@@ -297,7 +308,7 @@ export function WorkspacesPage() {
             onChange={setEmployeeId}
             options={empOptions}
             placeholder="归属员工（可选）"
-            allowCustom
+
             style={{ minWidth: 180 }}
           />
           <button type="submit" disabled={!workstationId || !path.trim()}>
@@ -322,7 +333,7 @@ export function WorkspacesPage() {
         <div className="panel-header">
           <div>
             <h2>工作区目录列表</h2>
-            <p>已登记 {items.length} 个代码工程工作区（每位员工独占绑定一个工作区）</p>
+            <p>已登记 {items.length} 个代码工程工作区（同一用户的多个员工可共享工作区）</p>
           </div>
         </div>
 
@@ -362,7 +373,7 @@ export function WorkspacesPage() {
                     )}
                   </td>
                   <td>
-                    <span className="mono" style={{ fontSize: '0.85rem' }}>{w.path}</span>
+                    <span className="mono" style={{ fontSize: '0.85rem' }}>{w.root_path ? [w.root_path.replace(/[/\\]$/,''),w.user_directory,w.path].join(w.root_path.includes(':') ? '\\' : '/') : w.path}</span>
                   </td>
                   <td>
                     {w.repository ? (
@@ -374,7 +385,17 @@ export function WorkspacesPage() {
                     )}
                   </td>
                   <td>
-                    {w.employee_id ? (
+                    {w.owner_user_id ? (
+                      <>
+                        {employees.filter(emp=>emp.workspace_id===w.id).map(emp=><div key={emp.id}>
+                          <EntityName name={emp.name} id={emp.id} to={`/employees/${emp.id}`} />
+                          {w.can_write && <button className="btn-ghost btn-sm" onClick={()=>void onBind(w.id,emp.id,true)}>解绑</button>}
+                        </div>)}
+                        {w.can_write && <SearchableSelect value="" onChange={id=>id && void onBind(w.id,id)}
+                          options={employees.filter(emp=>emp.owner_user_id===w.owner_user_id && (!emp.workstation_id || emp.workstation_id===w.workstation_id) && emp.workspace_id!==w.id).map(emp=>({value:emp.id,label:emp.name}))}
+                          placeholder="添加绑定员工…" />}
+                      </>
+                    ) : w.employee_id ? (
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                         <EntityName
                           name={empMap[w.employee_id] || w.employee_id}

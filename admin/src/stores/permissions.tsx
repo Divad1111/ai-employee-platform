@@ -3,9 +3,10 @@
  */
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { apiGet } from '../api/client'
-import { getUser } from '../stores/session'
+import { getUser, setSession, type SessionUser } from '../stores/session'
 
 type PermContextValue = {
+  user: SessionUser | null
   /** null = 加载中 */
   ready: boolean
   roles: string[]
@@ -19,6 +20,7 @@ type PermContextValue = {
 }
 
 const PermContext = createContext<PermContextValue>({
+  user: null,
   ready: false,
   roles: [],
   perms: new Set(),
@@ -39,6 +41,7 @@ function buildPermSet(permissions: Array<{ name: string; scope?: string }> | und
 }
 
 export function PermissionProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<SessionUser | null>(() => getUser())
   const [ready, setReady] = useState(false)
   const [roles, setRoles] = useState<string[]>(() => getUser()?.roles || [])
   const [perms, setPerms] = useState<Set<string>>(() => new Set())
@@ -46,10 +49,13 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false
-    apiGet<{ permissions?: Array<{ name: string; scope?: string }>; roles?: string[] }>('/auth/me')
+    apiGet<SessionUser & { permissions?: Array<{ name: string; scope?: string }> }>('/auth/me')
       .then((me) => {
         if (cancelled) return
         const r = me.roles || getUser()?.roles || []
+        const currentUser = { id: me.id, username: me.username, roles: r }
+        setSession(currentUser)
+        setUser(currentUser)
         setRoles(r)
         setPerms(buildPermSet(me.permissions, r))
         const next: Record<string, string> = {}
@@ -87,8 +93,8 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
       if (perms.has('*')) return true
       return scopes[code] === 'ALL'
     }
-    return { ready, roles, perms, can, canAny, canAll }
-  }, [ready, roles, perms, scopes])
+    return { user, ready, roles, perms, can, canAny, canAll }
+  }, [user, ready, roles, perms, scopes])
 
   return <PermContext.Provider value={value}>{children}</PermContext.Provider>
 }

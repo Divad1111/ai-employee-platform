@@ -1,18 +1,21 @@
 /**
  * 工作站详情：创建者可设置公用，并调整可使用的角色与用户。
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { apiGet, apiPut } from '../api/client'
 import { roleDisplayName } from '../lib/rbacLabels'
 import { StatusBadge } from '../components/StatusBadge'
 import { usePerm } from '../stores/permissions'
 import { getInfrastructure, type Host } from '../api/infrastructure'
+import { IconFolder, IconPlus, IconTrash } from '../components/Icons'
+import './WorkstationDetailPage.css'
 
 type WS = {
   id: string
   name: string
   status: string
+  workspace_roots?: string[]
   cert_status?: string
 }
 
@@ -43,6 +46,10 @@ export function WorkstationDetailPage() {
   }, [id, canAll])
   const [ws, setWs] = useState<WS | null>(null)
   const [sharing, setSharing] = useState<Sharing | null>(null)
+  const [roots, setRoots] = useState<string[]>([''])
+  const [rootsSaving, setRootsSaving] = useState(false)
+  const [rootsError, setRootsError] = useState('')
+  const [rootsMessage, setRootsMessage] = useState('')
   const [roles, setRoles] = useState<RoleItem[]>([])
   const [isPublic, setIsPublic] = useState(false)
   const [grantRoles, setGrantRoles] = useState<string[]>([])
@@ -59,6 +66,7 @@ export function WorkstationDetailPage() {
       apiGet<{ items: RoleItem[] }>('/roles').catch(() => ({ items: [] as RoleItem[] })),
     ])
     setWs(node)
+    setRoots(node.workspace_roots?.length ? node.workspace_roots : [''])
     setSharing(share)
     setIsPublic(!!share.is_public)
     setGrantRoles(share.grant_roles || [])
@@ -103,6 +111,25 @@ export function WorkstationDetailPage() {
     }
   }
 
+  async function saveRoots(event: FormEvent) {
+    event.preventDefault()
+    if (!id || !ws) return
+    setRootsSaving(true)
+    setRootsError('')
+    setRootsMessage('')
+    const nextRoots = roots.map(root => root.trim()).filter(Boolean)
+    try {
+      await apiPut(`/workstations/${id}/workspace-roots`, { roots: nextRoots })
+      setWs({ ...ws, workspace_roots: nextRoots })
+      setRoots(nextRoots.length ? nextRoots : [''])
+      setRootsMessage('根目录已保存')
+    } catch (error) {
+      setRootsError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setRootsSaving(false)
+    }
+  }
+
   if (err && !ws) return <div className="page"><div className="error">{err}</div></div>
   if (!ws || !sharing) return <div className="page"><p className="muted">加载中…</p></div>
 
@@ -115,17 +142,75 @@ export function WorkstationDetailPage() {
   const creator = sharing.created_by_user_id || ''
 
   return (
-    <div className="page">
-      <div className="page-header">
-        <Link to="/workstations" className="muted" style={{ fontSize: '0.85rem' }}>← 返回工作站列表</Link>
-        <h1 style={{ marginTop: '0.35rem' }}>{ws.name || ws.id}</h1>
-        {infraHost && <Link to={`/pve/hosts/${infraHost.id}`}>管理关联主机 · {infraHost.name} / 软件部署 / SSH</Link>}
-        <p style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-          <StatusBadge status={ws.status} />
-          <span className="muted">{ws.id}</span>
-        </p>
-      </div>
+    <div className="page workstation-detail">
+      <Link to="/workstations" className="workstation-back">← 返回工作站列表</Link>
+      <header className="page-header workstation-heading">
+        <div>
+          <h1>{ws.name || ws.id}</h1>
+          <p className="workstation-id">{ws.id}</p>
+          {infraHost && <Link to={`/pve/hosts/${infraHost.id}`}>管理关联主机 · {infraHost.name} / 软件部署 / SSH</Link>}
+        </div>
+        <StatusBadge status={ws.status} />
+      </header>
 
+      {err ? <p role="alert" className="error">{err}</p> : null}
+      {msg ? <p role="status" className="muted">{msg}</p> : null}
+      <section className="panel workspace-roots-panel" aria-labelledby="workspace-roots-title">
+        <div className="panel-header">
+          <div>
+            <h2 id="workspace-roots-title">工作区根目录</h2>
+            <p>用户目录由系统按平台登录名创建，项目工作区位于用户目录内。</p>
+          </div>
+        </div>
+        {sharing.can_manage || canAll('workstation.write') ? (
+          <form className="workspace-roots-form" onSubmit={saveRoots}>
+            <div className="workspace-roots-label">工作站本机路径</div>
+            <div className="workspace-root-list">
+              {roots.map((root, index) => (
+                <div className="workspace-root-row" key={index}>
+                  <IconFolder size={18} className="workspace-root-icon" aria-hidden="true" />
+                  <input
+                    aria-label={`根目录 ${index + 1}`}
+                    aria-describedby="workspace-root-path-help"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="例如 D:\AIProjects 或 /srv/ai-projects"
+                    value={root}
+                    disabled={rootsSaving}
+                    onChange={event => {
+                      setRoots(roots.map((value, row) => row === index ? event.target.value : value))
+                      setRootsMessage('')
+                    }}
+                  />
+                  <button type="button" className="btn-ghost workspace-root-remove"
+                    aria-label={`移除根目录 ${index + 1}`} title="移除此目录"
+                    disabled={rootsSaving}
+                    onClick={() => {
+                      setRoots(roots.length === 1 ? [''] : roots.filter((_, row) => row !== index))
+                      setRootsMessage('')
+                    }}>
+                    <IconTrash size={16} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <p className="workspace-root-help" id="workspace-root-path-help">填写绝对路径，每行一个目录。添加的目录将在绑定工作区时供用户选择。</p>
+            {rootsError && <p role="alert" className="error">{rootsError}</p>}
+            <div className="workspace-roots-footer">
+              <button type="button" className="btn-ghost" disabled={rootsSaving}
+                onClick={() => { setRoots([...roots, '']); setRootsMessage('') }}>
+                <IconPlus size={16} />添加目录
+              </button>
+              <div className="workspace-roots-save">
+                {rootsMessage && <span role="status">{rootsMessage}</span>}
+                <button disabled={rootsSaving}>{rootsSaving ? '保存中…' : '保存根目录'}</button>
+              </div>
+            </div>
+          </form>
+        ) : <div className="workspace-root-list">{ws.workspace_roots?.length
+          ? ws.workspace_roots.map(root => <div className="workspace-root-readonly" key={root}><IconFolder size={18} /><code>{root}</code></div>)
+          : <p className="muted">尚未配置根目录</p>}</div>}
+      </section>
       <div className="panel">
         <div className="panel-header">
           <div>
@@ -176,8 +261,6 @@ export function WorkstationDetailPage() {
                   ))}
                 </div>
               </div>
-              {err ? <p className="error">{err}</p> : null}
-              {msg ? <p className="muted">{msg}</p> : null}
               <button type="button" className="btn-success btn-sm" style={{ marginTop: '0.8rem' }} disabled={saving} onClick={() => void save()}>
                 {saving ? '保存中…' : '保存授权'}
               </button>

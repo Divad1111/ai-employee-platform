@@ -1,0 +1,61 @@
+.quota-summary {
+  margin-bottom: 1rem;
+}
+
+.quota-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.8rem;
+  padding: 0 1.5rem 1rem;
+}
+
+.quota-summary-item {
+  padding: 1rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-main);
+}
+
+.quota-summary-item span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.quota-summary-item strong {
+  display: block;
+  margin-top: 0.5rem;
+  font-size: 1.4rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.quota-source-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin: 0;
+  padding: 0.3rem 1.5rem 1.5rem;
+}
+
+.quota-source-grid dt {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.quota-source-grid dd {
+  margin: 0.4rem 0 0;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 1000px) {
+  .quota-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .quota-source-grid {
+    grid-template-columns: 1fr;
+  }
+}

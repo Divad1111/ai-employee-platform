@@ -9,7 +9,7 @@ import (
 )
 
 // authorizeWorkspaceRef 在解析路径或写入关联之前同时检查节点、工作区和已有绑定。
-func (d Deps) authorizeWorkspaceRef(w http.ResponseWriter, r *http.Request, s *auth.Session, ref, node, perm string) bool {
+func (d Deps) authorizeWorkspaceRef(w http.ResponseWriter, r *http.Request, s *auth.Session, ref, node, perm, owner string) bool {
 	if ref == "" {
 		return true
 	}
@@ -19,12 +19,17 @@ func (d Deps) authorizeWorkspaceRef(w http.ResponseWriter, r *http.Request, s *a
 	}
 	ws, err := d.Workspaces.LookupReference(r.Context(), ref, node)
 	if err != nil {
-		// 新本机路径由解析器登记并由工作站再次校验；查询失败必须拒绝。
+		// 绑定只接受已登记工作区，查询失败时拒绝。
 		if !errors.Is(err, workspace.ErrNotFound) {
 			writeErr(w, 503, "无法校验工作区")
 			return false
 		}
-		return true
+		writeErr(w, 400, "请先选择根目录并登记工作区")
+		return false
+	}
+	if ws.OwnerUserID != "" && ws.OwnerUserID != owner {
+		writeErr(w, 403, "员工与工作区所有者不一致")
+		return false
 	}
 	if (node != "" && ws.WorkstationID != node) || (!d.scopeAll(r, s, perm) && !d.canWriteWorkspace(r, s, ws)) {
 		writeErr(w, 403, "工作区不属于目标工作站或无权使用")

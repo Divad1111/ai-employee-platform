@@ -51,10 +51,13 @@ type Employee struct {
 
 // Workspace 本地视图。
 type Workspace struct {
-	ID         string
-	EmployeeID string
-	Path       string
-	LockedBy   string // session_id
+	ID            string
+	EmployeeID    string
+	Path          string
+	RootPath      string
+	UserDirectory string
+	DirectoryName string
+	LockedBy      string // session_id
 }
 
 // Session 本地会话。
@@ -62,6 +65,7 @@ type Session struct {
 	ID             string
 	EmployeeID     string
 	WorkspaceID    string
+	WorkspacePath  string
 	Provider       string
 	Model          string
 	MCPFingerprint string
@@ -184,7 +188,7 @@ func (m *Managers) StartSessionWithMCP(ctx context.Context, sessID, employeeID, 
 			return nil, ErrActiveSession
 		}
 	}
-	w := m.workspaces[workspaceID]
+	w := m.employeeWorkspace(workspaceID, employeeID)
 	if w != nil && w.EmployeeID != employeeID {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("无权使用其他员工的工作区")
@@ -209,7 +213,7 @@ func (m *Managers) StartSessionWithMCP(ctx context.Context, sessID, employeeID, 
 	}
 	s := &Session{
 		ID: sessID, EmployeeID: employeeID, WorkspaceID: workspaceID,
-		Provider: provider, Model: model, MCPFingerprint: FingerprintMCPServers(mcpServers), Status: SessStarting,
+		WorkspacePath: wsPath, Provider: provider, Model: model, MCPFingerprint: FingerprintMCPServers(mcpServers), Status: SessStarting,
 	}
 	m.sessions[sessID] = s
 	m.mu.Unlock()
@@ -219,7 +223,12 @@ func (m *Managers) StartSessionWithMCP(ctx context.Context, sessID, employeeID, 
 		m.markSession(sessID, SessUnknown)
 		return nil, err
 	}
-	if _, err := m.secureWorkspacePath(employeeID, wsPath); err != nil {
+	if w != nil && w.RootPath != "" {
+		_, err = managedWorkspacePath(w.RootPath, w.UserDirectory, w.DirectoryName)
+	} else {
+		_, err = m.secureWorkspacePath(employeeID, wsPath)
+	}
+	if err != nil {
 		m.markSession(sessID, SessUnknown)
 		return nil, err
 	}
@@ -528,7 +537,7 @@ func (m *Managers) StopSession(ctx context.Context, sessionID string) error {
 	agent := m.agentSess[sessionID]
 	delete(m.agentSess, sessionID)
 	if ok {
-		if w, wok := m.workspaces[s.WorkspaceID]; wok && w.LockedBy == sessionID {
+		if w := m.employeeWorkspace(s.WorkspaceID, s.EmployeeID); w != nil && w.LockedBy == sessionID {
 			w.LockedBy = ""
 		}
 		s.Status = SessStopped
@@ -625,4 +634,29 @@ func (m *Managers) RecoverRunning() {
 			j.Status = JobUnknown
 		}
 	}
+}
+
+func (m *Managers) employeeWorkspace(id, employeeID string) *Workspace {
+	if w := m.workspaces[id+"\x00"+employeeID]; w != nil {
+		return w
+	}
+	return m.workspaces[id]
+}
+func (m *Managers) EnsureUserWorkspace(id, employeeID, root, username, name string) (*Workspace, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !validResourceID(id) || !validResourceID(employeeID) {
+		return nil, fmt.Errorf("非法工作区或员工 ID")
+	}
+	path, err := managedWorkspacePath(root, username, name)
+	if err != nil {
+		return nil, err
+	}
+	key := id + "\x00" + employeeID
+	if old := m.workspaces[key]; old != nil && old.Path == path {
+		return old, nil
+	}
+	w := &Workspace{ID: id, EmployeeID: employeeID, RootPath: root, UserDirectory: username, DirectoryName: name, Path: path}
+	m.workspaces[key] = w
+	return w, nil
 }

@@ -1,11 +1,13 @@
 /**
  * 用户详情（§22）
  */
-import { useEffect, useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { apiGet, apiPatch, apiPost } from '../api/client'
 import { roleDisplayName } from '../lib/rbacLabels'
 import { usePerm } from '../stores/permissions'
+import { clearSession } from '../stores/session'
+import './UserDetailPage.css'
 
 type Detail = {
   id: string
@@ -27,9 +29,11 @@ function stationRoleLabel(role: string) {
   return role || '—'
 }
 
-export function UserDetailPage() {
-  const { id } = useParams()
-  const { roles: myRoles } = usePerm()
+export function UserDetailPage({ self = false }: { self?: boolean }) {
+  const { id: routeId } = useParams()
+  const navigate = useNavigate()
+  const { user, roles: myRoles, canAll } = usePerm()
+  const id = self ? user?.id : routeId
   const iAmSuper = myRoles.includes('SUPER_ADMIN')
   const [d, setD] = useState<Detail | null>(null)
   const [err, setErr] = useState('')
@@ -37,6 +41,11 @@ export function UserDetailPage() {
   const [role, setRole] = useState('')
   const [savingRole, setSavingRole] = useState(false)
   const [roleErr, setRoleErr] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [savingPassword, setSavingPassword] = useState(false)
+  const [passwordError, setPasswordError] = useState('')
+  const [passwordMessage, setPasswordMessage] = useState('')
 
   const load = async () => {
     if (!id) return
@@ -48,6 +57,12 @@ export function UserDetailPage() {
   }
 
   useEffect(() => {
+    setD(null)
+    setErr('')
+    setPassword('')
+    setConfirmPassword('')
+    setPasswordError('')
+    setPasswordMessage('')
     void load()
   }, [id])
 
@@ -60,6 +75,8 @@ export function UserDetailPage() {
 
   const targetIsSuper = (d?.roles || []).includes('SUPER_ADMIN')
   const canEditRole = iAmSuper && !!d && !targetIsSuper
+  const isSelf = !!id && user?.id === id
+  const canResetPassword = d?.id === id && (isSelf || canAll('user.update')) && (!targetIsSuper || iAmSuper)
   const roleOptions = useMemo(() => {
     const src = roles.length > 0 ? roles : [
       { name: 'ADMIN', description: '管理员' },
@@ -102,6 +119,33 @@ export function UserDetailPage() {
     }
   }
 
+  async function resetPassword(event: FormEvent) {
+    event.preventDefault()
+    if (!d || !canResetPassword || savingPassword) return
+    setPasswordError('')
+    setPasswordMessage('')
+    if (password !== confirmPassword) {
+      setPasswordError('两次输入的密码不一致')
+      return
+    }
+    setSavingPassword(true)
+    try {
+      await apiPatch(`/users/${d.id}`, { password })
+      setPassword('')
+      setConfirmPassword('')
+      if (isSelf) {
+        clearSession()
+        navigate('/login', { replace: true, state: { message: '密码已更新，请使用新密码重新登录' } })
+      } else {
+        setPasswordMessage('密码已重置，该用户需使用新密码重新登录')
+      }
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : '重置密码失败')
+    } finally {
+      setSavingPassword(false)
+    }
+  }
+
   if (err) return <div className="page"><div className="error">{err}</div></div>
   if (!d) return <div className="page"><p className="muted">加载中…</p></div>
 
@@ -109,20 +153,22 @@ export function UserDetailPage() {
     <div className="page">
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
         <div>
-          <Link to="/users" className="muted" style={{ fontSize: '0.85rem' }}>← 返回用户列表</Link>
-          <h1 style={{ marginTop: '0.35rem' }}>{d.display_name || d.username}</h1>
+          <Link to={canAll('user.read') ? '/users' : '/'} className="muted" style={{ fontSize: '0.85rem' }}>
+            {canAll('user.read') ? '← 返回用户列表' : '← 返回首页'}
+          </Link>
+          <h1 style={{ marginTop: '0.35rem' }}>{self ? '个人设置' : d.display_name || d.username}</h1>
           <p>
             {d.username} · {(d.roles || []).map((r) => roleDisplayName(r)).join('、') || '无角色'} ·{' '}
             {d.status === 'active' ? '启用' : d.status}
           </p>
         </div>
-        <button
+        {canAll('user.disable') && (!targetIsSuper || iAmSuper) && <button
           type="button"
           className={d.status === 'disabled' ? 'btn-success btn-sm' : 'btn-warn btn-sm'}
           onClick={() => void toggle()}
         >
           {d.status === 'disabled' ? '启用用户' : '禁用用户'}
-        </button>
+        </button>}
       </div>
 
       <div className="panel" style={{ marginBottom: '1rem' }}>
@@ -163,6 +209,32 @@ export function UserDetailPage() {
           ) : null}
         </div>
       </div>
+
+      {canResetPassword && <section className="panel" aria-labelledby="reset-password-title">
+        <div className="panel-header">
+          <div>
+            <h2 id="reset-password-title">{isSelf ? '修改密码' : '重置密码'}</h2>
+            <p>更新后，该账号的现有登录会话失效，需要使用新密码重新登录。</p>
+          </div>
+        </div>
+        <form className="user-password-form" onSubmit={resetPassword}>
+          <div className="user-password-fields">
+            <label htmlFor="user-new-password">新密码
+              <input id="user-new-password" type="password" autoComplete="new-password"
+                placeholder="至少 8 位" required minLength={8} maxLength={72}
+                value={password} disabled={savingPassword} onChange={event => setPassword(event.target.value)} />
+            </label>
+            <label htmlFor="user-confirm-password">确认新密码
+              <input id="user-confirm-password" type="password" autoComplete="new-password"
+                placeholder="再次输入新密码" required minLength={8} maxLength={72}
+                value={confirmPassword} disabled={savingPassword} onChange={event => setConfirmPassword(event.target.value)} />
+            </label>
+          </div>
+          {passwordError && <p className="error" role="alert">{passwordError}</p>}
+          {passwordMessage && <p className="ok-msg" role="status">{passwordMessage}</p>}
+          <button disabled={savingPassword} type="submit">{savingPassword ? '保存中…' : isSelf ? '修改密码' : '重置密码'}</button>
+        </form>
+      </section>}
 
       <div className="panel" style={{ marginBottom: '1rem' }}>
         <div className="panel-header">

@@ -180,7 +180,12 @@ func (d Deps) attachUsageBreakdown(r *http.Request, sess *auth.Session, out map[
 	if used == 0 {
 		used = inputSum + outputSum
 	}
+	// The monthly counter survives employee/job deletion. Retained job details
+	// are a breakdown of usage, and must not erase already recorded consumption.
+	recorded, _ := out["tokens_used"].(int64)
+	used = max(used, recorded)
 	out["tokens_used"] = used
+	out["unattributed_tokens"] = max(int64(0), recorded-usedSum)
 	if limit, ok := out["token_limit"].(int64); ok && limit > 0 {
 		pct := float64(used) / float64(limit) * 100
 		if pct > 100 {

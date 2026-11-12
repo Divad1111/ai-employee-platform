@@ -768,14 +768,19 @@ func recordJobTokens(ctx context.Context, jobSvc *job.Service, usageSvc *tokenus
 	var first bool
 	var userID string
 	if usageSvc != nil {
-		_, first, _ = usageSvc.UpsertFromEventPayload(ctx, jobID, wsID, empID, payload)
+		var err error
+		_, first, err = usageSvc.UpsertFromEventPayload(ctx, jobID, wsID, empID, payload)
+		if err != nil {
+			fmt.Printf("[TokenUsage] 保存任务 %s 的用量失败: %v\n", jobID, err)
+			return
+		}
 		if j, err := jobSvc.Get(ctx, jobID); err == nil && j != nil {
 			userID = j.CreatedBy
-			inTok = j.InputTokens
-			outTok = j.OutputTokens
-			if j.TotalTokens > 0 {
-				total = j.TotalTokens
-			}
+		}
+		// Only this new run is added to the monthly counter. The job summary
+		// already includes earlier runs and would count them again on retries.
+		if src == "estimate" {
+			inTok, outTok, total = 0, 0, 0
 		}
 	} else {
 		var err error
@@ -794,7 +799,9 @@ func recordJobTokens(ctx context.Context, jobSvc *job.Service, usageSvc *tokenus
 	if delta <= 0 {
 		delta = inTok + outTok
 	}
-	_, _ = store.AddUsage(ctx, quota.TypeUser, userID, quota.PeriodMonthly, delta, 1)
+	if _, err := store.AddUsage(ctx, quota.TypeUser, userID, quota.PeriodMonthly, delta, 1); err != nil {
+		fmt.Printf("[TokenUsage] 更新任务 %s 的用户统计失败: %v\n", jobID, err)
+	}
 }
 
 func getenv(k, def string) string {

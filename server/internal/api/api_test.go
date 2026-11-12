@@ -143,8 +143,9 @@ func TestAPIEmployeeJobSessionMessageFlow(t *testing.T) {
 	}
 	empID := emp["id"].(string)
 
+	configureTestRoots(t, h, tok, "WSN-demo")
 	code, ws := doJSON(t, h, http.MethodPost, "/api/workspaces", tok, map[string]string{
-		"workstation_id": "WSN-demo", "path": "/src", "repository": "demo", "branch": "main",
+		"workstation_id": "WSN-demo", "root_path": "/projects", "path": "src", "repository": "demo", "branch": "main",
 	})
 	if code != 201 {
 		t.Fatal(ws)
@@ -270,24 +271,37 @@ func TestWorkspaceUnbindAndDeleteStepUp(t *testing.T) {
 		t.Fatal(emp)
 	}
 	empID := emp["id"].(string)
+	configureTestRoots(t, h, tok, "WSN-1")
 	code, ws := doJSON(t, h, http.MethodPost, "/api/workspaces", tok, map[string]string{
-		"workstation_id": "WSN-1", "path": "/repo",
+		"workstation_id": "WSN-1", "root_path": "/projects", "path": "repo",
 	})
 	if code != http.StatusCreated {
 		t.Fatal(ws)
 	}
 	wsID := ws["id"].(string)
 	code, bound := doJSON(t, h, http.MethodPost, "/api/workspaces/"+wsID+"/bind", tok, map[string]string{"employee_id": empID})
-	if code != http.StatusOK || bound["employee_id"] != empID {
+	if code != http.StatusOK || bound["user_directory"] != "admin" {
 		t.Fatalf("绑定失败: %d %v", code, bound)
 	}
-	code, unbound := doJSON(t, h, http.MethodPost, "/api/workspaces/"+wsID+"/bind", tok, map[string]string{"employee_id": ""})
+	code, second := doJSON(t, h, http.MethodPost, "/api/employees", tok, map[string]string{"name": "second", "workspace_id": wsID, "workstation_id": "WSN-1"})
+	if code != 201 {
+		t.Fatal(code, second)
+	}
+	_, original := doJSON(t, h, http.MethodGet, "/api/employees/"+empID, tok, nil)
+	if original["workspace_id"] != wsID {
+		t.Fatal("binding replaced first employee", original)
+	}
+	code, unbound := doJSON(t, h, http.MethodPost, "/api/workspaces/"+wsID+"/bind", tok, map[string]any{"employee_id": empID, "detach": true})
 	if code != http.StatusOK || unbound["employee_id"] != "" {
 		t.Fatalf("解绑应清空员工: %d %v", code, unbound)
 	}
 	code, got := doJSON(t, h, http.MethodGet, "/api/employees/"+empID, tok, nil)
 	if wsLeft, _ := got["workspace_id"].(string); code != http.StatusOK || wsLeft != "" {
 		t.Fatalf("员工侧工作区应一并解除: %d %v", code, got)
+	}
+	_, remaining := doJSON(t, h, http.MethodGet, "/api/employees/"+second["id"].(string), tok, nil)
+	if remaining["workspace_id"] != wsID {
+		t.Fatal("detached another employee", remaining)
 	}
 	code, denied := doJSON(t, h, http.MethodDelete, "/api/workspaces/"+wsID, tok, nil)
 	if code != http.StatusForbidden {
@@ -311,5 +325,28 @@ func TestAPIUnauthorizedCannotWrite(t *testing.T) {
 	code, _ := doJSON(t, h, http.MethodPost, "/api/employees", "", map[string]string{"name": "x"})
 	if code != http.StatusUnauthorized {
 		t.Fatal(code)
+	}
+}
+
+func configureTestRoots(t *testing.T, h http.Handler, tok, node string) {
+	t.Helper()
+	code, body := doJSON(t, h, http.MethodPut, "/api/workstations/"+node+"/workspace-roots", tok, map[string]any{"roots": []string{"/projects", "/data"}})
+	if code != 200 {
+		t.Fatalf("configure roots: %d %v", code, body)
+	}
+}
+
+func TestWorkspaceRegistrationUsesSelectedRootAndOwnerName(t *testing.T) {
+	h, tok := setupAPI(t)
+	configureTestRoots(t, h, tok, "WSN-1")
+	for _, p := range []struct{ root, name string }{{"/elsewhere", "test"}, {"/projects", "../test"}, {"/projects", "a/b"}, {"/data", "LPT1"}} {
+		code, _ := doJSON(t, h, http.MethodPost, "/api/workspaces", tok, map[string]string{"workstation_id": "WSN-1", "root_path": p.root, "path": p.name})
+		if code != 400 {
+			t.Fatal(p, code)
+		}
+	}
+	code, w := doJSON(t, h, http.MethodPost, "/api/workspaces", tok, map[string]string{"workstation_id": "WSN-1", "root_path": "/data", "path": "test", "user_directory": "someone-else"})
+	if code != 201 || w["root_path"] != "/data" || w["user_directory"] != "admin" {
+		t.Fatal(code, w)
 	}
 }

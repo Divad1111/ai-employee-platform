@@ -7,7 +7,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-do
 import { apiGet, apiPost } from '../api/client'
 import { roleDisplayName } from '../lib/rbacLabels'
 import { formatTime, localTimeZone, timeZoneLabel } from '../lib/time'
-import { clearSession, getUser } from '../stores/session'
+import { clearSession } from '../stores/session'
 import { usePerm } from '../stores/permissions'
 import {
   IconDashboard,
@@ -84,7 +84,7 @@ const navSections: NavSection[] = [
   {
     title: '用户与权限',
     items: [
-      { to: '/users', label: '用户管理', icon: IconUsers, perm: 'user.read' },
+      { to: '/users', label: '用户管理', icon: IconUsers, perm: 'user.read', allScope: true },
       { to: '/roles', label: '角色与权限', icon: IconShield, perm: 'role.read', allScope: true },
       { to: '/quotas', label: 'Token / 配额', icon: IconPackage, perm: 'quota.read' },
     ],
@@ -121,8 +121,7 @@ type FeishuStatus = {
 export function AppShell() {
   const nav = useNavigate()
   const location = useLocation()
-  const user = getUser()
-  const { ready, can: canPerm, canAll } = usePerm()
+  const { user, ready, can: canPerm, canAll } = usePerm()
   const [feishuStatus, setFeishuStatus] = useState<FeishuStatus | null>(null)
   /** 飞书配置页需 system.write；VIEWER 仅可看状态不可跳转 */
   const canFeishuConfig = ready && canPerm('system.write')
@@ -176,7 +175,7 @@ export function AppShell() {
   const activeNav = allNavItems.find((n) =>
     n.end ? location.pathname === n.to : location.pathname.startsWith(n.to) && n.to !== '/'
   )
-  const currentTitle = activeNav?.label || '控制中心'
+  const currentTitle = location.pathname === '/profile' ? '个人设置' : activeNav?.label || '控制中心'
 
   return (
     <div className="shell">
@@ -210,13 +209,18 @@ export function AppShell() {
 
         <div className="sidebar-footer">
           <div className="user-profile">
-            <div className="user-avatar">
-              {(user?.username || 'A').slice(0, 1).toUpperCase()}
-            </div>
-            <div className="user-meta">
-              <div className="name">{user?.username || '未登录'}</div>
-              <div className="role">{roleLabel || user?.roles?.[0] || '—'} · 系统在线</div>
-            </div>
+            <Link className="user-profile-link" to="/profile" title="个人设置与修改密码">
+              <div className="user-avatar">
+                {(user?.username || 'A').slice(0, 1).toUpperCase()}
+              </div>
+              <div className="user-meta">
+                <div className="name">{user?.username || '未登录'}</div>
+                <div className="role">{roleLabel || user?.roles?.[0] || '—'} · 系统在线</div>
+              </div>
+            </Link>
+            <Link className="profile-settings-btn" to="/profile" aria-label="打开个人设置" title="个人设置">
+              <IconSettings size={18} />
+            </Link>
           </div>
           <button type="button" className="logout-btn" onClick={() => void logout()}>
             <IconLogOut size={15} />

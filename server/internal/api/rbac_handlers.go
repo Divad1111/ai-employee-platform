@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ai-employee-platform/server/internal/audit"
 	"github.com/ai-employee-platform/server/internal/auth"
@@ -151,6 +152,9 @@ func (d Deps) canAccessWorkspace(r *http.Request, sess *auth.Session, ws *worksp
 	scope := d.resolveScope(r.Context(), sess, permCode)
 	if scope == authz.ScopeALL {
 		return true
+	}
+	if ws.OwnerUserID != "" {
+		return ws.OwnerUserID == sess.UserID
 	}
 	if ws.WorkstationID != "" && d.userIDMayUseWorkstation(r.Context(), sess.UserID, ws.WorkstationID, sess.Roles) {
 		return true
@@ -385,6 +389,20 @@ func (d Deps) handleCreateUser(w http.ResponseWriter, r *http.Request, sess *aut
 	})
 }
 
+// Users can access their own profile without account-management permissions.
+// Existing MFA requirements still apply to administrator accounts.
+func (d Deps) requireSelfOrUserPerm(code string, next authed) http.HandlerFunc {
+	protected := d.requirePerm(code, next)
+	return d.requireAuth(func(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
+		mfaComplete := !sess.MFARequired || (sess.MFAAuthenticated && d.Approvals != nil && d.Approvals.TOTPEnabled(r.Context(), sess.UserID))
+		if r.PathValue("id") == sess.UserID && mfaComplete {
+			next(w, r, sess)
+			return
+		}
+		protected(w, r)
+	})
+}
+
 func (d Deps) handleGetUser(w http.ResponseWriter, r *http.Request, sess *auth.Session) {
 	u, err := d.Auth.Users().FindByID(r.Context(), r.PathValue("id"))
 	if err != nil || u == nil {
@@ -499,8 +517,8 @@ func (d Deps) handlePatchUser(w http.ResponseWriter, r *http.Request, sess *auth
 		u.Email = *req.Email
 	}
 	if req.Password != nil && *req.Password != "" {
-		if len(*req.Password) < 8 {
-			writeErr(w, http.StatusBadRequest, "密码至少 8 位")
+		if len(*req.Password) < 8 || len(*req.Password) > 72 {
+			writeErr(w, http.StatusBadRequest, "密码长度需为 8 至 72 字节")
 			return
 		}
 		hash, err := auth.HashPassword(*req.Password)
@@ -509,6 +527,8 @@ func (d Deps) handlePatchUser(w http.ResponseWriter, r *http.Request, sess *auth
 			return
 		}
 		u.PasswordHash = hash
+		u.FailedAttempts = 0
+		u.LockedUntil = time.Time{}
 	}
 	if err := d.Auth.Users().Update(r.Context(), u); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())

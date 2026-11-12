@@ -60,6 +60,9 @@ func (d Deps) canWriteWorkspace(r *http.Request, sess *auth.Session, ws *workspa
 	if d.scopeAll(r, sess, "workspace.write") {
 		return true
 	}
+	if ws.OwnerUserID != "" {
+		return ws.OwnerUserID == sess.UserID
+	}
 	if ws.WorkstationID != "" && d.workstationCreatedBy(r.Context(), ws.WorkstationID) == sess.UserID {
 		return true
 	}

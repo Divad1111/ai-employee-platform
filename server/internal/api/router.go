@@ -122,8 +122,8 @@ func NewRouter(d Deps) http.Handler {
 	// 用户 / 角色 / 配额（§35）
 	mux.HandleFunc("GET /api/users", d.requirePerm("user.read", d.handleListUsers))
 	mux.HandleFunc("POST /api/users", d.requirePerm("user.create", d.onlyAll("user.create", d.handleCreateUser)))
-	mux.HandleFunc("GET /api/users/{id}", d.requirePerm("user.read", d.handleGetUser))
-	mux.HandleFunc("PATCH /api/users/{id}", d.requirePerm("user.update", d.handlePatchUser))
+	mux.HandleFunc("GET /api/users/{id}", d.requireSelfOrUserPerm("user.read", d.handleGetUser))
+	mux.HandleFunc("PATCH /api/users/{id}", d.requireSelfOrUserPerm("user.update", d.handlePatchUser))
 	mux.HandleFunc("DELETE /api/users/{id}", d.requirePerm("user.delete", d.handleDeleteUser))
 	mux.HandleFunc("POST /api/users/{id}/disable", d.requirePerm("user.disable", d.handleDisableUser))
 	mux.HandleFunc("POST /api/users/{id}/enable", d.requirePerm("user.disable", d.handleEnableUser))
@@ -171,6 +171,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/workstations/{id}/models/refresh", d.requirePerm("workstation.read", d.handleRefreshWorkstationModels))
 	mux.HandleFunc("PATCH /api/workstations/{id}", d.requirePerm("workstation.write", d.handleUpdateWorkstation))
 	mux.HandleFunc("DELETE /api/workstations/{id}", d.requirePermStepUp("workstation.write", d.handleDeleteWorkstation))
+	mux.HandleFunc("PUT /api/workstations/{id}/workspace-roots", d.requireAuth(d.handleWorkspaceRoots))
 	mux.HandleFunc("GET /api/workstations/{id}/sharing", d.requirePerm("workstation.read", d.handleGetWSSharing))
 	mux.HandleFunc("PUT /api/workstations/{id}/sharing", d.requirePerm("workstation.read", d.handlePutWSSharing))
 	mux.HandleFunc("GET /api/workstations/{id}/members", d.requirePerm("workstation.read", d.handleListWSMembers))
@@ -813,6 +814,9 @@ func (d Deps) resolveEmployeeWorkspace(ctx context.Context, ref, workstationID, 
 	if ref == "" || d.Workspaces == nil {
 		return ref, nil
 	}
+	if _, err := d.Workspaces.Get(ctx, ref); err != nil {
+		return "", errors.New("请先选择根目录并登记工作区，再按工作区 ID 绑定")
+	}
 	return d.Workspaces.ResolveBinding(ctx, ref, workstationID, employeeID, actorID, ip)
 }
 
@@ -833,7 +837,7 @@ func (d Deps) handleCreateEmployee(w http.ResponseWriter, r *http.Request, sess 
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
-	if !d.authorizeWorkspaceRef(w, r, sess, in.WorkspaceID, in.WorkstationID, "employee.write") {
+	if !d.authorizeWorkspaceRef(w, r, sess, in.WorkspaceID, in.WorkstationID, "employee.write", in.OwnerUserID) {
 		return
 	}
 	if resolved, err := d.resolveEmployeeWorkspace(r.Context(), in.WorkspaceID, in.WorkstationID, "", sess.UserID, clientIP(r)); err != nil {
@@ -848,6 +852,10 @@ func (d Deps) handleCreateEmployee(w http.ResponseWriter, r *http.Request, sess 
 		return
 	}
 	if e.WorkspaceID != "" && d.Workspaces != nil {
+		if ws, err := d.Workspaces.Get(r.Context(), e.WorkspaceID); err == nil && ws.OwnerUserID != "" {
+			writeJSON(w, http.StatusCreated, e)
+			return
+		}
 		if _, berr := d.Workspaces.BindEmployee(r.Context(), e.WorkspaceID, e.ID, sess.UserID, clientIP(r)); berr != nil {
 			writeErr(w, http.StatusConflict, berr.Error())
 			return
@@ -919,7 +927,7 @@ func (d Deps) handleUpdateEmployee(w http.ResponseWriter, r *http.Request, sess 
 	if v, ok := raw["workspace_id"].(string); ok {
 		ref = v
 	}
-	if !d.authorizeWorkspaceRef(w, r, sess, ref, node, "employee.write") {
+	if !d.authorizeWorkspaceRef(w, r, sess, ref, node, "employee.write", existing.OwnerUserID) {
 		return
 	}
 	if v, ok := raw["workspace_id"].(string); ok {
@@ -1030,6 +1038,24 @@ func (d Deps) handleCreateWorkspace(w http.ResponseWriter, r *http.Request, sess
 	if !d.authorizeWorkspaceEmployee(w, r, sess, in.EmployeeID, in.WorkstationID) {
 		return
 	}
+	if !d.checkWorkspaceLocation(w, r, in.WorkstationID, in.RootPath, in.Path) {
+		return
+	}
+	in.OwnerUserID = sess.UserID
+	if in.EmployeeID != "" {
+		e, err := d.Employees.Get(r.Context(), in.EmployeeID)
+		if err != nil {
+			writeErr(w, 400, "员工不存在")
+			return
+		}
+		in.OwnerUserID = e.OwnerUserID
+	}
+	account, err := d.Auth.Users().FindByID(r.Context(), in.OwnerUserID)
+	if err != nil || account == nil {
+		writeErr(w, 400, "找不到工作区所有者")
+		return
+	}
+	in.UserDirectory = account.Username
 	ws, err := d.Workspaces.Create(r.Context(), in, sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -1062,12 +1088,16 @@ func (d Deps) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request, sess
 		return
 	}
 	var body struct {
+		RootPath      string `json:"root_path"`
 		WorkstationID string `json:"workstation_id"`
 		Path          string `json:"path"`
 		Repository    string `json:"repository"`
 		Branch        string `json:"branch"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "无效请求体")
+		return
+	}
 	node := body.WorkstationID
 	if node == "" {
 		node = ws.WorkstationID
@@ -1079,7 +1109,34 @@ func (d Deps) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request, sess
 	if !d.authorizeWorkspaceEmployee(w, r, sess, ws.EmployeeID, node) {
 		return
 	}
-	res, err := d.Workspaces.Update(r.Context(), r.PathValue("id"), body.WorkstationID, body.Path, body.Repository, body.Branch, sess.UserID, clientIP(r))
+	if ws.OwnerUserID != "" {
+		if body.RootPath == "" {
+			body.RootPath = ws.RootPath
+		}
+		if body.Path == "" {
+			body.Path = ws.Path
+		}
+		if !d.checkWorkspaceLocation(w, r, node, body.RootPath, body.Path) {
+			return
+		}
+		if node != ws.WorkstationID {
+			employees, err := d.Employees.List(r.Context())
+			if err != nil {
+				writeErr(w, 503, "无法核验已绑定员工")
+				return
+			}
+			for _, e := range employees {
+				if e.WorkspaceID == ws.ID && e.WorkstationID != "" && e.WorkstationID != node {
+					writeErr(w, 409, "请先解除其他工作站的员工绑定")
+					return
+				}
+			}
+		}
+	} else if body.RootPath != "" {
+		writeErr(w, 400, "请选择新建工作区以使用用户根目录")
+		return
+	}
+	res, err := d.Workspaces.Update(r.Context(), r.PathValue("id"), body.WorkstationID, body.RootPath, body.Path, body.Repository, body.Branch, sess.UserID, clientIP(r))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -1098,6 +1155,7 @@ func (d Deps) handleBindWorkspace(w http.ResponseWriter, r *http.Request, sess *
 		return
 	}
 	var body struct {
+		Detach     bool   `json:"detach"`
 		EmployeeID string `json:"employee_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1108,7 +1166,26 @@ func (d Deps) handleBindWorkspace(w http.ResponseWriter, r *http.Request, sess *
 		return
 	}
 	var res *workspace.Workspace
-	if strings.TrimSpace(body.EmployeeID) == "" {
+	if ws.OwnerUserID != "" {
+		if body.EmployeeID == "" {
+			writeErr(w, 400, "请指定员工")
+			return
+		}
+		e, eerr := d.Employees.Get(r.Context(), body.EmployeeID)
+		if eerr != nil || e.OwnerUserID != ws.OwnerUserID {
+			writeErr(w, 403, "只允许绑定工作区所有者的数字员工")
+			return
+		}
+		if body.Detach {
+			if e.WorkspaceID != ws.ID {
+				writeErr(w, 409, "员工当前未绑定该工作区")
+				return
+			}
+			res, err = d.Workspaces.DetachManaged(r.Context(), ws, e.ID, sess.UserID, clientIP(r))
+		} else {
+			res, err = d.Workspaces.BindEmployee(r.Context(), ws.ID, e.ID, sess.UserID, clientIP(r))
+		}
+	} else if strings.TrimSpace(body.EmployeeID) == "" {
 		res, err = d.Workspaces.UnbindEmployee(r.Context(), r.PathValue("id"), sess.UserID, clientIP(r))
 	} else {
 		res, err = d.Workspaces.BindEmployee(r.Context(), r.PathValue("id"), body.EmployeeID, sess.UserID, clientIP(r))
@@ -1261,7 +1338,7 @@ func (d Deps) handleCreateSession(w http.ResponseWriter, r *http.Request, sess *
 		if ref == "" {
 			ref = e.WorkspaceID
 		}
-		if !d.authorizeWorkspaceRef(w, r, sess, ref, e.WorkstationID, "session.write") {
+		if !d.authorizeWorkspaceRef(w, r, sess, ref, e.WorkstationID, "session.write", e.OwnerUserID) {
 			return
 		}
 	}
@@ -1386,7 +1463,7 @@ func (d Deps) handleCreateJob(w http.ResponseWriter, r *http.Request, sess *auth
 		if ref == "" {
 			ref = e.WorkspaceID
 		}
-		if !d.authorizeWorkspaceRef(w, r, sess, ref, node, "job.write") {
+		if !d.authorizeWorkspaceRef(w, r, sess, ref, node, "job.write", e.OwnerUserID) {
 			return
 		}
 	}

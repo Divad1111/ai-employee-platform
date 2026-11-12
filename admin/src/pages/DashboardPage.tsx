@@ -38,6 +38,7 @@ type MyQuota = {
   request_limit: number
   input_tokens?: number
   output_tokens?: number
+  unattributed_tokens?: number
   role_token_limit?: number
   exception_token_limit?: number
   extra_token_limit?: number
@@ -266,6 +267,9 @@ export function DashboardPage() {
                   <p className="muted" style={{ margin: '0 0 0.75rem', fontSize: '0.85rem' }}>
                     输入 {formatTokens(q.input_tokens || 0)} · 输出 {formatTokens(q.output_tokens || 0)} · 合计 {formatTokens(q.tokens_used)}
                   </p>
+                  {(q.unattributed_tokens || 0) > 0 && <p className="muted" style={{ margin: '0 0 0.75rem', fontSize: '0.85rem' }}>
+                    累计用量中有 {formatTokens(q.unattributed_tokens || 0)} Token 暂无对应的任务明细，输入、输出和分类统计仅包含保留的任务记录。
+                  </p>}
                   <p className="muted" style={{ margin: '0 0 0.75rem', fontSize: '0.85rem' }}>
                     角色配额 {q.role_token_limit && q.role_token_limit > 0 ? formatTokens(q.role_token_limit) : '不限或不适用'}
                     {' · '}

@@ -7,8 +7,3 @@ import "os"
 func isNonRoot() bool {
 	return os.Geteuid() != 0
 }
-
-func findFirstUserAie() string {
-	return ""
-}
-

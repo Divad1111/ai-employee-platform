@@ -61,6 +61,23 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml --profile publi
 
 通过实际 HTTPS 地址访问 `/setup`，输入 `AIE_SETUP_TOKEN` 创建管理员，再前往审批中心完成 TOTP 绑定。管理员随后可在工作站页生成默认 15 分钟、最长 60 分钟的一次性令牌，注册命令使用 HTTPS，不带已移除的 `--grpc-target` 参数。
 
+## Caddyfile 挂载失败
+
+如果 gateway 启动报 `not a directory` / `Are you trying to mount a directory onto a file`，先检查 **Compose 文件所在目录** 的 `Caddyfile`。相对挂载路径以 Compose 文件目录为基准，与运行命令时的当前目录无关。例如从 `D:\docker_image\images` 使用 `-f ..\ai-employee-platform\docker-compose.yml`，实际需要的是 `D:\docker_image\ai-employee-platform\Caddyfile`。
+
+旧版短格式挂载会在源文件不存在时自动创建同名目录，导致目录无法挂到容器内的文件。新版配置使用 `bind.create_host_path: false`，缺少文件时直接失败；已经生成的目录仍需处理。参见 [Docker Compose 挂载说明](https://docs.docker.com/reference/compose-file/services/#volumes)。
+
+先将同名目录改名保留，再把仓库中的 `deploy/Caddyfile` 复制到部署目录，文件名必须是 `Caddyfile`（没有 `.txt` 后缀）。保留现有 `.env`、数据目录和卷。PowerShell 可在部署目录确认并仅重建网关：
+
+```powershell
+Test-Path -LiteralPath .\Caddyfile -PathType Leaf # 应返回 True
+docker compose --profile public up -d --no-deps --force-recreate gateway
+docker compose --profile public ps -a gateway
+docker compose logs --tail=50 gateway
+```
+
+内网 IP 经 Docker 端口映射访问时，客户端可能不发送 SNI，容器看到的本地 IP 又与证书 IP 不同。模板通过 `default_sni {$AIE_DOMAIN}` 为这类连接选择部署地址的证书，参见 [Caddy 默认 SNI 配置](https://caddyserver.com/docs/caddyfile/options#default-sni)。客户端仍需信任 Caddy 的本地 CA，步骤见完整部署手册。
+
 ## 离线镜像导入
 
 Docker 可直接读取 gzip 镜像归档，无需先解压。服务器 Bash / SSH 终端中每个通配符只匹配一个文件时可直接执行：

@@ -420,6 +420,59 @@ func TestMentionNeverEstablishesAccountOwnership(t *testing.T) {
 	}
 }
 
+func TestDeniedTaskReplyIncludesSenderOpenID(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		chatType    string
+		senderID    string
+		boundOpenID string
+	}{
+		{name: "unbound private sender", chatType: "p2p", senderID: "ou_current"},
+		{name: "unbound group sender", chatType: "group", senderID: "ou_current"},
+		{name: "different bound user", chatType: "p2p", senderID: "ou_current", boundOpenID: "ou_other"},
+		{name: "missing sender identity", chatType: "p2p"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v, _ := secret.NewMemoryVault()
+			s := feishu.NewService(v)
+			if err := s.UpsertBinding(feishu.Binding{EmployeeID: "EMP-1", FeishuAlias: "dev", FeishuOpenID: tc.boundOpenID}); err != nil {
+				t.Fatal(err)
+			}
+			jobs := &fakeJobs{}
+			s.Jobs = jobs
+			sender := &feishu.MemorySender{}
+			s.Sender = sender
+			jobID, duplicate, err := s.HandleMessage(context.Background(), feishu.IncomingEvent{
+				EventID: "denied", ChatID: "oc_current", ChatType: tc.chatType,
+				SenderOpenID: tc.senderID, Text: "@dev fix the issue",
+			})
+			if err != nil || duplicate || jobID != "" || len(jobs.created) != 0 {
+				t.Fatalf("denied message created a task: job=%q duplicate=%v err=%v", jobID, duplicate, err)
+			}
+			if len(sender.Sent) != 1 || sender.Sent[0].ChatID != "oc_current" {
+				t.Fatalf("expected one reply to the originating chat, got %+v", sender.Sent)
+			}
+			reply := sender.Sent[0].Content
+			if !strings.Contains(reply, "无权使用该数字员工") {
+				t.Fatalf("missing binding guidance: %s", reply)
+			}
+			if tc.senderID != "" {
+				if !strings.Contains(reply, "open_id") || !strings.Contains(reply, tc.senderID) {
+					t.Fatalf("missing sender's OpenID: %s", reply)
+				}
+				if s.EmployeeHasOpenID("EMP-1", tc.senderID) {
+					t.Fatal("denied message established an identity binding")
+				}
+			} else if strings.Contains(reply, "open_id") {
+				t.Fatalf("missing identity should not show an empty OpenID: %s", reply)
+			}
+			if tc.boundOpenID != "" && strings.Contains(reply, tc.boundOpenID) {
+				t.Fatal("reply disclosed another user's bound OpenID")
+			}
+		})
+	}
+}
+
 func TestResolveTargetChatAndUserName(t *testing.T) {
 	v, _ := secret.NewMemoryVault()
 	s := feishu.NewService(v)

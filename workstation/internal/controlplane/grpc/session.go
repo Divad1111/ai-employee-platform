@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
@@ -32,9 +33,19 @@ type Session struct {
 	OnConnected func()
 	Stats       heartbeat.StatsFunc
 
-	mu     sync.Mutex
-	stream aiev1.WorkerService_ConnectClient
-	sendMu sync.Mutex
+	mu               sync.Mutex
+	stream           aiev1.WorkerService_ConnectClient
+	sendMu           sync.Mutex
+	lastHeartbeatAck atomic.Int64
+}
+
+// LastHeartbeatAck reports when the current stream last received an acknowledgement.
+func (s *Session) LastHeartbeatAck() time.Time {
+	stamp := s.lastHeartbeatAck.Load()
+	if stamp == 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(stamp)
 }
 
 // NewSession 组装会话（调用方注入 Journal）。
@@ -106,6 +117,7 @@ func (s *Session) Run(ctx context.Context) error {
 }
 
 func (s *Session) runOnce(ctx context.Context) error {
+	s.lastHeartbeatAck.Store(0)
 	// The command sequence is kept by the control plane in memory. After a
 	// control-plane restart it starts from zero, while this long-lived worker
 	// still has the previous sequence in its Journal/Validator. Probe the
@@ -165,6 +177,9 @@ func (s *Session) runOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if msg.GetHeartbeatAck() != nil {
+			s.lastHeartbeatAck.Store(time.Now().UnixMilli())
+		}
 		if cmd := msg.GetCommand(); cmd != nil {
 			ackMsg, should, err := s.Handler.Process(cmd)
 			if err != nil {
@@ -191,7 +206,6 @@ func (s *Session) runOnce(ctx context.Context) error {
 				}(cmd)
 			}
 		}
-		// HeartbeatAck / EventAck 可忽略或记日志
 	}
 }
 

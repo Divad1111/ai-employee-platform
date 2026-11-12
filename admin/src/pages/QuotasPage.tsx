@@ -9,6 +9,8 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SearchableSelect, type SearchOption } from '../components/SearchableSelect'
 import { RESOURCE_TYPE_LABEL, RESOURCE_TYPE_OPTIONS, roleDisplayName } from '../lib/rbacLabels'
 import { usePerm } from '../stores/permissions'
+import { IconRefresh } from '../components/Icons'
+import './QuotasPage.css'
 
 type Policy = {
   id: string
@@ -26,6 +28,23 @@ type WSRow = { id: string; name?: string; hostname?: string }
 type EmpRow = { id: string; name: string }
 type RoleItem = { name: string; description: string }
 
+type MyQuota = {
+  period_key?: string
+  token_limit: number
+  tokens_used: number
+  requests_used: number
+  remaining: number
+  unlimited: boolean
+  source_role: string
+  role_token_limit: number
+  has_exception: boolean
+  exception_token_limit: number
+  extra_token_limit: number
+}
+
+const formatTokens = (value: number) => value.toLocaleString('zh-CN')
+const formatLimit = (value: number) => value > 0 ? formatTokens(value) : '不限'
+
 const PRESET_HINTS: Record<string, string> = {
   VIEWER: '只读角色默认月度 Token',
   USER: '普通用户角色默认月度 Token',
@@ -35,8 +54,12 @@ const PRESET_HINTS: Record<string, string> = {
 
 
 export function QuotasPage() {
-  const { canAll } = usePerm()
+  const { user, ready, can, canAll } = usePerm()
+  const canReadAll = canAll('quota.read')
+  const canReadPolicies = can('quota.read')
   const canUpdate = canAll('quota.update')
+  const [myQuota, setMyQuota] = useState<MyQuota | null>(null)
+  const [loading, setLoading] = useState(false)
   const [items, setItems] = useState<Policy[]>([])
   const [err, setErr] = useState('')
   const [msg, setMsg] = useState('')
@@ -110,6 +133,7 @@ export function QuotasPage() {
       return roleDisplayName(p.resource_id, r?.description)
     }
     if (p.resource_type === 'USER' || p.resource_type === 'USER_BONUS') {
+      if (p.resource_id === user?.id) return user.username
       const u = users.find((x) => x.id === p.resource_id)
       return u ? `${u.display_name || u.username}` : p.resource_id
     }
@@ -123,14 +147,17 @@ export function QuotasPage() {
 
   const load = async () => {
     setErr('')
+    setLoading(true)
     try {
-      const [q, u, w, e, r] = await Promise.all([
-        apiGet<{ items: Policy[] }>('/quotas'),
-        apiGet<{ items: UserRow[] }>('/users').catch(() => ({ items: [] as UserRow[] })),
-        apiGet<{ items: WSRow[] }>('/workstations').catch(() => ({ items: [] as WSRow[] })),
-        apiGet<{ items: EmpRow[] }>('/employees').catch(() => ({ items: [] as EmpRow[] })),
-        apiGet<{ items: RoleItem[] }>('/roles').catch(() => ({ items: [] as RoleItem[] })),
+      const [mine, q, u, w, e, r] = await Promise.all([
+        apiGet<MyQuota>('/quotas/me'),
+        canReadPolicies ? apiGet<{ items: Policy[] }>('/quotas') : Promise.resolve({ items: [] as Policy[] }),
+        canReadAll && can('user.read') ? apiGet<{ items: UserRow[] }>('/users').catch(() => ({ items: [] as UserRow[] })) : Promise.resolve({ items: [] as UserRow[] }),
+        can('workstation.read') ? apiGet<{ items: WSRow[] }>('/workstations').catch(() => ({ items: [] as WSRow[] })) : Promise.resolve({ items: [] as WSRow[] }),
+        can('employee.read') ? apiGet<{ items: EmpRow[] }>('/employees').catch(() => ({ items: [] as EmpRow[] })) : Promise.resolve({ items: [] as EmpRow[] }),
+        canReadAll && can('role.read') ? apiGet<{ items: RoleItem[] }>('/roles').catch(() => ({ items: [] as RoleItem[] })) : Promise.resolve({ items: [] as RoleItem[] }),
       ])
+      setMyQuota(mine)
       setItems(q.items || [])
       setUsers(u.items || [])
       setWorkstations(w.items || [])
@@ -138,12 +165,14 @@ export function QuotasPage() {
       setRoles(r.items || [])
     } catch (ex: unknown) {
       setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setLoading(false)
     }
   }
 
   useEffect(() => {
-    void load()
-  }, [])
+    if (ready) void load()
+  }, [ready, canReadAll, canReadPolicies])
 
   const onSave = async (e: FormEvent) => {
     e.preventDefault()
@@ -218,17 +247,42 @@ export function QuotasPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <h1>Token / 配额</h1>
-        <p>
+        <div>
+          <h1>Token / 配额</h1>
+          {canReadAll ? <p>
           角色预设是默认月度上限（多角色取最高）。「用户例外」会单独指定该用户的基数并替换角色额度；「用户额外」再加在基数之上。
           有效限额 =（例外或角色）+ 额外。用量仍按人累计。
-        </p>
+          </p> : <p>查看当前账号的月度 Token 用量、有效限额及配额来源。</p>}
+        </div>
+        <button type="button" className="btn-ghost btn-sm" disabled={!ready || loading} onClick={() => void load()}>
+          <IconRefresh size={15} />{loading ? '刷新中…' : '刷新'}
+        </button>
       </div>
 
       {err ? <div className="error" style={{ marginBottom: '0.8rem' }}>{err}</div> : null}
       {msg ? <p className="muted">{msg}</p> : null}
 
-      <div className="panel" style={{ marginBottom: '1rem' }}>
+      {myQuota ? <section className="panel quota-summary" aria-labelledby="my-quota-title">
+        <div className="panel-header">
+          <div>
+            <h2 id="my-quota-title">我的配额</h2>
+            <p>{user?.username} · {(user?.roles || []).map(role => roleDisplayName(role)).join('、')} · {myQuota.period_key || '本月'}</p>
+          </div>
+        </div>
+        <div className="quota-summary-grid">
+          <div className="quota-summary-item"><span>有效 Token 限额 / 月</span><strong>{myQuota.unlimited ? '不限' : formatTokens(myQuota.token_limit)}</strong></div>
+          <div className="quota-summary-item"><span>本月已用 Token</span><strong>{formatTokens(myQuota.tokens_used)}</strong></div>
+          <div className="quota-summary-item"><span>剩余 Token</span><strong>{myQuota.unlimited ? '不限' : formatTokens(myQuota.remaining)}</strong></div>
+          <div className="quota-summary-item"><span>本月请求次数</span><strong>{formatTokens(myQuota.requests_used)}</strong></div>
+        </div>
+        <dl className="quota-source-grid">
+          <div><dt>角色默认额度{myQuota.source_role ? ` · ${roleDisplayName(myQuota.source_role)}` : ''}</dt><dd>{myQuota.source_role ? formatLimit(myQuota.role_token_limit) : '未配置'}</dd></div>
+          <div><dt>个人例外额度</dt><dd>{myQuota.has_exception ? `${formatLimit(myQuota.exception_token_limit)}（替换角色额度）` : '未设置，使用角色默认额度'}</dd></div>
+          <div><dt>个人额外额度</dt><dd>{formatTokens(myQuota.extra_token_limit)}</dd></div>
+        </dl>
+      </section> : !err ? <p className="muted">正在加载当前账号配额…</p> : null}
+
+      {canReadAll && <div className="panel" style={{ marginBottom: '1rem' }}>
         <div className="panel-header">
           <div>
             <h2>角色预设配额</h2>
@@ -246,14 +300,7 @@ export function QuotasPage() {
               </tr>
             </thead>
             <tbody>
-              {(rolePresets.length
-                ? rolePresets
-                : [
-                    { id: 'p-v', resource_type: 'ROLE', resource_id: 'VIEWER', period_type: 'MONTHLY', token_limit: 1000000, request_limit: 0, concurrency_limit: 0, enabled: true },
-                    { id: 'p-o', resource_type: 'ROLE', resource_id: 'OPERATOR', period_type: 'MONTHLY', token_limit: 5000000, request_limit: 0, concurrency_limit: 0, enabled: true },
-                    { id: 'p-a', resource_type: 'ROLE', resource_id: 'ADMIN', period_type: 'MONTHLY', token_limit: 50000000, request_limit: 0, concurrency_limit: 0, enabled: true },
-                  ]
-              ).map((p) => (
+              {rolePresets.map((p) => (
                 <RolePresetRow
                   key={p.id || p.resource_id}
                   policy={p}
@@ -263,10 +310,11 @@ export function QuotasPage() {
                   onSave={(limit) => void saveRolePreset(p.resource_id, limit)}
                 />
               ))}
+              {!rolePresets.length && <tr><td colSpan={canUpdate ? 4 : 3} className="empty-tip">暂无角色预设配额</td></tr>}
             </tbody>
           </table>
         </div>
-      </div>
+      </div>}
 
       {canUpdate ? (
       <div className="panel" style={{ marginBottom: '1rem' }}>
@@ -320,7 +368,7 @@ export function QuotasPage() {
       <div className="panel">
         <div className="panel-header">
           <div>
-            <h2>例外、额外与其它策略</h2>
+            <h2>{canReadAll ? '例外、额外与其它策略' : '我的其他配额策略'}</h2>
             <p>共 {otherPolicies.length} 条（不含角色预设）</p>
           </div>
         </div>
@@ -357,7 +405,7 @@ export function QuotasPage() {
                 </tr>
               ))}
               {!otherPolicies.length ? (
-                <tr><td colSpan={canUpdate ? 6 : 5} className="empty-tip">暂无个人例外、额外或工作站策略（多数场景只需改角色预设）</td></tr>
+                <tr><td colSpan={canUpdate ? 6 : 5} className="empty-tip">{canReadAll ? '暂无个人例外、额外或工作站策略（多数场景只需改角色预设）' : '暂无个人例外、额外或工作站策略，当前账号按上方有效配额执行'}</td></tr>
               ) : null}
             </tbody>
           </table>

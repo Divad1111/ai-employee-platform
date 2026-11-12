@@ -404,15 +404,17 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			return nil
 		}
 		var payload struct {
-			Prompt              string       `json:"prompt"`
-			WorkspaceID         string       `json:"workspace_id"`
-			WorkspacePath       string       `json:"workspace_path"`
-			Model               string       `json:"model"`
-			Provider            string       `json:"provider"`
-			SessionGeneration   int64        `json:"session_generation"`
-			ConversationContext string       `json:"conversation_context"`
-			ResetSessionContext bool         `json:"reset_session_context"`
-			InputAttachments    []input.File `json:"input_attachments"`
+			Prompt                 string       `json:"prompt"`
+			WorkspaceID            string       `json:"workspace_id"`
+			WorkspacePath          string       `json:"workspace_path"`
+			WorkspaceRoot          string       `json:"workspace_root"`
+			WorkspaceUserDirectory string       `json:"workspace_user_directory"`
+			Model                  string       `json:"model"`
+			Provider               string       `json:"provider"`
+			SessionGeneration      int64        `json:"session_generation"`
+			ConversationContext    string       `json:"conversation_context"`
+			ResetSessionContext    bool         `json:"reset_session_context"`
+			InputAttachments       []input.File `json:"input_attachments"`
 		}
 		if pJSON := cmd.GetPayloadJson(); pJSON != "" {
 			_ = json.Unmarshal([]byte(pJSON), &payload)
@@ -441,14 +443,24 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 			provider = startJob.GetProvider()
 		}
 		if _, err := d.Runtime.EnsureEmployee(empID, empID, provider); err != nil {
+			_ = sess.EnqueueEvent(d.newEvent(jobID, "", empID, aiev1.EventType_EVENT_TYPE_JOB_FAILED,
+				fmt.Sprintf(`{"error":%q}`, err.Error())))
 			return err
 		}
 
 		// 确保工作区视图（使用 Control Plane 下发的本机路径，禁止静默落到默认目录）
 		wsID := payload.WorkspaceID
 		if wsID != "" {
-			workspace, err := d.Runtime.EnsureWorkspace(wsID, empID, payload.WorkspacePath)
+			var workspace *runtime.Workspace
+			var err error
+			if payload.WorkspaceRoot != "" || payload.WorkspaceUserDirectory != "" {
+				workspace, err = d.Runtime.EnsureUserWorkspace(wsID, empID, payload.WorkspaceRoot, payload.WorkspaceUserDirectory, payload.WorkspacePath)
+			} else {
+				workspace, err = d.Runtime.EnsureWorkspace(wsID, empID, payload.WorkspacePath)
+			}
 			if err != nil {
+				_ = sess.EnqueueEvent(d.newEvent(jobID, "", empID, aiev1.EventType_EVENT_TYPE_JOB_FAILED,
+					fmt.Sprintf(`{"error":%q,"workspace_id":%q}`, err.Error(), wsID)))
 				return err
 			}
 			payload.WorkspacePath = workspace.Path
@@ -496,7 +508,7 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 				fmt.Sprintf(`{"error":%q,"session_id":%q}`, err.Error(), activeSess.ID)))
 			return err
 		}
-		if activeSess != nil && activeSess.ID == targetSessionID && activeSess.Provider == provider && activeSess.Model == payload.Model && activeSess.MCPFingerprint == mcpFingerprint && d.Runtime.SessionReady(activeSess.ID) {
+		if activeSess != nil && activeSess.ID == targetSessionID && activeSess.WorkspaceID == wsID && activeSess.WorkspacePath == payload.WorkspacePath && activeSess.Provider == provider && activeSess.Model == payload.Model && activeSess.MCPFingerprint == mcpFingerprint && d.Runtime.SessionReady(activeSess.ID) {
 			sessID = activeSess.ID
 		} else {
 			restoreContext = true
@@ -735,18 +747,25 @@ func (d *Daemon) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 		return okResult(map[string]any{"pong": true, "ready": d.Ready})
 	case "status":
 		e, w, s, j := d.Runtime.Snapshot()
+		lastHeartbeatAck := ""
+		if session := d.getActiveSession(); session != nil {
+			if stamp := session.LastHeartbeatAck(); !stamp.IsZero() {
+				lastHeartbeatAck = stamp.Format(time.RFC3339Nano)
+			}
+		}
 		return okResult(map[string]any{
-			"ready":        d.Ready,
-			"version":      config.Version,
-			"employees":    e,
-			"workspaces":   w,
-			"sessions":     s,
-			"jobs":         j,
-			"reconnect":    d.Backoff.State(),
-			"cpu_percent":  d.Sample.CPUPercent,
-			"mem_percent":  d.Sample.MemoryPercent,
-			"disk_percent": d.Sample.DiskPercent,
-			"providers":    d.Registry.List(),
+			"last_heartbeat_ack": lastHeartbeatAck,
+			"ready":              d.Ready,
+			"version":            config.Version,
+			"employees":          e,
+			"workspaces":         w,
+			"sessions":           s,
+			"jobs":               j,
+			"reconnect":          d.Backoff.State(),
+			"cpu_percent":        d.Sample.CPUPercent,
+			"mem_percent":        d.Sample.MemoryPercent,
+			"disk_percent":       d.Sample.DiskPercent,
+			"providers":          d.Registry.List(),
 		})
 	case "doctor":
 		return d.doctor()

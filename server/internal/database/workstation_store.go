@@ -212,3 +212,28 @@ func (s *PostgresCertStore) ListRecords(ctx context.Context) ([]*certca.Record, 
 	}
 	return list, nil
 }
+
+func (s *PostgresWorkstationStore) WorkspaceRoots(ctx context.Context, id string) ([]string, error) {
+	var data []byte
+	if err := s.db.SQL.QueryRowContext(ctx, "SELECT workspace_roots FROM workstations WHERE id=$1", id).Scan(&data); err != nil {
+		return nil, err
+	}
+	var roots []string
+	err := json.Unmarshal(data, &roots)
+	return roots, err
+}
+func (s *PostgresWorkstationStore) SetWorkspaceRoots(ctx context.Context, id string, roots []string) error {
+	data, err := json.Marshal(roots)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.SQL.ExecContext(ctx, "UPDATE workstations SET workspace_roots=$2,updated_at=NOW() WHERE id=$1", id, data)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("工作站不存在")
+	}
+	return err
+}

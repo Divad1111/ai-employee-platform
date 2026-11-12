@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ai-employee-platform/gen/workspacedir"
+	"slices"
 	"sync"
 	"time"
 
@@ -142,6 +144,9 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job
 	if emp.Status == employee.StatusDisabled {
 		return nil, ErrNotAssignable
 	}
+	if j.WorkspaceID == "" {
+		j.WorkspaceID = emp.WorkspaceID
+	}
 	wsID := emp.WorkstationID
 	if j.WorkspaceID != "" && s.Workspaces != nil {
 		if wsp, err := s.Workspaces.Get(ctx, j.WorkspaceID); err == nil && wsp != nil {
@@ -170,19 +175,24 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job
 	if emp.WorkspaceID == "" && j.WorkspaceID == "" {
 		return nil, errors.New("Workspace Missing")
 	}
-	if j.WorkspaceID == "" {
-		j.WorkspaceID = emp.WorkspaceID
-	}
-	workspacePath := ""
-	if s.Workspaces != nil && j.WorkspaceID != "" {
-		if wsp, err := s.Workspaces.Get(ctx, j.WorkspaceID); err == nil && wsp != nil {
-			workspacePath = wsp.Path
-		}
-	}
-	if s.Workspaces != nil && j.WorkspaceID != "" {
-		wsp, err := s.Workspaces.Get(ctx, j.WorkspaceID)
+
+	workspaceID := j.WorkspaceID
+	var workspacePath, rootPath, userDir string
+	if s.Workspaces != nil && workspaceID != "" {
+		wsp, err := s.Workspaces.Get(ctx, workspaceID)
 		if err != nil || wsp.WorkstationID != wsID || (wsp.EmployeeID != "" && wsp.EmployeeID != emp.ID) {
 			return nil, errors.New("工作区、员工与工作站不一致")
+		}
+		workspacePath = wsp.Path
+		if wsp.OwnerUserID != "" {
+			if wsp.OwnerUserID != emp.OwnerUserID || !workspacedir.ValidName(wsp.Path) || !workspacedir.ValidName(wsp.UserDirectory) {
+				return nil, errors.New("工作区用户或目录不匹配")
+			}
+			roots, err := s.Workstations.Meta.WorkspaceRoots(ctx, wsID)
+			if err != nil || !slices.Contains(roots, wsp.RootPath) {
+				return nil, errors.New("工作站已移除该工作区的根目录，请重新绑定")
+			}
+			rootPath, userDir = wsp.RootPath, wsp.UserDirectory
 		}
 	}
 	if s.AuthorizeAssignment != nil {
@@ -215,7 +225,7 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job
 	if s.Pusher != nil {
 		payload := map[string]any{
 			"prompt":                j.Prompt,
-			"workspace_id":          j.WorkspaceID,
+			"workspace_id":          workspaceID,
 			"provider":              emp.DefaultProvider,
 			"session_generation":    emp.SessionGeneration,
 			"reset_session_context": emp.SessionContextResetGeneration == emp.SessionGeneration,
@@ -235,6 +245,10 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job
 		}
 		if workspacePath != "" {
 			payload["workspace_path"] = workspacePath
+		}
+		if rootPath != "" {
+			payload["workspace_root"] = rootPath
+			payload["workspace_user_directory"] = userDir
 		}
 		payloadJSON, _ := json.Marshal(payload)
 

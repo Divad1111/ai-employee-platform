@@ -29,7 +29,10 @@ import { SearchableSelect } from '../components/SearchableSelect'
 
 /** Provider 中文名在选项里按工作站上报动态生成。 */
 
+type WorkspaceOption = { id: string; name?: string; path?: string; root_path?: string; user_directory?: string; workstation_id: string; owner_user_id?: string }
+
 type WsNode = {
+  workspace_roots?: string[]
   id: string
   name: string
   status: string
@@ -38,6 +41,7 @@ type WsNode = {
 }
 
 type Emp = {
+  owner_user_id: string
   id: string
   name: string
   status: string
@@ -85,7 +89,7 @@ export function EmployeeDetailPage() {
   const navigate = useNavigate()
   const [ov, setOv] = useState<Overview | null>(null)
   const [workstations, setWorkstations] = useState<WsNode[]>([])
-  const [workspaces, setWorkspaces] = useState<Array<{ id: string; name?: string; path?: string }>>([])
+  const [workspaces, setWorkspaces] = useState<WorkspaceOption[]>([])
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
   // 可编辑绑定字段
@@ -127,6 +131,7 @@ export function EmployeeDetailPage() {
 
   // 快速新建工作区
   const [showCreateWs, setShowCreateWs] = useState(false)
+  const [newRoot,setNewRoot] = useState('')
   const [newWsPath, setNewWsPath] = useState('')
   const [newWsRepo, setNewWsRepo] = useState('')
   const [newWsBranch, setNewWsBranch] = useState('main')
@@ -228,12 +233,12 @@ export function EmployeeDetailPage() {
 
   const workspaceOptions = useMemo(
     () =>
-      workspaces.map((ws) => ({
+      workspaces.filter(ws => ws.workstation_id === wsId && (!ws.owner_user_id || ws.owner_user_id === ov?.employee.owner_user_id)).map((ws) => ({
         value: ws.id,
-        label: ws.path || ws.name || ws.id,
+        label: ws.root_path ? [ws.root_path,ws.user_directory,ws.path].join(ws.root_path.includes(':') ? '\\' : '/').replace(/([/\\])[/\\]+/g, '$1') : ws.path || ws.name || ws.id,
         keywords: `${ws.id} ${ws.path || ''} ${ws.name || ''}`,
       })),
-    [workspaces],
+    [workspaces, wsId, ov?.employee.owner_user_id],
   )
   const workflowOptions = useMemo(
     () =>
@@ -271,7 +276,8 @@ export function EmployeeDetailPage() {
     try {
       const res = await apiPost<{ id: string }>('/workspaces', {
         workstation_id: wsId.trim(),
-        path: newWsPath.trim(),
+        root_path: newRoot,
+        path: newWsPath,
         repository: newWsRepo.trim(),
         branch: newWsBranch.trim() || 'main',
         employee_id: id,
@@ -280,9 +286,9 @@ export function EmployeeDetailPage() {
       setNewWsPath('')
       setNewWsRepo('')
       setShowCreateWs(false)
-      setMsg(`工作区创建成功 (${res.id}) 并已选中，请点击「保存配置」完成绑定`)
+      setMsg(`工作区已创建并绑定到此员工 (${res.id})`)
       // 重新加载工作区列表
-      const wspData = await apiGet<{ items: Array<{ id: string; name?: string; path?: string }> }>('/workspaces').catch(() => ({ items: [] }))
+      const wspData = await apiGet<{ items: WorkspaceOption[] }>('/workspaces').catch(() => ({ items: [] }))
       setWorkspaces(wspData.items ?? [])
     } catch (err) {
       setError(err instanceof Error ? err.message : '创建工作区失败')
@@ -296,7 +302,7 @@ export function EmployeeDetailPage() {
     const [data, wsData, wspData, wfAll, bindings, servers, creds] = await Promise.all([
       apiGet<Overview>(`/employees/${id}/overview`),
       apiGet<{ items: WsNode[] }>('/workstations').catch(() => ({ items: [] })),
-      apiGet<{ items: Array<{ id: string; name?: string; path?: string }> }>('/workspaces').catch(() => ({ items: [] })),
+      apiGet<{ items: WorkspaceOption[] }>('/workspaces').catch(() => ({ items: [] })),
       listWorkflows().catch(() => ({ items: [] as Workflow[] })),
       listEmployeeMCPBindings(id).catch(() => ({ items: [] as EmployeeMCPBinding[] })),
       listMCPServers().catch(() => ({ items: [] as MCPServer[] })),
@@ -517,6 +523,8 @@ export function EmployeeDetailPage() {
               value={wsId}
               onChange={(id) => {
                 setWsId(id)
+                setNewRoot('')
+                setWorkspaceId('')
                 const ws = workstations.find((w) => w.id === id)
                 const installed = ws?.providers ?? []
                 const nextProvider = provider && installed.includes(provider) ? provider : ''
@@ -609,7 +617,7 @@ export function EmployeeDetailPage() {
             />
             {workspaceId && !workspaceOptions.some((o) => o.value === workspaceId) ? (
               <span style={{ fontWeight: 500, color: 'var(--warning, #b45309)' }}>
-                当前值「{workspaceId}」还不是已登记工作区。已选择工作站时，再次保存会按该本机路径登记，并出现在「项目工作区」。
+                当前值「{workspaceId}」还不是已登记工作区。请在当前工作站选择已登记的工作区。
               </span>
             ) : null}
           </label>
@@ -620,11 +628,15 @@ export function EmployeeDetailPage() {
           <div style={{ marginTop: '1rem', padding: '1rem', background: '#f8fafc', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-md)' }}>
             <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: 'var(--brand-700)' }}>快速新建项目工作区</h4>
             <p style={{ margin: '0 0 0.75rem', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-              路径必须位于该员工专属目录内；将登记到所选工作站{wsId ? `（${wsId}）` : '；请先选择工作站'}
+              用户目录按员工所有者的登录名自动创建。所选工作站{wsId ? `（${wsId}）` : '；请先选择工作站'}
             </p>
             <form onSubmit={onCreateWsQuick} style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <select aria-label="工作站根目录" value={newRoot} required onChange={event=>setNewRoot(event.target.value)}>
+                <option value="">请选择工作站根目录</option>
+                {(workstations.find(node=>node.id===wsId)?.workspace_roots || []).map(root=><option key={root}>{root}</option>)}
+              </select>
               <input
-                placeholder="该工作站本机代码工程绝对路径 (必填)"
+                placeholder="工作区目录名，例如 test"
                 value={newWsPath}
                 onChange={(e) => setNewWsPath(e.target.value)}
                 style={{ flex: 2, minWidth: '260px' }}
@@ -1040,7 +1052,7 @@ export function EmployeeDetailPage() {
             </div>
 
             <p style={{ fontSize: '0.86rem', color: 'var(--text-secondary)', lineHeight: 1.6, margin: '0 0 1rem' }}>
-              删除数字员工将永久移除该员工的档案记录与技能/知识库绑定，已关联的项目工作区将被自动解绑。<strong>若该员工当前有正在执行中的任务，系统将拒绝删除以保护任务连续性。</strong>
+              删除数字员工将永久移除该员工的档案、技能/知识库绑定、历史任务和对话记录，并解除该员工的工作区绑定。<strong>若该员工当前有正在执行中的任务，系统将拒绝删除以保护任务连续性。</strong>
             </p>
 
             <div

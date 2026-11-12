@@ -1,11 +1,13 @@
 // Package workspace 管理工作区绑定。
-// V1 Workspace Lock：每 Employee 独占一个 Workspace（决策 Q-01）。
+// 用户工作区可绑定多个同一所有者的员工。旧绝对路径工作区保留独占绑定。
 // 设计依据：设计文档 §50、§120。
 package workspace
 
 import (
 	"context"
 	"errors"
+	"github.com/ai-employee-platform/gen/workspacedir"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +24,9 @@ var (
 
 // Workspace 工作区。
 type Workspace struct {
+	RootPath      string    `json:"root_path,omitempty"`
+	OwnerUserID   string    `json:"owner_user_id,omitempty"`
+	UserDirectory string    `json:"user_directory,omitempty"`
 	ID            string    `json:"id"`
 	WorkstationID string    `json:"workstation_id"`
 	EmployeeID    string    `json:"employee_id"`
@@ -34,6 +39,9 @@ type Workspace struct {
 
 // CreateInput 创建。
 type CreateInput struct {
+	RootPath      string `json:"root_path"`
+	OwnerUserID   string `json:"-"`
+	UserDirectory string `json:"-"`
 	WorkstationID string `json:"workstation_id"`
 	Path          string `json:"path"`
 	Repository    string `json:"repository"`
@@ -54,6 +62,7 @@ type Auditor interface {
 
 // Store 持久化。
 type Store interface {
+	UserDirectory(context.Context, string, string) (string, error)
 	Save(ctx context.Context, w *Workspace) error
 	Get(ctx context.Context, id string) (*Workspace, error)
 	List(ctx context.Context) ([]*Workspace, error)
@@ -80,9 +89,25 @@ func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string
 	if in.Path == "" || in.WorkstationID == "" {
 		return nil, ErrInvalidInput
 	}
+	if in.RootPath != "" {
+		if !workspacedir.ValidName(in.Path) || in.OwnerUserID == "" {
+			return nil, ErrInvalidInput
+		}
+		var err error
+		in.UserDirectory, err = s.store.UserDirectory(ctx, in.OwnerUserID, in.UserDirectory)
+		if err != nil {
+			return nil, err
+		}
+		if !workspacedir.ValidName(in.UserDirectory) {
+			return nil, ErrInvalidInput
+		}
+	}
 	now := time.Now().UTC()
 	w := &Workspace{
 		ID:            idgen.New("WS"),
+		RootPath:      in.RootPath,
+		OwnerUserID:   in.OwnerUserID,
+		UserDirectory: in.UserDirectory,
 		WorkstationID: in.WorkstationID,
 		EmployeeID:    in.EmployeeID,
 		Path:          in.Path,
@@ -91,18 +116,38 @@ func (s *Service) Create(ctx context.Context, in CreateInput, actorID, ip string
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
-	if err := s.store.Save(ctx, w); err != nil {
+	if in.RootPath != "" {
+		w.EmployeeID = ""
+		if db, ok := s.store.(managedBindings); ok {
+			if err := db.CreateManaged(ctx, w, in.EmployeeID); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := s.store.Save(ctx, w); err != nil {
+				return nil, err
+			}
+			if in.EmployeeID != "" {
+				if _, err := s.BindEmployee(ctx, w.ID, in.EmployeeID, actorID, ip); err != nil {
+					_ = s.store.Delete(ctx, w.ID)
+					return nil, err
+				}
+			}
+		}
+	} else if err := s.store.Save(ctx, w); err != nil {
 		return nil, err
 	}
 	s.audit.Log(ctx, "USER", actorID, "workspace.create", "success", ip, map[string]string{"id": w.ID})
 	return w, nil
 }
 
-// BindEmployee 绑定 Employee。一位员工只挂一个工作区；改绑时先解除原员工，并把目标员工从其他工作区移过来。
+// BindEmployee 为员工选择工作区。用户工作区保留其他员工的绑定。
 func (s *Service) BindEmployee(ctx context.Context, workspaceID, employeeID, actorID, ip string) (*Workspace, error) {
 	w, err := s.store.Get(ctx, workspaceID)
 	if err != nil || w == nil {
 		return nil, ErrNotFound
+	}
+	if w.OwnerUserID != "" {
+		return s.changeManagedBinding(ctx, w, employeeID, false, actorID, ip)
 	}
 	if employeeID == "" {
 		return s.UnbindEmployee(ctx, workspaceID, actorID, ip)
@@ -221,16 +266,20 @@ func (s *Service) List(ctx context.Context) ([]*Workspace, error) {
 	return s.store.List(ctx)
 }
 
-func (s *Service) Update(ctx context.Context, id, workstationID, path, repo, branch, actorID, ip string) (*Workspace, error) {
+func (s *Service) Update(ctx context.Context, id, workstationID, root, path, repo, branch, actorID, ip string) (*Workspace, error) {
 	w, err := s.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	changes := []string{
+		audit.FormatChange("根目录", w.RootPath, pick(root, w.RootPath)),
 		audit.FormatChange("工作站", w.WorkstationID, pick(workstationID, w.WorkstationID)),
 		audit.FormatChange("路径", w.Path, pick(path, w.Path)),
 		audit.FormatChange("仓库", w.Repository, repo),
 		audit.FormatChange("分支", w.Branch, branch),
+	}
+	if root != "" && w.OwnerUserID != "" {
+		w.RootPath = root
 	}
 	if workstationID != "" {
 		w.WorkstationID = workstationID
@@ -259,11 +308,27 @@ func pick(next, cur string) string {
 }
 
 func (s *Service) Delete(ctx context.Context, id, actorID, ip string) error {
-	if _, err := s.Get(ctx, id); err != nil {
+	w, err := s.Get(ctx, id)
+	if err != nil {
 		return err
 	}
-	if _, err := s.UnbindEmployee(ctx, id, actorID, ip); err != nil && !errors.Is(err, ErrNotFound) {
-		return err
+	if w.OwnerUserID == "" {
+		if _, err := s.UnbindEmployee(ctx, id, actorID, ip); err != nil {
+			return err
+		}
+	} else if _, databaseHandlesBindings := s.store.(managedBindings); !databaseHandlesBindings && s.binder != nil {
+		for {
+			empID, err := s.binder.FindByWorkspace(ctx, id)
+			if err != nil {
+				return err
+			}
+			if empID == "" {
+				break
+			}
+			if err := s.binder.BindWorkspace(ctx, empID, ""); err != nil {
+				return err
+			}
+		}
 	}
 	if err := s.store.Delete(ctx, id); err != nil {
 		return err
@@ -275,16 +340,24 @@ func (s *Service) Delete(ctx context.Context, id, actorID, ip string) error {
 // MemoryStore 内存。
 type MemoryStore struct {
 	mu   sync.RWMutex
+	dirs map[string]string
 	byID map[string]*Workspace
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{byID: map[string]*Workspace{}}
+	return &MemoryStore{dirs: map[string]string{}, byID: map[string]*Workspace{}}
 }
 
 func (m *MemoryStore) Save(_ context.Context, w *Workspace) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if w.OwnerUserID != "" {
+		for _, other := range m.byID {
+			if w.ID != other.ID && w.WorkstationID == other.WorkstationID && w.RootPath == other.RootPath && w.OwnerUserID == other.OwnerUserID && strings.EqualFold(w.Path, other.Path) {
+				return errors.New("该项目目录已登记，请选择已有工作区")
+			}
+		}
+	}
 	cp := *w
 	m.byID[w.ID] = &cp
 	return nil
@@ -330,4 +403,57 @@ func (b EmployeeBridge) FindByWorkspace(ctx context.Context, workspaceID string)
 }
 func (b EmployeeBridge) BindWorkspace(ctx context.Context, employeeID, workspaceID string) error {
 	return b.SetWorkspace(ctx, employeeID, workspaceID)
+}
+
+func (m *MemoryStore) UserDirectory(_ context.Context, id, name string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if v := m.dirs[id]; v != "" {
+		return v, nil
+	}
+	if !workspacedir.ValidName(name) {
+		return "", errors.New("账号名不能用作用户目录")
+	}
+	for _, v := range m.dirs {
+		if strings.EqualFold(v, name) {
+			return "", errors.New("用户目录名已被占用")
+		}
+	}
+	m.dirs[id] = name
+	return name, nil
+}
+
+type managedBindings interface {
+	CreateManaged(context.Context, *Workspace, string) error
+	ChangeManagedBinding(context.Context, *Workspace, string, bool) error
+}
+
+func (s *Service) changeManagedBinding(ctx context.Context, w *Workspace, empID string, detach bool, actorID, ip string) (*Workspace, error) {
+	if empID == "" {
+		return nil, errors.New("请选择要绑定或解绑的员工")
+	}
+	if db, ok := s.store.(managedBindings); ok {
+		if err := db.ChangeManagedBinding(ctx, w, empID, detach); err != nil {
+			return nil, err
+		}
+	} else if s.binder != nil {
+		target := w.ID
+		if detach {
+			target = ""
+		}
+		if err := s.binder.BindWorkspace(ctx, empID, target); err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, errors.New("员工绑定服务不可用")
+	}
+	action := "workspace.bind"
+	if detach {
+		action = "workspace.unbind"
+	}
+	s.audit.Log(ctx, "USER", actorID, action, "success", ip, map[string]string{"workspace_id": w.ID, "employee_id": empID})
+	return w, nil
+}
+func (s *Service) DetachManaged(ctx context.Context, w *Workspace, empID, actorID, ip string) (*Workspace, error) {
+	return s.changeManagedBinding(ctx, w, empID, true, actorID, ip)
 }
