@@ -44,12 +44,12 @@
    ```sh
    docker build -f deploy/Dockerfile.server -t aie-control-plane:security-20261025 .
    docker build -f deploy/Dockerfile.admin -t aie-admin:security-20261025 .
-   python3 deploy/generate-env.py --domain employee.example.com \
+   sh deploy/generate-env.sh --domain employee.example.com \
      --server-image aie-control-plane:security-20261025 \
      --admin-image aie-admin:security-20261025
    ```
 
-   `generate-env.py` 仅适用于新安装：生成随机秘密、以 0600 权限保存，不覆盖已有文件，也不打印秘密值。生产制品宜使用 `repository@sha256:...`；本地构建标签不能替代发布制品的 digest 固定。
+   `generate-env.sh` 仅适用于新安装，使用系统 Shell 和 OpenSSL，无需 Python：生成随机秘密、以 0600 权限保存，不覆盖已有文件，也不打印秘密值。Windows 使用 `generate-env.ps1`（内置 .NET，专用 ACL），完整命令见 [.env 配置手册](ENV_CONFIGURATION.md)。生产制品宜使用 `repository@sha256:...`；本地构建标签不能替代发布制品的 digest 固定。
 
 3. 检查环境文件和数据目录位置，再启动：
 
