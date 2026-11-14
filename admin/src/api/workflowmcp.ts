@@ -1,5 +1,5 @@
 /** 工作流MCP 前端类型与 API */
-import { apiDelete, apiGet, apiPost, apiPut, setSessionPresent } from './client'
+import { apiDelete, apiGet, apiPost, apiPut, apiRequest, setSessionPresent } from './client'
 import { rebuildSavedIndex } from './savedIndex'
 
 export type Workflow = {
@@ -209,24 +209,11 @@ export async function syncSkills(workstation_id: string, employee_id = '', skill
 export async function importWorkflowMCPZip(file: File) {
   const fd = new FormData()
   fd.append('file', file)
-  const headers = new Headers({ Accept: 'application/json' })
-  // 不要手动设 Content-Type，由浏览器带 multipart boundary
-  const res = await fetch('/api/workflow-mcp/import', { method: 'POST', headers, body: fd })
-  if (res.status === 401) setSessionPresent(false)
-  if (!res.ok) {
-    let msg = `${res.status}`
-    try {
-      const err = (await res.json()) as { error?: string }
-      if (err.error) msg = err.error
-    } catch {
-      /* ignore */
-    }
-    throw new Error(msg)
-  }
-  return res.json() as Promise<{
+  // 复用浏览器会话校验头及统一错误处理；Content-Type 由浏览器生成 multipart boundary。
+  return apiRequest<{
     status: string
     stats: { workflows: number; skills: number; knowledge: number; errors: number }
-  }>
+  }>('/workflow-mcp/import', { method: 'POST', body: fd })
 }
 
 // 避免未使用告警

@@ -56,7 +56,7 @@ MCP tools：`list/get/search/upsert/delete` 覆盖工作流、技能、知识；
 {"header_name":"X-API-Key","header_prefix":""}
 ```
 
-调度时，绑定凭证会覆盖同名请求头（不区分大小写）或同名环境变量，其它配置保留。凭证必须处于 `active` 状态，且 `expires_at` 未到期、密钥可读取；失败时阻止本次任务下发并保留可重试状态。自动续期暂未实现，需要手动更新密钥及有效期。此检查发生在任务下发前，不会主动撤销已运行会话中的上游凭证。
+调度时，绑定凭证会覆盖同名请求头（不区分大小写）或同名环境变量，其它配置保留。凭证必须处于 `active` 状态，且 `expires_at` 未到期、密钥可读取；校验失败会阻止任务下发并立即将任务标记为 `FAILED`，保存具体原因，不再自动重试。修正凭证后需提交新任务。员工忙、会话排队、工作站离线或资源不足属于正常等待条件，仍保留排队状态。自动续期暂未实现，需要手动更新密钥及有效期。此检查发生在任务下发前，不会主动撤销已运行会话中的上游凭证。
 
 Cursor 通过 ACP `session/new.mcpServers` 接收配置，请求头和环境变量转换为 name/value 列表。Codex 通过 `thread/start.config.mcp_servers` 接收 HTTP 的 `http_headers` 或 STDIO 的 `command/args/env`，不会写入用户全局配置文件。Codex 不支持旧版 SSE 服务，需改为 Streamable HTTP。
 

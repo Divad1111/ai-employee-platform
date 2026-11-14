@@ -359,8 +359,18 @@ func (m *Managers) RunJobWithEvents(ctx context.Context, jobID, employeeID, sess
 
 	if cb != nil {
 		if setter, ok := agent.(interface{ SetInquiryHandler(acp.InquiryHandler) }); ok {
-			setter.SetInquiryHandler(func(ictx context.Context, inq acp.Inquiry) (string, error) {
-				return cb(ictx, jobID, employeeID, inq)
+			inquiryCtx, cancelInquiries := context.WithCancel(ctx)
+			defer cancelInquiries()
+			// One Feishu decision at a time per job. Parallel tool calls must not supersede each other.
+			gate := make(chan struct{}, 1)
+			setter.SetInquiryHandler(func(_ context.Context, inq acp.Inquiry) (string, error) {
+				select {
+				case gate <- struct{}{}:
+					defer func() { <-gate }()
+				case <-inquiryCtx.Done():
+					return "", inquiryCtx.Err()
+				}
+				return cb(inquiryCtx, jobID, employeeID, inq)
 			})
 			defer setter.SetInquiryHandler(nil)
 		}

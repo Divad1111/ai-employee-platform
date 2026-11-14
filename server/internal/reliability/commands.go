@@ -8,6 +8,7 @@ import (
 	"time"
 
 	aiev1 "github.com/ai-employee-platform/gen/go/aie/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 func newID() string {
@@ -180,6 +181,28 @@ func (s *CommandStore) HasUnackedJob(wsID, jobID string) bool {
 		}
 	}
 	return false
+}
+
+// StopJobStarts replaces unacknowledged starts with stops at the same sequence.
+// Removing them would leave sequence gaps and block every later command. Keep
+// the ID for late acknowledgements, but never replay the failed task's payload.
+func (s *CommandStore) StopJobStarts(wsID, jobID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w := s.byWS[wsID]
+	if w == nil {
+		return
+	}
+	for _, pc := range w.pending {
+		if pc == nil || pc.Acked || pc.Command.GetJobId() != jobID || pc.Command.GetType() != aiev1.CommandType_COMMAND_TYPE_START_JOB {
+			continue
+		}
+		stopped := proto.Clone(pc.Command).(*aiev1.Command)
+		stopped.Type = aiev1.CommandType_COMMAND_TYPE_STOP_JOB
+		stopped.Structured = nil
+		stopped.PayloadJson = `{"reason":"scheduling_failed"}`
+		pc.Command = stopped
+	}
 }
 
 // Ack 确认命令；过旧/未知返回错误语义由调用方转 ACK.accepted=false。

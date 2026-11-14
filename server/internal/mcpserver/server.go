@@ -101,6 +101,13 @@ func (s *Server) Handler() http.Handler {
 		if req.JSONRPC == "" {
 			req.JSONRPC = "2.0"
 		}
+		// Streamable HTTP notifications (including notifications/initialized)
+		// are acknowledged with an empty 202 response. A JSON-RPC result without
+		// an id makes strict MCP clients fail the handshake before tools/list.
+		if req.ID == nil {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		result, rpcErr := s.dispatch(ctx, req.Method, req.Params)
 		resp := rpcResponse{JSONRPC: "2.0", ID: req.ID}
 		if rpcErr != nil {

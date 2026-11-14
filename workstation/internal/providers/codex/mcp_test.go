@@ -38,6 +38,7 @@ func (p *mcpRPCPeer) Write(raw []byte) (int, error) {
 	p.s.mu.Unlock()
 	ch <- rpcMsg{ID: id, Result: body}
 	if request["method"] == "turn/start" {
+		notify(p.s, "item/completed", map[string]any{"item": map[string]any{"type": "agentMessage", "phase": "final_answer", "text": `{"status":"completed","kind":"reply","reply":"done","evidence":"result verified"}`}})
 		body, _ := json.Marshal(map[string]any{"turn": map[string]any{"status": "completed"}})
 		p.s.onNotify(rpcMsg{Method: "turn/completed", Params: body})
 	}

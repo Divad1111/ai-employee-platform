@@ -2,12 +2,41 @@ package feishu_test
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/ai-employee-platform/server/internal/feishu"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 )
+
+func TestInquiryInputForm(t *testing.T) {
+	for _, options := range [][]feishu.InquiryCardOption{nil, {{OptionID: "a", Name: "方案A"}, {OptionID: "b", Name: "方案B"}, {OptionID: "c", Name: "方案C"}}} {
+		card := feishu.BuildInquiryCard("job", "员工", "inquiry", "请输入回答", options, true)
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(card.MustJSON()), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["schema"] != "2.0" || payload["elements"] != nil || payload["body"] == nil {
+			t.Fatal(payload)
+		}
+		if !strings.Contains(card.Header.Title.Content, "员工") || !strings.Contains(card.MustJSON(), "等待回答") {
+			t.Fatal(card.MustJSON())
+		}
+		elements := card.Body.Elements
+		if len(elements) != len(options)+2 {
+			t.Fatal(elements)
+		}
+		form := elements[len(elements)-1]
+		fields := form["elements"].([]feishu.CardElement)
+		if form["tag"] != "form" || fields[0]["name"] != feishu.InquiryAnswerField || fields[0]["input_type"] != "multiline_text" || fields[1]["name"] != feishu.InquiryTextSubmitPrefix+"inquiry" || fields[1]["form_action_type"] != "submit" || fields[1]["behaviors"] != nil {
+			t.Fatal(form)
+		}
+	}
+	if card := feishu.BuildInquiryCard("job", "employee", "permission", "允许执行？", nil, false); card.Body != nil {
+		t.Fatal("permission prompt gained text input")
+	}
+}
 
 func TestBuildInquiryCardStructure(t *testing.T) {
 	options := []feishu.InquiryCardOption{

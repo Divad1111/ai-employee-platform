@@ -26,10 +26,11 @@ import (
 
 // 错误。
 var (
-	ErrNoWorkstation      = errors.New("无可用 Workstation（需 ONLINE）")
-	ErrNotAssignable      = errors.New("Employee 不可调度")
-	ErrEmployeeBusy       = errors.New("Employee 已有任务正在执行")
-	ErrConversationQueued = errors.New("员工会话中有更早的任务等待执行")
+	ErrNoWorkstation       = errors.New("无可用 Workstation（需 ONLINE）")
+	ErrNotAssignable       = errors.New("Employee 不可调度")
+	ErrEmployeeBusy        = errors.New("Employee 已有任务正在执行")
+	ErrConversationQueued  = errors.New("员工会话中有更早的任务等待执行")
+	ErrResourceUnavailable = errors.New("工作站资源暂时不足")
 )
 
 type taskQueueGate interface {
@@ -104,18 +105,52 @@ func (s *Service) SetTaskQueue(gate taskQueueGate) { s.TaskQueue = gate }
 // ScheduleJob 将 CREATED/QUEUED Job 分配到可用 WS 并下发 START_JOB。
 func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job.Job, scheduleErr error) {
 	s.scheduleMu.Lock()
-	defer s.scheduleMu.Unlock()
+	var failedJob *job.Job
+	var scheduling bool
+	var reservedWS string
+	var startCommand *aiev1.Command
 	defer func() {
-		if scheduleErr != nil && s.Jobs != nil {
-			if err := s.Jobs.ReportSchedulingBlock(ctx, jobID, scheduleErr.Error()); err != nil && !errors.Is(err, job.ErrNotFound) {
-				fmt.Printf("[Scheduler] 记录任务 %s 的阻塞原因失败: %v\n", jobID, err)
+		s.scheduleMu.Unlock()
+		if failedJob != nil && s.OnTerminal != nil {
+			s.OnTerminal(context.WithoutCancel(ctx), failedJob)
+		}
+	}()
+	defer func() {
+		if scheduleErr == nil || !scheduling {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if isSchedulingWait(scheduleErr) {
+			if err := s.Jobs.ReportSchedulingBlock(cleanupCtx, jobID, scheduleErr.Error()); err != nil {
+				scheduleErr = errors.Join(scheduleErr, err)
 			}
+			return
+		}
+		var err error
+		failedJob, err = s.Jobs.Transition(cleanupCtx, jobID, job.StatusFailed, "scheduler", "", map[string]string{
+			"reason": "调度失败", "error": scheduleErr.Error(), "phase": "scheduling",
+		})
+		if err != nil {
+			scheduleErr = errors.Join(scheduleErr, fmt.Errorf("保存调度失败状态失败: %w", err))
+		} else {
+			scheduled = failedJob
+		}
+		if reservedWS != "" {
+			s.Release(reservedWS)
+		}
+		if startCommand != nil {
+			s.abortStartCommand(startCommand, scheduleErr.Error())
 		}
 	}()
 	j, err := s.Jobs.Get(ctx, jobID)
 	if err != nil {
 		return nil, err
 	}
+	if j.Status != job.StatusCreated && j.Status != job.StatusQueued {
+		return nil, fmt.Errorf("%w: 任务状态 %s 不可调度", job.ErrInvalidTransition, j.Status)
+	}
+	scheduling = true
 	if s.TaskQueue != nil {
 		allowed, gateErr := s.TaskQueue.CanScheduleJob(ctx, jobID)
 		if gateErr != nil {
@@ -126,20 +161,21 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job
 		}
 	}
 	jobs, listErr := s.Jobs.List(ctx)
-	if listErr == nil {
-		for _, other := range jobs {
-			if other.ID == jobID || other.EmployeeID != j.EmployeeID {
-				continue
-			}
-			switch other.Status {
-			case job.StatusAssigned, job.StatusStarting, job.StatusRunning, job.StatusBlocked, job.StatusWaitingApproval, job.StatusUnknown:
-				return nil, ErrEmployeeBusy
-			}
+	if listErr != nil {
+		return nil, listErr
+	}
+	for _, other := range jobs {
+		if other.ID == jobID || other.EmployeeID != j.EmployeeID {
+			continue
+		}
+		switch other.Status {
+		case job.StatusAssigned, job.StatusStarting, job.StatusRunning, job.StatusBlocked, job.StatusWaitingApproval, job.StatusUnknown:
+			return nil, ErrEmployeeBusy
 		}
 	}
 	emp, err := s.Employees.Get(ctx, j.EmployeeID)
 	if err != nil {
-		return nil, ErrNotAssignable
+		return nil, fmt.Errorf("%w: %w", ErrNotAssignable, err)
 	}
 	if emp.Status == employee.StatusDisabled {
 		return nil, ErrNotAssignable
@@ -149,28 +185,41 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job
 	}
 	wsID := emp.WorkstationID
 	if j.WorkspaceID != "" && s.Workspaces != nil {
-		if wsp, err := s.Workspaces.Get(ctx, j.WorkspaceID); err == nil && wsp != nil {
-			if wsID == "" && wsp.WorkstationID != "" {
-				wsID = wsp.WorkstationID
-			}
+		wsp, err := s.Workspaces.Get(ctx, j.WorkspaceID)
+		if err != nil {
+			return nil, fmt.Errorf("读取工作区失败: %w", err)
+		}
+		if wsID == "" && wsp.WorkstationID != "" {
+			wsID = wsp.WorkstationID
 		}
 	}
 	if wsID == "" {
 		for _, v := range s.Workstations.List(ctx) {
-			if v.Status == reliability.StatusOnline && s.isOnline(v.ID) && s.canAssign(v.ID) {
+			available, err := s.workstationAvailable(ctx, v.ID)
+			if err != nil {
+				return nil, fmt.Errorf("检查工作站调度状态失败: %w", err)
+			}
+			if v.Status == reliability.StatusOnline && available && s.canAssign(v.ID) {
 				wsID = v.ID
 				break
 			}
 		}
 	}
-	if wsID == "" || !s.isOnline(wsID) || !s.canAssign(wsID) {
+	if wsID == "" {
+		return nil, ErrNoWorkstation
+	}
+	available, err := s.workstationAvailable(ctx, wsID)
+	if err != nil {
+		return nil, fmt.Errorf("检查工作站调度状态失败: %w", err)
+	}
+	if !available || !s.canAssign(wsID) {
 		return nil, ErrNoWorkstation
 	}
 	if reason := s.resourceBlockReason(wsID); reason != "" {
 		s.mu.Lock()
 		s.lastRejectReason[wsID] = reason
 		s.mu.Unlock()
-		return nil, errors.New(reason)
+		return nil, fmt.Errorf("%w: %s", ErrResourceUnavailable, reason)
 	}
 	if emp.WorkspaceID == "" && j.WorkspaceID == "" {
 		return nil, errors.New("Workspace Missing")
@@ -200,12 +249,21 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job
 			return nil, err
 		}
 	}
-	// 先校验运行时凭证，失败时保留任务可重试状态，避免卡在 ASSIGNED。
+	// 在占用员工前完成凭证和上下文检查；异常由统一出口直接置为失败。
 	var startJob *aiev1.StartJobPayload
 	if s.Pusher != nil && (s.WorkflowMCP != nil || s.MCP != nil) {
 		startJob, err = s.buildStartJobPayload(ctx, j.EmployeeID, j.Prompt, j.WorkspaceID, workspacePath, j.WorkflowID)
 		if err != nil {
 			return j, err
+		}
+	}
+	var conversationContext string
+	if s.Pusher != nil {
+		if ctxProvider, ok := s.TaskQueue.(taskQueueContext); ok {
+			conversationContext, err = ctxProvider.ConversationContext(ctx, j.ID)
+			if err != nil {
+				return j, fmt.Errorf("读取员工会话上下文失败: %w", err)
+			}
 		}
 	}
 
@@ -220,7 +278,10 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job
 	if err := s.Jobs.BindWorkstation(ctx, jobID, wsID); err != nil {
 		return nil, err
 	}
-	j, _ = s.Jobs.Get(ctx, jobID)
+	j, err = s.Jobs.Get(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
 
 	if s.Pusher != nil {
 		payload := map[string]any{
@@ -231,14 +292,8 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job
 			"reset_session_context": emp.SessionContextResetGeneration == emp.SessionGeneration,
 			"input_attachments":     j.InputAttachments,
 		}
-		if ctxProvider, ok := s.TaskQueue.(taskQueueContext); ok {
-			conversationContext, contextErr := ctxProvider.ConversationContext(ctx, j.ID)
-			if contextErr != nil {
-				return j, fmt.Errorf("读取员工会话上下文失败: %w", contextErr)
-			}
-			if conversationContext != "" {
-				payload["conversation_context"] = conversationContext
-			}
+		if conversationContext != "" {
+			payload["conversation_context"] = conversationContext
 		}
 		if emp.DefaultModel != "" {
 			payload["model"] = emp.DefaultModel
@@ -258,42 +313,64 @@ func (s *Service) ScheduleJob(ctx context.Context, jobID string) (scheduled *job
 				"id": startJob.WorkflowId, "version": startJob.WorkflowVersion,
 			}
 			if s.Jobs != nil {
-				_ = s.Jobs.SetWorkflowSnapshot(ctx, j.ID, j.WorkflowID, j.WorkflowSnapshot)
+				if err := s.Jobs.SetWorkflowSnapshot(ctx, j.ID, j.WorkflowID, j.WorkflowSnapshot); err != nil {
+					return j, err
+				}
 			}
 		}
 
+		j, err = s.Jobs.Transition(ctx, jobID, job.StatusStarting, "scheduler", "", nil)
+		if err != nil {
+			return j, err
+		}
+		s.mu.Lock()
+		s.runningOnWS[wsID]++
+		s.mu.Unlock()
+		reservedWS = wsID
+
 		if s.FullPusher != nil && startJob != nil {
-			if _, err := s.FullPusher.PushCommandFull(wsID, aiev1.CommandType_COMMAND_TYPE_START_JOB, j.EmployeeID, j.ID, string(payloadJSON), func(cmd *aiev1.Command) {
+			startCommand, err = s.FullPusher.PushCommandFull(wsID, aiev1.CommandType_COMMAND_TYPE_START_JOB, j.EmployeeID, j.ID, string(payloadJSON), func(cmd *aiev1.Command) {
 				cmd.Structured = &aiev1.Command_StartJob{StartJob: startJob}
-			}); err != nil {
-				return j, err
-			}
-		} else if _, err := s.Pusher.PushCommand(wsID, aiev1.CommandType_COMMAND_TYPE_START_JOB, j.EmployeeID, j.ID, string(payloadJSON)); err != nil {
+			})
+		} else {
+			startCommand, err = s.Pusher.PushCommand(wsID, aiev1.CommandType_COMMAND_TYPE_START_JOB, j.EmployeeID, j.ID, string(payloadJSON))
+		}
+		if err != nil {
 			return j, err
 		}
 		if emp.SessionContextResetGeneration == emp.SessionGeneration {
 			s.Employees.ConsumeSessionContextReset(ctx, emp.ID, emp.SessionGeneration)
 		}
+		return j, nil
 	}
 	s.mu.Lock()
 	s.runningOnWS[wsID]++
 	s.mu.Unlock()
+	reservedWS = wsID
 
 	return s.Jobs.Transition(ctx, jobID, job.StatusStarting, "scheduler", "", nil)
 }
 
 func (s *Service) isOnline(wsID string) bool {
+	available, _ := s.workstationAvailable(context.Background(), wsID)
+	return available
+}
+
+func (s *Service) workstationAvailable(ctx context.Context, wsID string) (bool, error) {
 	if s.Maintenance != nil {
-		blocked, err := s.Maintenance(context.Background(), wsID)
-		if err != nil || blocked {
-			return false
+		blocked, err := s.Maintenance(ctx, wsID)
+		if err != nil {
+			return false, err
+		}
+		if blocked {
+			return false, nil
 		}
 	}
 	if s.Presence != nil && !s.Presence.IsSchedulable(wsID) {
-		return false
+		return false, nil
 	}
-	v := s.Workstations.Get(context.Background(), wsID)
-	return v.Status == reliability.StatusOnline
+	v := s.Workstations.Get(ctx, wsID)
+	return v.Status == reliability.StatusOnline, nil
 }
 
 // WorkstationBusy 等待已开始的分配完成后检查运行任务，避免维护与任务派发交叉。
@@ -381,7 +458,7 @@ func (s *Service) CancelJob(ctx context.Context, jobID, actorID, ip string) (*jo
 	return j, nil
 }
 
-// Tick 扫描 CREATED/QUEUED Job 尝试调度，并扫描超时卡死在 STARTING 的 Job。
+// Tick 调度排队任务，并回收分配或启动阶段超时的任务。
 func (s *Service) Tick(ctx context.Context) (scheduled int) {
 	list, err := s.Jobs.List(ctx)
 	if err != nil {
@@ -389,6 +466,9 @@ func (s *Service) Tick(ctx context.Context) (scheduled int) {
 	}
 	now := time.Now().UTC()
 	for _, j := range list {
+		if j.Status == job.StatusAssigned {
+			s.failAbandonedAssignment(ctx, j.ID)
+		}
 		// 检查长时间卡在 STARTING 的 Job（> 60秒）：超时失败并释放工作站并发槽位
 		if j.Status == job.StatusStarting {
 			startedAt := j.StartedAt

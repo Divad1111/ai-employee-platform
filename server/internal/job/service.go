@@ -41,13 +41,13 @@ var terminal = map[string]bool{
 // 合法转换（Q-04）。
 var transitions = map[string]map[string]bool{
 	StatusCreated: {
-		StatusQueued: true, StatusCancelled: true,
+		StatusQueued: true, StatusCancelled: true, StatusFailed: true,
 	},
 	StatusQueued: {
-		StatusAssigned: true, StatusCancelled: true,
+		StatusAssigned: true, StatusCancelled: true, StatusFailed: true,
 	},
 	StatusAssigned: {
-		StatusStarting: true, StatusCancelled: true,
+		StatusStarting: true, StatusCancelled: true, StatusFailed: true,
 	},
 	StatusStarting: {
 		StatusRunning: true, StatusSuccess: true, StatusFailed: true, StatusCancelled: true, StatusTimeout: true,

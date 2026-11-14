@@ -27,7 +27,7 @@ type fakeFullPusher struct {
 	cmds []*aiev1.Command
 }
 
-func TestExpiredCredentialCanBeCorrectedAndRescheduled(t *testing.T) {
+func TestExpiredCredentialFailsUntilNewJobIsSubmitted(t *testing.T) {
 	ctx := context.Background()
 	aud := audit.NewMemory()
 	bus := eventbus.New(5)
@@ -79,29 +79,32 @@ func TestExpiredCredentialCanBeCorrectedAndRescheduled(t *testing.T) {
 	if _, err := sched.ScheduleJob(ctx, j.ID); !errors.Is(err, mcp.ErrCredentialExpired) {
 		t.Fatalf("expected expired credential, got %v", err)
 	}
-	// 定时重试应保留错误原因, 但不能每次重试都刷一条相同的时间线。
-	if _, err := sched.ScheduleJob(ctx, j.ID); !errors.Is(err, mcp.ErrCredentialExpired) {
-		t.Fatalf("expected repeated expired credential, got %v", err)
+	if _, err := sched.ScheduleJob(ctx, j.ID); !errors.Is(err, job.ErrInvalidTransition) {
+		t.Fatalf("failed job must not be retried, got %v", err)
 	}
 	events, err := jobSvc.Timeline(ctx, j.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 2 || events[1].EventType != "SCHEDULING_BLOCKED" || !strings.Contains(events[1].Payload["reason"], "凭证已过期") {
-		t.Fatal("scheduling error must be visible exactly once in the timeline")
+	if len(events) != 2 || events[1].EventType != "STATUS" || events[1].Payload["to"] != job.StatusFailed || !strings.Contains(events[1].Payload["error"], "凭证已过期") {
+		t.Fatal("scheduling failure must be terminal and retain the credential error")
 	}
 	current, err := jobSvc.Get(ctx, j.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Status != job.StatusCreated || len(pusher.cmds) != 0 {
-		t.Fatal("invalid credential consumed the job assignment")
+	if current.Status != job.StatusFailed || len(pusher.cmds) != 0 {
+		t.Fatal("invalid credential must fail without dispatching")
 	}
 	expiry = time.Now().Add(time.Hour)
 	if _, err := mcpSvc.UpdateCredential(ctx, cred.ID, mcp.CreateCredentialInput{ExpiresAt: &expiry}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sched.ScheduleJob(ctx, j.ID); err != nil {
+	next, _, err := jobSvc.Create(ctx, job.CreateInput{EmployeeID: e.ID, WorkspaceID: ws.ID, Prompt: "query", IdempotencyKey: "corrected-new-job"}, "u", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sched.ScheduleJob(ctx, next.ID); err != nil {
 		t.Fatal(err)
 	}
 	if len(pusher.cmds) != 1 || pusher.cmds[0].GetStartJob().McpServers[0].Headers["Authorization"] != "Token test-key" {

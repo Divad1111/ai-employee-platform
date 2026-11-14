@@ -29,6 +29,7 @@ type Conversation struct {
 	CurrentJobID    string    `json:"current_job_id"`
 	CardMessageID   string    `json:"card_message_id,omitempty"`
 	Status          string    `json:"status"`
+	StatusReason    string    `json:"status_reason,omitempty"` // 渲染时从任务时间线读取，不单独持久化。
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }

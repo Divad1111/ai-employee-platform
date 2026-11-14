@@ -270,7 +270,8 @@ func (s *Server) handleUpstream(wsID string, stream aiev1.WorkerService_ConnectS
 			fmt.Printf("[Worker] 收到事件 ws=%s type=%s job=%s seq=%d\n", wsID, ev.GetType(), ev.GetJobId(), ev.GetMeta().GetSequence())
 		}
 		if s.OnEvent != nil && res.Accepted && !res.Duplicate {
-			go s.OnEvent(wsID, ev)
+			// Apply lifecycle and progress events in wire order before acknowledging them.
+			s.OnEvent(wsID, ev)
 		}
 		return stream.Send(&aiev1.ServerToWorker{
 			Body: &aiev1.ServerToWorker_EventAck{EventAck: &aiev1.EventAck{
@@ -324,6 +325,15 @@ func (s *Server) PushCommandFull(wsID string, typ aiev1.CommandType, employeeID,
 	}
 	fmt.Printf("[Worker] 命令已发送 ws=%s command=%s type=%s job=%s seq=%d\n", wsID, cmd.GetCommandId(), cmd.GetType(), jobID, cmd.GetMeta().GetSequence())
 	return cmd, nil
+}
+
+// AbortJobStart prevents an accepted-but-undelivered start from being replayed.
+// Also enqueue a fresh stop in case the original start reached the worker but
+// its acknowledgement was lost before the dispatch error was reported.
+func (s *Server) AbortJobStart(wsID, employeeID, jobID, reason string) error {
+	s.Commands.StopJobStarts(wsID, jobID)
+	_, err := s.PushCommand(wsID, aiev1.CommandType_COMMAND_TYPE_STOP_JOB, employeeID, jobID, `{"reason":"scheduling_failed"}`)
+	return err
 }
 
 // Disconnect 主动断开并清理指定工作站的双向流连接。

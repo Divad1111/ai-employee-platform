@@ -112,6 +112,10 @@ func (s *Service) CanScheduleJob(ctx context.Context, jobID string) (bool, error
 // generation, for restoring ACP context after a workstation process restart.
 func (s *Service) ConversationContext(ctx context.Context, jobID string) (string, error) {
 	c, err := s.Store.FindByJob(ctx, jobID)
+	if errors.Is(err, ErrNotFound) {
+		// Web/API jobs do not necessarily have a Feishu task conversation.
+		return "", nil
+	}
 	if err != nil {
 		return "", err
 	}
@@ -479,6 +483,10 @@ func (s *Service) refreshCard(ctx context.Context, id string) error {
 	if c.ChatID == "" || s.Feishu == nil {
 		return nil
 	}
+	currentJob, err := s.loadCardJobState(ctx, c)
+	if err != nil {
+		return err
+	}
 	binding := s.Feishu.BindingByEmployee(c.EmployeeID)
 	if binding == nil || !binding.Verified || binding.OwnerUserID != c.OwnerUserID || s.Feishu.AuthorizeActor == nil || s.Feishu.AuthorizeActor(ctx, c.EmployeeID, c.OwnerOpenID) != nil {
 		s.trackActive(id, false)
@@ -488,6 +496,15 @@ func (s *Service) refreshCard(ctx context.Context, id string) error {
 	messages, err := s.Store.Messages(ctx, id)
 	if err != nil {
 		return err
+	}
+	// 状态回调和卡片刷新可能并发；已持久化的最终结果应立即展示在原卡片中。
+	if currentJob != nil && isTerminal(currentJob.Status) && currentJob.Result != "" {
+		for i := range messages {
+			if messages[i].JobID == c.CurrentJobID && messages[i].Role == "assistant" {
+				messages[i].Content = currentJob.Result
+				messages[i].Status = currentJob.Status
+			}
+		}
 	}
 	activities, err := s.Store.Activities(ctx, id, c.CurrentJobID, 10)
 	if err != nil {

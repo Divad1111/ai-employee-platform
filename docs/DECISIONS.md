@@ -57,12 +57,14 @@ CREATED → QUEUED → ASSIGNED → STARTING → RUNNING → SUCCESS
 
 | 状态 | 可进入自 | 可离开至 |
 |------|----------|----------|
-| FAILED | STARTING / RUNNING / WAITING_APPROVAL / UNKNOWN | （终态） |
+| FAILED | CREATED / QUEUED / ASSIGNED / STARTING / RUNNING / BLOCKED / WAITING_APPROVAL / UNKNOWN | （终态） |
 | CANCELLED | CREATED…RUNNING / BLOCKED / WAITING_APPROVAL / UNKNOWN | （终态） |
 | TIMEOUT | STARTING / RUNNING | （终态） |
 | BLOCKED | RUNNING | RUNNING / CANCELLED / FAILED |
 | WAITING_APPROVAL | RUNNING | RUNNING（批准）/ CANCELLED / FAILED |
 | UNKNOWN | RUNNING（失联/Offline） | RUNNING（恢复）/ FAILED / CANCELLED |
+
+调度异常（配置、凭证、鉴权、上下文读取、命令下发失败）立即进入 FAILED，保存原因并释放执行占用，不自动重试。员工忙、会话排队、工作站离线或维护、资源不足属于正常等待条件，继续排队。已经入队的失败启动命令会被撤销为停止命令，保留命令序号连续性，防止重连后再次启动。
 
 说明：真正按 `timeout_sec` 停 Session 可在 M5/M6 完成；M4 保留字段与状态转换。
 

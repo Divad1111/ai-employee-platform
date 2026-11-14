@@ -182,9 +182,7 @@ func (p *Provider) Start(ctx context.Context, spec providers.StartSpec) (provide
 	useFake := false
 	switch {
 	case info.Path == "":
-		useFake = true
-		info.Path = fakeAgentBinary
-		p.Proc.Allow(fakeAgentBinary)
+		return nil, errors.New("工作站未安装 cursor，无法执行任务")
 	case info.Path == fakeAgentBinary || filepath.Base(info.Path) == "cursor-fake":
 		// 测试 / 开发 Fake 模式
 		useFake = true
@@ -285,6 +283,12 @@ type agentSession struct {
 
 func (a *agentSession) Start(ctx context.Context) error { return a.acp.Start(ctx) }
 func (a *agentSession) Events() <-chan acp.Event        { return a.acp.Events() }
+func (a *agentSession) Ready() bool                     { return a.acp.Ready() }
+func (a *agentSession) SetInquiryHandler(h acp.InquiryHandler) {
+	if session, ok := a.acp.(interface{ SetInquiryHandler(acp.InquiryHandler) }); ok {
+		session.SetInquiryHandler(h)
+	}
+}
 func (a *agentSession) Send(ctx context.Context, input []byte) (string, error) {
 	a.p.mu.Lock()
 	a.p.state = StateBusy

@@ -56,6 +56,8 @@ func TestACPInputFilesPeer(t *testing.T) {
 			result["sessionId"] = "input-session"
 		}
 		if req.Method == "session/prompt" {
+			result["stopReason"] = "end_turn"
+			encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"update": map[string]any{"sessionUpdate": "agent_message_chunk", "text": "done\n【任务结果】已完成：已读取图片"}}})
 			blocks, ok := req.Params["prompt"].([]any)
 			valid := ok && len(blocks) == 2
 			if valid {

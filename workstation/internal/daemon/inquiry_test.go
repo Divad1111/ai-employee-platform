@@ -26,13 +26,9 @@ func TestDaemonInquiryNoSessionFallback(t *testing.T) {
 		},
 	}
 
-	// 当没有活跃 gRPC Session 时，应立即 fallback 到 DefaultOptionID (opt-1)
 	res, err := d.handleAgentInquiry(context.Background(), "JOB-10", "EMP-10", inq)
-	if err != nil {
-		t.Fatalf("预期无错误，得到: %v", err)
-	}
-	if res != "opt-1" {
-		t.Errorf("预期返回 opt-1，实际得到: %s", res)
+	if err == nil || res != "" {
+		t.Fatalf("offline inquiry selected %q, err=%v", res, err)
 	}
 }
 
@@ -102,7 +98,7 @@ func TestDaemonInquiryContextCancel(t *testing.T) {
 	// 模拟已存在活跃 session (用 mock 检查 context 取消分支)
 	// 由于没有 session 默认走 no session 分支；当有 channel 且 ctx cancelled 时走 ctx.Done()
 	res, _ := d.handleAgentInquiry(ctx, "JOB-11", "EMP-11", inq)
-	if res != "opt-fallback" {
+	if res != "" {
 		t.Errorf("取消时应安全 fallback 到默认选项，实际得到: %s", res)
 	}
 }

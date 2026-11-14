@@ -23,9 +23,6 @@ func TestParseInquiryVariations(t *testing.T) {
 	if len(inq1.Options) != 2 || inq1.Options[0].OptionID != "opt-1" || inq1.Options[0].Name != "允许一次" {
 		t.Errorf("inq1 options 解析错误: %+v", inq1.Options)
 	}
-	if inq1.DefaultOptionID() != "opt-1" {
-		t.Errorf("inq1 DefaultOptionID 应为 opt-1, got %s", inq1.DefaultOptionID())
-	}
 
 	// 2. choices 格式与 prompt / title 兜底
 	raw2 := json.RawMessage(`{
@@ -55,9 +52,7 @@ func TestParseInquiryVariations(t *testing.T) {
 	if len(inq3.Options) != 2 || inq3.Options[0].OptionID != "allow-once" || inq3.Options[1].OptionID != "deny" {
 		t.Errorf("inq3 兜底选项错误: %+v", inq3.Options)
 	}
-	if inq3.DefaultOptionID() != "deny" {
-		t.Errorf("权限询问未收到答复时应默认拒绝, got %s", inq3.DefaultOptionID())
-	}
+
 }
 
 func TestStdioSessionHandleInquiryRequest(t *testing.T) {

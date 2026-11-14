@@ -8,7 +8,9 @@ const { csp } = require('./browserSecurity.cjs')
 ;(async () => {
   const root = path.join(__dirname, '../dist')
   const secret = 'synthetic-http-only-cookie'
+  const zip = Buffer.from('504b0506000000000000000000000000000000000000', 'hex')
   let loggedIn = false
+  let imports = 0
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Security-Policy', csp)
     const url = new URL(req.url, 'http://localhost')
@@ -23,6 +25,23 @@ const { csp } = require('./browserSecurity.cjs')
         return json({ token: '', user: { id: 'test', username: 'test', roles: ['SUPER_ADMIN'] } })
       }
       if (!loggedIn || !req.headers.cookie?.includes(`aie_session=${secret}`)) return json({ error: '未登录' }, 401)
+      if (url.pathname === '/api/workflow-mcp/import') {
+        // 与服务端一致：Cookie 写请求必须带浏览器校验头。
+        if (req.headers['x-aie-browser'] !== '1') return json({ error: '浏览器请求来源校验失败' }, 403)
+        assert.equal(req.method, 'POST')
+        assert.equal(req.headers.origin, `http://${req.headers.host}`)
+        assert.match(req.headers['content-type'], /^multipart\/form-data; boundary=/)
+        const chunks = []
+        for await (const chunk of req) chunks.push(chunk)
+        const form = await new Request(`http://${req.headers.host}${req.url}`, {
+          method: req.method, headers: req.headers, body: Buffer.concat(chunks),
+        }).formData()
+        const file = form.get('file')
+        assert.equal(file.name, 'data.zip')
+        assert.deepEqual(Buffer.from(await file.arrayBuffer()), zip)
+        imports++
+        return json({ status: 'ok', stats: { workflows: 0, skills: 0, knowledge: 0, errors: 0 } })
+      }
       if (url.pathname === '/api/auth/logout') {
         assert.equal(req.headers['x-aie-browser'], '1')
         loggedIn = false
@@ -58,11 +77,27 @@ const { csp } = require('./browserSecurity.cjs')
     assert.equal(await page.evaluate(() => JSON.stringify(localStorage).includes('synthetic-http-only-cookie')), false)
     await page.reload()
     await page.getByRole('button', { name: '退出登录', exact: true }).waitFor()
+    await page.goto(base + '/mcp-servers/workflow-mcp')
+    const upload = async () => {
+      const response = page.waitForResponse(res => res.url() === base + '/api/workflow-mcp/import' && res.request().method() === 'POST')
+      await page.locator('input[type=file]').setInputFiles({ name: 'data.zip', mimeType: 'application/zip', buffer: zip })
+      assert.equal((await response).status(), 200)
+      await page.getByRole('button', { name: '导入 data.zip', exact: true }).waitFor()
+    }
+    await upload()
+    await page.getByText('导入完成：工作流 0 / 技能包 0 / 知识 0', { exact: true }).waitFor()
+    assert.equal(imports, 1)
+    assert.equal(await page.locator('input[type=file]').inputValue(), '')
+    // 同一文件可再次选择；导入成功后仍保留 Cookie 会话。
+    await upload()
+    await page.getByText('导入完成：工作流 0 / 技能包 0 / 知识 0', { exact: true }).waitFor()
+    assert.equal(imports, 2)
+    assert.equal(await page.evaluate(() => localStorage.getItem('aie_browser_session')), '1')
     await page.evaluate(() => { const script = document.createElement('script'); script.textContent = 'window.injectedScriptRan=true'; document.head.append(script) })
     assert.equal(await page.evaluate(() => window.injectedScriptRan), undefined, 'CSP allowed inline scripts')
     await page.getByRole('button', { name: '退出登录', exact: true }).click()
     await page.getByRole('button', { name: '立即登录', exact: true }).waitFor()
     assert.equal((await context.cookies()).some(cookie => cookie.name === 'aie_session'), false)
-    console.log('PASS: cookie login, reload, no JS token access, logout, and enforced CSP')
+    console.log('PASS: cookie login, reload, multipart ZIP import with browser header, repeat import, no JS token access, logout, and enforced CSP')
   } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)) }
 })().catch(error => { console.error(error); process.exitCode = 1 })

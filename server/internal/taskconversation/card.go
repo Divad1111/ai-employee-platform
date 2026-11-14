@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/ai-employee-platform/server/internal/feishu"
+	"github.com/ai-employee-platform/server/internal/job"
 )
 
 // BuildCard 构建与单个 Job 对应的飞书卡片。每个正文块都保持在飞书限制以内。
@@ -24,6 +25,10 @@ func buildCardAt(c *Conversation, messages []Message, activities []Activity, now
 	}
 	messages = jobMessages
 	statusText, color := statusDisplay(c.Status)
+	schedulingBlocked := (c.Status == job.StatusCreated || c.Status == job.StatusQueued) && c.StatusReason != ""
+	if schedulingBlocked {
+		statusText, color = "调度受阻，等待重试", "orange"
+	}
 	title := "AI 员工任务"
 	if c.CurrentJobID != "" {
 		title += " · " + c.CurrentJobID
@@ -39,12 +44,24 @@ func buildCardAt(c *Conversation, messages []Message, activities []Activity, now
 		})
 	}
 	appendText("**状态：** "+statusText, 900)
+	if !c.CreatedAt.IsZero() {
+		appendText("**创建时间：** "+feishu.FormatCardTime(c.CreatedAt), 900)
+	}
+	if c.StatusReason != "" {
+		label := "等待原因"
+		if isTerminal(c.Status) {
+			label = "失败原因"
+		}
+		for _, chunk := range splitEscapedCardText(c.StatusReason, 820) {
+			appendText("**"+label+"：** "+chunk, 900)
+		}
+	}
 	if !isTerminal(c.Status) && !c.CreatedAt.IsZero() {
 		seconds := int64(now.Sub(c.CreatedAt).Seconds())
 		if seconds < 0 {
 			seconds = 0
 		}
-		appendText(fmt.Sprintf("**任务已接收：** %d 秒前。处理中无需重复发送，相同员工的新任务会排队执行。", seconds), 900)
+		appendText(fmt.Sprintf("**任务已接收：** %d 秒前。无需重复发送，相同员工的新任务会排队执行。", seconds), 900)
 	}
 	if c.EmployeeName != "" {
 		appendText("**AI 员工：** "+truncateRunes(escapeCardText(c.EmployeeName), 820), 900)
@@ -82,7 +99,23 @@ func buildCardAt(c *Conversation, messages []Message, activities []Activity, now
 			appendText("• "+truncateRunes(escapeCardText(activity.Content), 820), 900)
 		}
 	} else if !isTerminal(c.Status) {
-		appendText("**执行过程：** Agent 正在处理任务…", 900)
+		progress := "Agent 正在处理任务…"
+		switch c.Status {
+		case job.StatusCreated, job.StatusQueued:
+			progress = "任务排队中，尚未启动 Agent。"
+			if schedulingBlocked {
+				progress = "任务尚未启动；问题解决后会自动重试，无需重复发送。"
+			}
+		case job.StatusAssigned, job.StatusStarting:
+			progress = "正在等待工作站启动 Agent。"
+		case job.StatusBlocked:
+			progress = "任务执行受阻，等待恢复。"
+		case job.StatusWaitingApproval:
+			progress = "等待确认后继续执行。"
+		case job.StatusUnknown:
+			progress = "工作站连接中断，正在确认任务状态。"
+		}
+		appendText("**执行过程：** "+progress, 900)
 	}
 	for _, m := range messages {
 		label := "用户"
@@ -90,8 +123,8 @@ func buildCardAt(c *Conversation, messages []Message, activities []Activity, now
 			label = "AI 员工"
 		}
 		text := m.Content
-		if text == "" && m.Role == "assistant" && !isTerminal(m.Status) {
-			text = "正在生成回复…"
+		if text == "" && m.Role == "assistant" {
+			text = pendingReply(c.Status)
 		}
 		appendMessageText := func(content string) {
 			chunks := splitEscapedCardText(content, 820)
@@ -122,10 +155,38 @@ func buildCardAt(c *Conversation, messages []Message, activities []Activity, now
 	return card
 }
 
+// pendingReply 根据实际任务阶段提示，避免尚未启动或失败的任务仍显示正在生成回复。
+func pendingReply(status string) string {
+	switch status {
+	case job.StatusCreated, job.StatusQueued:
+		return "尚未开始执行，等待调度。"
+	case job.StatusAssigned, job.StatusStarting:
+		return "工作站正在启动任务，尚未生成回复。"
+	case job.StatusSuccess:
+		return "任务已完成，未返回文本回复。"
+	case job.StatusFailed:
+		return "任务执行失败，未返回回复；请查看失败原因。"
+	case job.StatusCancelled:
+		return "任务已停止。"
+	case job.StatusTimeout:
+		return "任务执行超时，未返回完整回复。"
+	case job.StatusBlocked:
+		return "任务执行受阻，等待恢复。"
+	case job.StatusWaitingApproval:
+		return "等待确认后继续执行。"
+	case job.StatusUnknown:
+		return "正在确认工作站上的任务状态。"
+	default:
+		return "正在生成回复…"
+	}
+}
+
 func statusDisplay(status string) (string, string) {
 	switch strings.ToUpper(status) {
-	case "CREATED", "QUEUED", "ASSIGNED", "STARTING":
-		return "等待工作站执行", "blue"
+	case "CREATED", "QUEUED":
+		return "排队等待调度", "blue"
+	case "ASSIGNED", "STARTING":
+		return "等待工作站启动", "blue"
 	case "RUNNING":
 		return "正在执行", "wathet"
 	case "SUCCESS":
@@ -138,6 +199,10 @@ func statusDisplay(status string) (string, string) {
 		return "执行超时", "orange"
 	case "WAITING_APPROVAL":
 		return "等待确认", "orange"
+	case "BLOCKED":
+		return "执行受阻", "orange"
+	case "UNKNOWN":
+		return "工作站连接中断，待确认", "orange"
 	default:
 		return status, "blue"
 	}

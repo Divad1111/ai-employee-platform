@@ -326,6 +326,7 @@ func main() {
 	}
 
 	inquirySvc := inquiry.NewService(workerSvc, jobSvc, empSvc, feishuSvc, notifySvc)
+	inquirySvc.OnJobStatus = taskConversationSvc.OnJobStatus
 	inquirySvc.ApproverForJob = func(ctx context.Context, jobID string) string {
 		j, err := jobSvc.Get(ctx, jobID)
 		if err != nil || j == nil {
@@ -447,6 +448,7 @@ func main() {
 			case "agent_activity":
 				sequence, _ := strconv.ParseUint(payload["activity_sequence"], 10, 64)
 				taskConversationSvc.OnAgentActivity(ctx, ev.GetEventId(), jobID, sequence, payload["text"])
+				_ = jobSvc.AppendEvent(ctx, jobID, "AGENT_ACTIVITY", map[string]string{"message": payload["text"]})
 			}
 		case aiev1.EventType_EVENT_TYPE_JOB_SUCCESS:
 			if jobID != "" {

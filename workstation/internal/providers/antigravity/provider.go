@@ -185,9 +185,7 @@ func (p *Provider) Start(ctx context.Context, spec providers.StartSpec) (provide
 	useFake := false
 	switch {
 	case info.Path == "":
-		useFake = true
-		info.Path = fakeAgentBinary
-		p.Proc.Allow(fakeAgentBinary)
+		return nil, errors.New("工作站未安装 antigravity，无法执行任务")
 	case info.Path == fakeAgentBinary || filepath.Base(info.Path) == fakeAgentBinary:
 		useFake = true
 		p.Proc.Allow(info.Path)

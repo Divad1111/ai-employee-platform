@@ -3,6 +3,7 @@ package feishu
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"strings"
 	"time"
 )
@@ -27,16 +28,23 @@ const (
 
 // Card 飞书消息卡片根对象 (支持 Markdown 风格内容)
 type Card struct {
+	Schema   string        `json:"schema,omitempty"`
 	Config   CardConfig    `json:"config"`
 	Header   *CardHeader   `json:"header,omitempty"`
+	Elements []CardElement `json:"elements,omitempty"`
+	Body     *CardBody     `json:"body,omitempty"`
+}
+
+type CardBody struct {
 	Elements []CardElement `json:"elements"`
 }
 
 // CardConfig 卡片配置
 type CardConfig struct {
-	WideScreenMode bool `json:"wide_screen_mode"`
-	EnableForward  bool `json:"enable_forward"`
-	UpdateMulti    bool `json:"update_multi,omitempty"`
+	WideScreenMode bool   `json:"wide_screen_mode,omitempty"`
+	EnableForward  bool   `json:"enable_forward"`
+	UpdateMulti    bool   `json:"update_multi,omitempty"`
+	WidthMode      string `json:"width_mode,omitempty"`
 }
 
 // CardHeader 卡片头部
@@ -187,7 +195,7 @@ func BuildJobResultCard(jobID, status, summary string) *Card {
 		sb.WriteString(summary)
 	}
 
-	nowStr := time.Now().Format("2006-01-02 15:04:05")
+	nowStr := FormatCardTime(time.Now())
 	return NewMarkdownCard(
 		title,
 		template,
@@ -308,7 +316,7 @@ func BuildTestMessageCard(content string) *Card {
 	if content == "" {
 		content = "【AI Employee 协同平台】通信测试正常"
 	}
-	nowStr := time.Now().Format("2006-01-02 15:04:05")
+	nowStr := FormatCardTime(time.Now())
 	var sb strings.Builder
 	sb.WriteString(content)
 	sb.WriteString("\n\n---\n")
@@ -331,7 +339,10 @@ type InquiryCardOption struct {
 }
 
 // BuildInquiryCard 构建带交互按钮的决策/安全选项确认卡片
-func BuildInquiryCard(jobID, employeeName, inquiryID, message string, options []InquiryCardOption) *Card {
+func BuildInquiryCard(jobID, employeeName, inquiryID, message string, options []InquiryCardOption, allowText ...bool) *Card {
+	if len(allowText) > 0 && allowText[0] {
+		return buildInputInquiryCard(jobID, employeeName, inquiryID, message, options)
+	}
 	card := &Card{
 		Config: CardConfig{
 			WideScreenMode: true,
@@ -355,11 +366,15 @@ func BuildInquiryCard(jobID, employeeName, inquiryID, message string, options []
 	sb.WriteString(fmt.Sprintf("**请示编号**：`%s`\n\n", inquiryID))
 	sb.WriteString("**请示说明：**\n")
 	sb.WriteString(fmt.Sprintf("> %s\n\n", message))
-	sb.WriteString("**候选选项列表：**\n")
+	if len(options) > 0 {
+		sb.WriteString("**候选选项列表：**\n")
+	}
 	for i, opt := range options {
 		sb.WriteString(fmt.Sprintf("• **[%d]** %s (`%s`)\n", i+1, opt.Name, opt.OptionID))
 	}
-	sb.WriteString(fmt.Sprintf("\n> 💡 **交互说明**：仅任务发起者可以确认。点击按钮，或回复 `%s 1`（请求 ID + 选项编号）。", inquiryID))
+	if len(options) > 0 {
+		sb.WriteString(fmt.Sprintf("\n> 💡 **交互说明**：仅任务发起者可以确认。点击按钮，或回复 `%s 1`（请求 ID + 选项编号）。", inquiryID))
+	}
 
 	card.Elements = append(card.Elements, CardElement{
 		"tag": "div",
@@ -399,17 +414,18 @@ func BuildInquiryCard(jobID, employeeName, inquiryID, message string, options []
 	card.Elements = append(card.Elements, CardElement{
 		"tag": "hr",
 	})
-	card.Elements = append(card.Elements, CardElement{
-		"tag":     "action",
-		"actions": actions,
-	})
+	for len(actions) > 0 {
+		n := min(5, len(actions))
+		card.Elements = append(card.Elements, CardElement{"tag": "action", "actions": actions[:n]})
+		actions = actions[n:]
+	}
 
 	card.Elements = append(card.Elements, CardElement{
 		"tag": "note",
 		"elements": []map[string]interface{}{
 			{
 				"tag":     "plain_text",
-				"content": fmt.Sprintf("AI Employee 交互网关 • 请示于 %s", time.Now().Format("15:04:05")),
+				"content": fmt.Sprintf("AI Employee 交互网关 • 请示于 %s", FormatCardTime(time.Now())),
 			},
 		},
 	})
@@ -425,7 +441,7 @@ func BuildInquiryResolvedCard(jobID, employeeName, inquiryID, chosenName, chosen
 	}
 	sb.WriteString(fmt.Sprintf("**任务编号**：`%s`\n", jobID))
 	sb.WriteString(fmt.Sprintf("**请示编号**：`%s`\n", inquiryID))
-	sb.WriteString(fmt.Sprintf("**选择结果**：【**%s**】\n", chosenName))
+	sb.WriteString(fmt.Sprintf("**选择结果**：【**%s**】\n", html.EscapeString(chosenName)))
 	if chosenBy != "" {
 		sb.WriteString(fmt.Sprintf("**操作人员**：`%s`\n", chosenBy))
 	}
@@ -436,6 +452,6 @@ func BuildInquiryResolvedCard(jobID, employeeName, inquiryID, chosenName, chosen
 		"✅ 决策/权限请示已处理",
 		CardTemplateGreen,
 		sb.String(),
-		fmt.Sprintf("AI Employee 交互网关 • 完成于 %s", time.Now().Format("15:04:05")),
+		fmt.Sprintf("AI Employee 交互网关 • 完成于 %s", FormatCardTime(time.Now())),
 	)
 }

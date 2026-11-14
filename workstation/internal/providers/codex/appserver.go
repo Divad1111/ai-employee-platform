@@ -38,6 +38,8 @@ type appServerSession struct {
 	pending        map[int]chan rpcMsg
 	threadID       string
 	reply          strings.Builder
+	commentaryID   string
+	toolCompleted  bool
 	turnErr        string
 	turnDone       chan struct{}
 	activeTurn     string
@@ -173,12 +175,14 @@ func (s *appServerSession) Send(ctx context.Context, input []byte) (string, erro
 		if s.model != "" {
 			params["model"] = s.model
 		}
+		config := map[string]any{"features": map[string]any{"default_mode_request_user_input": true}}
+		params["config"] = config
 		if len(s.mcp) > 0 {
 			mcpConfig, err := codexMCPConfig(s.mcp)
 			if err != nil {
 				return "", err
 			}
-			params["config"] = map[string]any{"mcp_servers": mcpConfig}
+			config["mcp_servers"] = mcpConfig
 		}
 		res, err := s.request(ctx, "thread/start", params)
 		if err != nil {
@@ -198,6 +202,8 @@ func (s *appServerSession) Send(ctx context.Context, input []byte) (string, erro
 	}
 	tid := s.threadID
 	s.reply.Reset()
+	s.commentaryID = ""
+	s.toolCompleted = false
 	s.turnErr = ""
 	s.lastUsage = tokenusage.TokenUsage{
 		Provider:    "codex",
@@ -208,10 +214,12 @@ func (s *appServerSession) Send(ctx context.Context, input []byte) (string, erro
 	s.mu.Unlock()
 
 	res, err := s.request(ctx, "turn/start", map[string]any{
-		"threadId": tid,
-		"input":    turnInput(ctx, string(input)),
+		"threadId":     tid,
+		"input":        turnInput(ctx, string(input)),
+		"outputSchema": jobResultSchema,
 	})
 	if err != nil {
+		_ = s.Stop(context.Background())
 		return "", err
 	}
 	var started struct {
@@ -227,6 +235,7 @@ func (s *appServerSession) Send(ctx context.Context, input []byte) (string, erro
 
 	select {
 	case <-ctx.Done():
+		_ = s.Stop(context.Background())
 		return "", ctx.Err()
 	case <-done:
 	}
@@ -235,9 +244,9 @@ func (s *appServerSession) Send(ctx context.Context, input []byte) (string, erro
 	turnErr := s.turnErr
 	s.mu.Unlock()
 	if turnErr != "" {
-		return reply, errors.New(turnErr)
+		return "", errors.New(turnErr)
 	}
-	return reply, nil
+	return s.parseJobResult(reply)
 }
 
 func (s *appServerSession) Stop(_ context.Context) error {
@@ -245,6 +254,7 @@ func (s *appServerSession) Stop(_ context.Context) error {
 	s.ready = false
 	in := s.stdin
 	cmd := s.cmd
+	s.stdin, s.cmd = nil, nil
 	s.mu.Unlock()
 	s.failWaiters("Codex 会话已停止")
 	if in != nil {
@@ -349,6 +359,10 @@ func (s *appServerSession) read(out io.Reader) {
 			if ch != nil {
 				ch <- msg
 			}
+			continue
+		}
+		if msg.Method == "item/tool/requestUserInput" {
+			go s.handleUserInput(msg)
 			continue
 		}
 		if isCodexApprovalRequest(msg.Method) {
@@ -560,19 +574,27 @@ func compactApprovalDetail(value string, maxRunes int) string {
 func (s *appServerSession) onNotify(msg rpcMsg) {
 	// 转发面向用户的回复增量，并把工具阶段压缩成不含参数/输出的状态摘要。
 	if msg.Method == "item/agentMessage/delta" || msg.Method == "item/agent_message/delta" {
-		var p struct {
-			Delta string `json:"delta"`
-			Text  string `json:"text"`
-		}
-		if json.Unmarshal(msg.Params, &p) == nil {
-			text := p.Delta
-			if text == "" {
-				text = p.Text
-			}
-			if text != "" {
+		var d struct{ ItemID, Delta string }
+		if json.Unmarshal(msg.Params, &d) == nil && d.ItemID != "" {
+			s.mu.Lock()
+			commentary := d.ItemID == s.commentaryID
+			s.mu.Unlock()
+			if commentary {
 				select {
-				case s.events <- acp.Event{Type: "assistant_delta", Payload: []byte(text)}:
+				case s.events <- acp.Event{Type: "assistant_delta", Payload: []byte(d.Delta)}:
 				default:
+				}
+			}
+		}
+	}
+	if msg.Method == "turn/plan/updated" {
+		var plan struct {
+			Plan []struct{ Step, Status string }
+		}
+		if json.Unmarshal(msg.Params, &plan) == nil {
+			for _, step := range plan.Plan {
+				if step.Status == "inProgress" || step.Status == "in_progress" {
+					s.emitActivity("当前计划：" + step.Step)
 				}
 			}
 		}
@@ -580,21 +602,34 @@ func (s *appServerSession) onNotify(msg rpcMsg) {
 	if msg.Method == "item/started" || msg.Method == "item/completed" {
 		var p struct {
 			Item struct {
-				Type     string `json:"type"`
-				Status   string `json:"status"`
-				Success  *bool  `json:"success"`
-				ExitCode *int   `json:"exitCode"`
+				Type      string `json:"type"`
+				Status    string `json:"status"`
+				Success   *bool  `json:"success"`
+				ID, Phase string
+				Tool      string
+				ExitCode  *int `json:"exitCode"`
 			} `json:"item"`
 		}
 		if json.Unmarshal(msg.Params, &p) == nil {
+			if msg.Method == "item/started" && p.Item.Phase == "commentary" {
+				s.mu.Lock()
+				s.commentaryID = p.Item.ID
+				s.mu.Unlock()
+			}
 			if text := codexActivity(p.Item.Type, msg.Method == "item/started"); text != "" {
-				if msg.Method == "item/completed" && (p.Item.Status == "failed" || p.Item.Status == "declined" || p.Item.Success != nil && !*p.Item.Success || p.Item.ExitCode != nil && *p.Item.ExitCode != 0) {
+				failed := p.Item.Status == "failed" || p.Item.Status == "declined" || p.Item.Status == "interrupted" || p.Item.Success != nil && !*p.Item.Success || p.Item.ExitCode != nil && *p.Item.ExitCode != 0
+				if msg.Method == "item/completed" && !failed && (p.Item.Status == "completed" || p.Item.Success != nil && *p.Item.Success || p.Item.ExitCode != nil && *p.Item.ExitCode == 0) {
+					s.mu.Lock()
+					s.toolCompleted = true
+					s.mu.Unlock()
+				}
+				if msg.Method == "item/completed" && failed {
 					text = strings.TrimSuffix(text, "已完成") + "失败"
 				}
-				select {
-				case s.events <- acp.Event{Type: "agent_activity", Payload: []byte(text)}:
-				default:
+				if p.Item.Tool != "" {
+					text += "：" + p.Item.Tool
 				}
+				s.emitActivity(text)
 			}
 		}
 	}
@@ -602,6 +637,7 @@ func (s *appServerSession) onNotify(msg rpcMsg) {
 	case "item/completed":
 		var p struct {
 			Item struct {
+				Phase   string `json:"phase"`
 				Type    string `json:"type"`
 				Text    string `json:"text"`
 				Content []struct {
@@ -622,7 +658,12 @@ func (s *appServerSession) onNotify(msg rpcMsg) {
 				text += c.Text
 			}
 		}
+		if p.Item.Phase == "commentary" {
+			s.emitActivity(text)
+			return
+		}
 		s.mu.Lock()
+		s.reply.Reset()
 		s.reply.WriteString(text)
 		s.mu.Unlock()
 	case "turn/completed":
@@ -640,8 +681,8 @@ func (s *appServerSession) onNotify(msg rpcMsg) {
 		s.mu.Lock()
 		if p.Turn.Error != nil && p.Turn.Error.Message != "" {
 			s.turnErr = p.Turn.Error.Message
-		} else if p.Turn.Status == "failed" {
-			s.turnErr = "Codex 回合失败"
+		} else if p.Turn.Status != "completed" {
+			s.turnErr = fmt.Sprintf("Codex 任务未完成（回合状态 %q）", p.Turn.Status)
 		}
 		raw := p.Usage
 		if len(raw) == 0 {
@@ -690,7 +731,7 @@ func codexActivity(itemType string, started bool) string {
 		label = "终端命令"
 	case "fileChange":
 		label = "文件修改"
-	case "mcpToolCall":
+	case "mcpToolCall", "dynamicToolCall":
 		label = "工具调用"
 	case "webSearch":
 		label = "网页搜索"

@@ -32,6 +32,7 @@ COPY --from=build /out/security-migrate /app/security-migrate
 COPY --from=build /src/migrations /migrations
 COPY --from=build --chown=nonroot:nonroot /data /data
 ENV AIE_HTTP_ADDR=:8080
+ENV TZ=Asia/Shanghai
 ENV AIE_GRPC_ADDR=:9090
 ENV AIE_CA_DIR=/data/ca
 # migrate 示例: /app/migrate -dir /migrations up

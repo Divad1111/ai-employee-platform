@@ -33,12 +33,17 @@ func TestInfrastructureMaintenancePausesDispatchAndSeesAssignedWork(t *testing.T
 	if _, err := sched.ScheduleJob(ctx, j.ID); err != scheduler.ErrNoWorkstation {
 		t.Fatal(err)
 	}
-	sched.Maintenance = func(context.Context, string) (bool, error) { return false, errors.New("store unavailable") }
-	if _, err := sched.ScheduleJob(ctx, j.ID); err != scheduler.ErrNoWorkstation {
-		t.Fatal("maintenance lookup must fail closed", err)
+	lookupError := errors.New("store unavailable")
+	sched.Maintenance = func(context.Context, string) (bool, error) { return false, lookupError }
+	if got, err := sched.ScheduleJob(ctx, j.ID); !errors.Is(err, lookupError) || got == nil || got.Status != job.StatusFailed {
+		t.Fatal("maintenance lookup errors must fail immediately", got, err)
 	}
 	sched.Maintenance = func(context.Context, string) (bool, error) { return false, nil }
-	if _, err := sched.ScheduleJob(ctx, j.ID); err != nil {
+	next, _, err := jobs.Create(ctx, job.CreateInput{EmployeeID: e.ID, WorkspaceID: "W1", Prompt: "p", IdempotencyKey: "after-maintenance-error"}, "u", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sched.ScheduleJob(ctx, next.ID); err != nil {
 		t.Fatal(err)
 	}
 	busy, err := sched.WorkstationBusy(ctx, "WS-1")

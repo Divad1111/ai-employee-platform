@@ -56,25 +56,11 @@ type InquiryOption struct {
 
 // Inquiry Agent 发出的安全/决策询问
 type Inquiry struct {
+	AllowText bool            `json:"allow_text,omitempty"`
 	SessionID string          `json:"sessionId"`
 	Method    string          `json:"method"`
 	Message   string          `json:"message"`
 	Options   []InquiryOption `json:"options"`
-}
-
-// DefaultOptionID 获取默认选项ID
-func (inq Inquiry) DefaultOptionID() string {
-	// Permission prompts fail closed when the user does not answer.
-	for _, option := range inq.Options {
-		id := strings.ToLower(strings.TrimSpace(option.OptionID))
-		if id == "deny" || id == "decline" || id == "cancel" || id == "reject" || strings.Contains(id, "deny") || strings.Contains(id, "reject") {
-			return option.OptionID
-		}
-	}
-	if len(inq.Options) > 0 && inq.Options[0].OptionID != "" {
-		return inq.Options[0].OptionID
-	}
-	return "allow-once"
 }
 
 // InquiryHandler 询问处理回调
@@ -285,7 +271,7 @@ func (s *StdioSession) Send(ctx context.Context, input []byte) (string, error) {
 		s.mu.Unlock()
 	}()
 
-	blocks, err := PromptBlocks(ctx, string(input))
+	blocks, err := PromptBlocks(ctx, ResultInstructions+"\n\n"+string(input))
 	if err != nil {
 		return "", err
 	}
@@ -302,12 +288,28 @@ func (s *StdioSession) Send(ctx context.Context, input []byte) (string, error) {
 	s.absorbUsage(raw)
 	s.rememberReply(reply)
 	if err != nil {
+		if ctx.Err() != nil {
+			_ = s.Stop(context.Background())
+		}
 		return reply, err
 	}
-	if strings.TrimSpace(reply) == "" {
-		reply = "(agent 未返回文本内容)"
+	var outcome struct {
+		StopReason string `json:"stopReason"`
 	}
-	return reply, nil
+	if json.Unmarshal(raw, &outcome) != nil || outcome.StopReason != "end_turn" {
+		return reply, fmt.Errorf("ACP 任务未完成（stopReason=%q）", outcome.StopReason)
+	}
+	if strings.TrimSpace(reply) == "" {
+		return "", fmt.Errorf("ACP 未返回任务结果")
+	}
+	reply, evidence, err := ReadResult(reply)
+	if err == nil {
+		select {
+		case s.events <- Event{Type: "agent_activity", Payload: []byte("完成核验：" + evidence)}:
+		default:
+		}
+	}
+	return reply, err
 }
 
 func (s *StdioSession) appendReply(text string) {
@@ -515,27 +517,16 @@ func extractUserFacingAgentChunk(params json.RawMessage) string {
 
 // extractUserFacingActivity 只抽取工具与计划状态，不转发思考/推理内容。
 func extractUserFacingActivity(params json.RawMessage) string {
+	type toolUpdate struct{ Title, Kind, Status string }
+	type planEntry struct{ Content, Title, Status string }
 	var u struct {
 		Update struct {
-			SessionUpdate string `json:"sessionUpdate"`
-			ToolCall      struct {
-				Title  string `json:"title"`
-				Kind   string `json:"kind"`
-				Status string `json:"status"`
-			} `json:"toolCall"`
-			ToolCallUpdate struct {
-				Title  string `json:"title"`
-				Kind   string `json:"kind"`
-				Status string `json:"status"`
-			} `json:"toolCallUpdate"`
-			Plan struct {
-				Entries []struct {
-					Content string `json:"content"`
-					Title   string `json:"title"`
-					Status  string `json:"status"`
-				} `json:"entries"`
-			} `json:"plan"`
-		} `json:"update"`
+			SessionUpdate            string
+			Title, Kind, Status      string
+			Entries                  []planEntry
+			ToolCall, ToolCallUpdate toolUpdate
+			Plan                     struct{ Entries []planEntry }
+		}
 	}
 	if json.Unmarshal(params, &u) != nil {
 		return ""
@@ -546,6 +537,9 @@ func extractUserFacingActivity(params json.RawMessage) string {
 		if u.Update.SessionUpdate == "tool_call_update" {
 			tool = u.Update.ToolCallUpdate
 		}
+		if tool == (toolUpdate{}) {
+			tool = toolUpdate{Title: u.Update.Title, Kind: u.Update.Kind, Status: u.Update.Status}
+		}
 		kind := userFacingToolKind(tool.Kind)
 		verb := userFacingToolStatus(tool.Status)
 		if tool.Title != "" {
@@ -554,7 +548,11 @@ func extractUserFacingActivity(params json.RawMessage) string {
 		return verb + kind
 	case "plan":
 		var items []string
-		for _, entry := range u.Update.Plan.Entries {
+		entries := u.Update.Entries
+		if entries == nil {
+			entries = u.Update.Plan.Entries
+		}
+		for _, entry := range entries {
 			if entry.Status != "in_progress" && entry.Status != "pending" {
 				continue
 			}
@@ -627,8 +625,16 @@ func (s *StdioSession) handleInquiryRequest(reqID int64, method string, rawParam
 	if handler != nil {
 		selectedID, err = handler(context.Background(), inq)
 	}
-	if err != nil || selectedID == "" {
-		selectedID = inq.DefaultOptionID()
+	valid := false
+	for _, opt := range inq.Options {
+		if selectedID != "" && opt.OptionID == selectedID {
+			valid = true
+			break
+		}
+	}
+	if err != nil || !valid {
+		_ = s.respond(reqID, map[string]any{"outcome": map[string]string{"outcome": "cancelled"}})
+		return
 	}
 
 	_ = s.respond(reqID, map[string]any{
@@ -645,7 +651,8 @@ func parseInquiry(sessionID, method string, params json.RawMessage) Inquiry {
 		Prompt   string `json:"prompt"`
 		Title    string `json:"title"`
 		ToolCall struct {
-			Name string `json:"name"`
+			Name  string `json:"name"`
+			Title string `json:"title"`
 		} `json:"toolCall"`
 		Options []struct {
 			OptionID string `json:"optionId"`
@@ -670,6 +677,9 @@ func parseInquiry(sessionID, method string, params json.RawMessage) Inquiry {
 	}
 	if msg == "" {
 		msg = body.Title
+	}
+	if msg == "" {
+		msg = body.ToolCall.Title
 	}
 	if msg == "" && body.ToolCall.Name != "" {
 		msg = fmt.Sprintf("AI Agent 请求执行工具调用: %s", body.ToolCall.Name)

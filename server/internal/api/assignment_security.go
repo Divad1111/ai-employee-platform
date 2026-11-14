@@ -16,12 +16,18 @@ func (d Deps) AuthorizeAssignment(ctx context.Context, j *job.Job, e *employee.E
 	if d.Auth == nil || j == nil || e == nil || node == "" {
 		return auth.ErrForbidden
 	}
-	// Provider 与守护进程使用同一 OS 账号，目录校验不能构成租户沙箱。
-	// 生产环境因此禁止把同一工作站的执行账号共享给不同资源所有者。
+	// 非公用生产工作站保持创建者专用；显式设为公用的工作站按下方当前角色/成员授权派发。
+	// 不能在这里一律要求员工与工作站同属一个创建者，否则公用授权永远无法生效。
 	if d.Config != nil && strings.EqualFold(d.Config.Env, "production") {
-		owner := d.workstationCreatedBy(ctx, node)
-		if owner == "" || e.OwnerUserID == "" || e.OwnerUserID != owner {
-			return fmt.Errorf("生产工作站只能运行其创建者名下的员工；不同用户请使用独立工作站与 OS 账号或虚拟机")
+		if d.WSShare == nil {
+			return auth.ErrForbidden
+		}
+		share, err := d.WSShare.Get(ctx, node)
+		if err != nil || share.CreatedBy == "" || e.OwnerUserID == "" {
+			return auth.ErrForbidden
+		}
+		if !share.IsPublic && e.OwnerUserID != share.CreatedBy {
+			return fmt.Errorf("非公用工作站只能运行其创建者名下的员工；请将工作站设为公用并配置角色授权")
 		}
 	}
 	uid := j.CreatedBy

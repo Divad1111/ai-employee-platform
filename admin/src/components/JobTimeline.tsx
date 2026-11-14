@@ -24,6 +24,7 @@ const STATUS_LABEL: Record<string, string> = {
   TIMEOUT: '执行超时',
   BLOCKED: '已受阻',
   WAITING_APPROVAL: '待审批',
+  UNKNOWN: '状态待确认',
   READY: '就绪',
   ERROR: '出错',
 }
@@ -46,6 +47,9 @@ function eventTone(ev: JobEvent): 'danger' | 'success' | 'warning' | 'info' | 'n
     return 'danger'
   }
   if (target === 'SUCCESS' || target === 'READY' || ev.event_type === 'AGENT_REPLY') return 'success'
+  if (ev.event_type === 'INQUIRY_RESOLVED' || ev.event_type === 'APPROVAL_GRANTED') return 'success'
+  if (ev.event_type === 'INQUIRY_DELIVERY_FAILED' || ev.event_type === 'APPROVAL_REJECTED') return 'danger'
+  if (target === 'WAITING_APPROVAL' || ev.event_type === 'INQUIRY_CREATED' || ev.event_type === 'APPROVAL_REQUIRED') return 'warning'
   if (target === 'STARTING' || target === 'RUNNING') return 'warning'
   if (ev.event_type === 'SESSION') return 'info'
   return 'neutral'
@@ -56,6 +60,13 @@ function eventTitle(ev: JobEvent) {
   if (ev.event_type === 'CREATED') return '任务已创建'
   if (ev.event_type === 'FEISHU_RECEIPT') return '飞书收单卡片已送达'
   if (ev.event_type === 'SCHEDULING_BLOCKED') return '调度受阻，等待重试'
+  if (ev.event_type === 'AGENT_ACTIVITY') return '执行过程'
+  if (ev.event_type === 'INQUIRY_CREATED') return '等待玩家确认'
+  if (ev.event_type === 'INQUIRY_RESOLVED') return '玩家已提交回答'
+  if (ev.event_type === 'INQUIRY_DELIVERY_FAILED') return '飞书确认卡发送失败，正在重试'
+  if (ev.event_type === 'APPROVAL_REQUIRED') return '等待操作审批'
+  if (ev.event_type === 'APPROVAL_GRANTED') return '操作审批已通过'
+  if (ev.event_type === 'APPROVAL_REJECTED') return '操作审批已拒绝'
   if (ev.event_type === 'AGENT_REPLY') return 'Agent 回复'
   if (ev.event_type === 'SESSION') {
     return SESSION_LABEL[payload.event] || '会话事件'
@@ -100,6 +111,7 @@ function TimelineItem({ ev, last }: { ev: JobEvent; last: boolean }) {
   const reply = payload.reply || ''
   const error = payload.error || payload.reason || ''
   const tokens = tokenLine(payload)
+  const message = payload.message === 'Job executed successfully' ? '任务执行成功' : payload.message
   const hasRaw = Object.keys(payload).length > 0
 
   return (
@@ -120,7 +132,9 @@ function TimelineItem({ ev, last }: { ev: JobEvent; last: boolean }) {
         </div>
         {error ? <div className="job-tl-error">{error}</div> : null}
         {tokens ? <div className="job-tl-note">{tokens}</div> : null}
-        {payload.message && payload.message !== error ? <div className="job-tl-note">{payload.message}</div> : null}
+        {message && message !== error ? <div className="job-tl-note">{message}</div> : null}
+        {ev.event_type === 'INQUIRY_RESOLVED' && payload.option_name ? <div className="job-tl-note">回答：{payload.option_name}</div> : null}
+        {ev.event_type === 'INQUIRY_RESOLVED' && payload.via ? <div className="job-tl-note">提交方式：{payload.via}</div> : null}
         {reply ? <div className="job-tl-reply">{reply}</div> : null}
         {hasRaw ? (
           <button type="button" className="job-tl-raw-btn" onClick={() => setRaw((v) => !v)}>

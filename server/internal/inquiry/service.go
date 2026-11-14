@@ -4,6 +4,7 @@ package inquiry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/ai-employee-platform/server/internal/statepg"
 	"strconv"
@@ -26,21 +27,25 @@ type InquiryOption struct {
 
 // Inquiry 内存中的待办询问实例
 type Inquiry struct {
-	ID                 string          `json:"id"`
-	JobID              string          `json:"job_id"`
-	WorkstationID      string          `json:"workstation_id"`
-	EmployeeID         string          `json:"employee_id"`
-	ApproverOpenID     string          `json:"approver_open_id"`
-	ChatID             string          `json:"chat_id"`
-	Message            string          `json:"message"`
-	Options            []InquiryOption `json:"options"`
-	Status             string          `json:"status"` // PENDING | RESOLVED | EXPIRED
-	SelectedOptionID   string          `json:"selected_option_id,omitempty"`
-	SelectedOptionName string          `json:"selected_option_name,omitempty"`
-	ResolvedBy         string          `json:"resolved_by,omitempty"`
-	ResolvedVia        string          `json:"resolved_via,omitempty"`
-	CreatedAt          time.Time       `json:"created_at"`
-	ResolvedAt         time.Time       `json:"resolved_at,omitempty"`
+	EmployeeName         string          `json:"employee_name,omitempty"`
+	CardMessageID        string          `json:"card_message_id,omitempty"`
+	SubmittedCardUpdated bool            `json:"submitted_card_updated,omitempty"`
+	AllowText            bool            `json:"allow_text,omitempty"`
+	ID                   string          `json:"id"`
+	JobID                string          `json:"job_id"`
+	WorkstationID        string          `json:"workstation_id"`
+	EmployeeID           string          `json:"employee_id"`
+	ApproverOpenID       string          `json:"approver_open_id"`
+	ChatID               string          `json:"chat_id"`
+	Message              string          `json:"message"`
+	Options              []InquiryOption `json:"options"`
+	Status               string          `json:"status"` // PENDING | RESOLVED | EXPIRED
+	SelectedOptionID     string          `json:"selected_option_id,omitempty"`
+	SelectedOptionName   string          `json:"selected_option_name,omitempty"`
+	ResolvedBy           string          `json:"resolved_by,omitempty"`
+	ResolvedVia          string          `json:"resolved_via,omitempty"`
+	CreatedAt            time.Time       `json:"created_at"`
+	ResolvedAt           time.Time       `json:"resolved_at,omitempty"`
 }
 
 // CommandPusher 下发控制平面指令至工作站
@@ -79,11 +84,13 @@ type Service struct {
 	feishu         *feishu.Service
 	chatResolver   ChatResolver
 	ApproverForJob func(context.Context, string) string
+	OnJobStatus    func(context.Context, string, string, string)
+	UpdateCard     func(context.Context, string, string) error
 }
 
 // NewService 创建 Inquiry 服务
 func NewService(cmd CommandPusher, jm JobManager, eg EmployeeGetter, fs *feishu.Service, cr ChatResolver) *Service {
-	return &Service{
+	s := &Service{
 		inquiries:    make(map[string]*Inquiry),
 		byChat:       make(map[string]*Inquiry),
 		byJob:        make(map[string]*Inquiry),
@@ -93,6 +100,18 @@ func NewService(cmd CommandPusher, jm JobManager, eg EmployeeGetter, fs *feishu.
 		feishu:       fs,
 		chatResolver: cr,
 	}
+	if fs != nil {
+		s.UpdateCard = fs.PatchMessageCard
+	}
+	return s
+}
+
+func (s *Service) transition(ctx context.Context, id, status, actor, source string, meta map[string]string) error {
+	_, err := s.jobs.Transition(ctx, id, status, actor, source, meta)
+	if err == nil && s.OnJobStatus != nil {
+		s.OnJobStatus(ctx, id, status, "")
+	}
+	return err
 }
 
 // HandleInquiryEvent 处理工作站上报的 EVENT_TYPE_JOB_INQUIRY 事件
@@ -101,6 +120,7 @@ func (s *Service) HandleInquiryEvent(ctx context.Context, wsID string, ev *aiev1
 		return
 	}
 	var payload struct {
+		AllowText  bool            `json:"allow_text"`
 		InquiryID  string          `json:"inquiry_id"`
 		JobID      string          `json:"job_id"`
 		EmployeeID string          `json:"employee_id"`
@@ -128,7 +148,7 @@ func (s *Service) HandleInquiryEvent(ctx context.Context, wsID string, ev *aiev1
 		msgText = "AI Agent 请求确认操作/执行策略"
 	}
 	options := payload.Options
-	if len(options) == 0 {
+	if len(options) == 0 && !payload.AllowText {
 		options = []InquiryOption{
 			{OptionID: "allow-once", Name: "允许本次执行"},
 			{OptionID: "deny", Name: "拒绝执行"},
@@ -164,7 +184,9 @@ func (s *Service) HandleInquiryEvent(ctx context.Context, wsID string, ev *aiev1
 	}
 
 	inq := &Inquiry{
+		EmployeeName:   empName,
 		ID:             inquiryID,
+		AllowText:      payload.AllowText,
 		ApproverOpenID: approver,
 		JobID:          jobID,
 		WorkstationID:  wsID,
@@ -218,9 +240,11 @@ func (s *Service) HandleInquiryEvent(ctx context.Context, wsID string, ev *aiev1
 
 	// 任务状态机切为 WAITING_APPROVAL
 	if s.jobs != nil && jobID != "" {
-		_, _ = s.jobs.Transition(ctx, jobID, job.StatusWaitingApproval, "workstation_inquiry", wsID, map[string]string{
+		if err := s.transition(ctx, jobID, job.StatusWaitingApproval, "workstation_inquiry", wsID, map[string]string{
 			"inquiry_id": inquiryID,
-		})
+		}); err != nil {
+			return
+		}
 		_ = s.jobs.AppendEvent(ctx, jobID, "INQUIRY_CREATED", map[string]string{
 			"inquiry_id": inquiryID,
 			"message":    msgText,
@@ -233,17 +257,58 @@ func (s *Service) HandleInquiryEvent(ctx context.Context, wsID string, ev *aiev1
 		for i, o := range options {
 			cardOpts[i] = feishu.InquiryCardOption{OptionID: o.OptionID, Name: o.Name}
 		}
-		card := feishu.BuildInquiryCard(jobID, empName, inquiryID, msgText, cardOpts)
-		var err error
-		if s.feishu.Sender != nil {
-			err = s.feishu.Sender.Send(ctx, feishu.Reply{ChatID: chatID, Content: card.MustJSON()})
-		} else {
-			_, err = s.feishu.SendCard(ctx, "", chatID, card)
+		card := feishu.BuildInquiryCard(jobID, empName, inquiryID, msgText, cardOpts, inq.AllowText)
+		send := func(ctx context.Context) error {
+			_, sdkSender := s.feishu.Sender.(*feishu.SDKSender)
+			if s.feishu.Sender != nil && !sdkSender {
+				return s.feishu.Sender.Send(ctx, feishu.Reply{ChatID: chatID, Content: card.MustJSON()})
+			}
+			result, err := s.feishu.SendMessageWithKey(ctx, "", chatID, card.MustJSON(), inquiryID)
+			if err != nil {
+				return err
+			}
+			if result != nil && result.MessageID != "" {
+				return s.rememberCard(ctx, inquiryID, result.MessageID)
+			}
+			return fmt.Errorf("飞书未返回确认卡片 message_id")
 		}
+		deliveryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		err := send(deliveryCtx)
+		cancel()
 		if err != nil {
+			_ = s.jobs.AppendEvent(ctx, jobID, "INQUIRY_DELIVERY_FAILED", map[string]string{"inquiry_id": inquiryID, "message": "飞书确认卡发送失败，正在重试"})
+			go s.retryCard(ctx, inquiryID, send)
 			fmt.Printf("[Inquiry] ⚠️ 发送飞书选项卡片失败 (chat=%s): %v\n", chatID, err)
 		} else {
 			fmt.Printf("[Inquiry] 🔔 成功向飞书发送决策请示卡片: inq=%s, job=%s, chat=%s\n", inquiryID, jobID, chatID)
+		}
+	}
+}
+
+// A duplicate delivery carries the same inquiry ID and can only be answered once.
+func (s *Service) retryCard(ctx context.Context, id string, send func(context.Context) error) {
+	for delay := 3 * time.Second; ; delay = min(delay*2, 30*time.Second) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		inq := s.GetInquiry(id)
+		if inq == nil || inq.Status != "PENDING" || time.Since(inq.CreatedAt) >= 10*time.Minute {
+			return
+		}
+		j, err := s.jobs.Get(ctx, inq.JobID)
+		if err != nil {
+			continue
+		}
+		if j == nil || j.Status != job.StatusWaitingApproval {
+			return
+		}
+		attempt, cancel := context.WithTimeout(ctx, 8*time.Second)
+		err = send(attempt)
+		cancel()
+		if err == nil {
+			return
 		}
 	}
 }
@@ -254,26 +319,43 @@ func (s *Service) HandleCardAction(ctx context.Context, event *callback.CardActi
 		return &callback.CardActionTriggerResponse{}, nil
 	}
 
-	val := event.Event.Action.Value
-	if val == nil {
-		return &callback.CardActionTriggerResponse{}, nil
-	}
+	action := event.Event.Action
+	val := action.Value
 	act, _ := val["action"].(string)
-	if act != "resolve_inquiry" {
-		return &callback.CardActionTriggerResponse{}, nil
-	}
-
 	inquiryID, _ := val["inquiry_id"].(string)
 	optionID, _ := val["option_id"].(string)
 	optionName, _ := val["option_name"].(string)
+	via := "飞书卡片按钮点击"
+	if strings.HasPrefix(action.Name, feishu.InquiryTextSubmitPrefix) && action.Tag == "button" {
+		inquiryID = strings.TrimPrefix(action.Name, feishu.InquiryTextSubmitPrefix)
+		answer, ok := action.FormValue[feishu.InquiryAnswerField].(string)
+		if !ok || strings.TrimSpace(answer) == "" || len([]rune(answer)) > 1000 {
+			return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "warning", Content: "请输入 1 至 1000 字的回答后提交"}}, nil
+		}
+		optionID = "text:" + answer
+		via = "飞书卡片输入框"
+	} else if act != "resolve_inquiry" {
+		return &callback.CardActionTriggerResponse{}, nil
+	}
 
 	openID := ""
 	if event.Event.Operator != nil {
 		openID = event.Event.Operator.OpenID
 	}
+	// Older persisted inquiries may not have captured their original message ID.
+	if event.Event.Context != nil {
+		if pending := s.GetInquiry(inquiryID); pending != nil && pending.ApproverOpenID == openID && pending.CardMessageID == "" && event.Event.Context.OpenMessageID != "" {
+			if err := s.rememberCard(ctx, inquiryID, event.Event.Context.OpenMessageID); err != nil {
+				return nil, err
+			}
+		}
+	}
 
-	inq, err := s.ResolveInquiry(ctx, inquiryID, optionID, optionName, openID, "飞书卡片按钮点击")
+	inq, err := s.ResolveInquiry(ctx, inquiryID, optionID, optionName, openID, via)
 	if err != nil {
+		if inq != nil && inq.Status == "RESOLVED" {
+			s.updateSubmittedCard(*inq)
+		}
 		return &callback.CardActionTriggerResponse{
 			Toast: &callback.Toast{
 				Type:    "warning",
@@ -283,7 +365,11 @@ func (s *Service) HandleCardAction(ctx context.Context, event *callback.CardActi
 	}
 
 	// 告知飞书客户端成功提示
-	toastText := fmt.Sprintf("已成功选择【%s】，已指令工作站继续执行！", inq.SelectedOptionName)
+	answerPreview := []rune(inq.SelectedOptionName)
+	if len(answerPreview) > 80 {
+		answerPreview = answerPreview[:80]
+	}
+	toastText := "已提交：" + string(answerPreview)
 	return &callback.CardActionTriggerResponse{
 		Toast: &callback.Toast{
 			Type:    "success",
@@ -305,7 +391,12 @@ func (s *Service) CheckChatReply(ctx context.Context, chatID, text, senderOpenID
 		return false, nil
 	}
 	s.mu.RLock()
-	inq := s.inquiries[parts[0]]
+	original := s.inquiries[parts[0]]
+	var inq *Inquiry
+	if original != nil {
+		snapshot := *original
+		inq = &snapshot
+	}
 	s.mu.RUnlock()
 	if inq == nil || (inq.ChatID != chatID && inq.ChatID != senderOpenID) {
 		return false, nil
@@ -318,18 +409,22 @@ func (s *Service) CheckChatReply(ctx context.Context, chatID, text, senderOpenID
 
 	// 匹配选项
 	matchedOpt, ok := matchOption(text, inq.Options)
+	if !ok && inq.AllowText && len([]rune(text)) <= 2000 {
+		matchedOpt = InquiryOption{OptionID: "text:" + text, Name: text}
+		ok = true
+	}
 	if !ok {
 		return false, nil
 	}
 
 	_, err := s.ResolveInquiry(ctx, inq.ID, matchedOpt.OptionID, matchedOpt.Name, senderOpenID, "飞书会话直接回复")
 	if err != nil {
-		return false, err
+		return true, err
 	}
 
 	// 在会话中回复确认反馈
 	if s.feishu != nil && chatID != "" {
-		replyText := fmt.Sprintf("✅ 收到回复确认：已选择【%s】，已指令工作站继续执行任务。", matchedOpt.Name)
+		replyText := fmt.Sprintf("✅ 收到回复确认：已选择【%s】，已提交选择，工作站将继续执行任务。", matchedOpt.Name)
 		if s.feishu.Sender != nil {
 			_ = s.feishu.Sender.Send(ctx, feishu.Reply{ChatID: chatID, Content: replyText})
 		} else {
@@ -350,7 +445,7 @@ func (s *Service) ResolveInquiry(ctx context.Context, inquiryID, optionID, optio
 	}
 	if inq.Status != "PENDING" {
 		s.mu.Unlock()
-		return inq, fmt.Errorf("请示 %s 已于 %s 完成处理 (状态=%s)", inquiryID, inq.ResolvedAt.Format("15:04:05"), inq.Status)
+		return inq, fmt.Errorf("请示 %s 已于 %s 完成处理 (状态=%s)", inquiryID, feishu.FormatCardTime(inq.ResolvedAt), inq.Status)
 	}
 
 	if s.byJob[inq.JobID] != inq {
@@ -383,85 +478,58 @@ func (s *Service) ResolveInquiry(ctx context.Context, inquiryID, optionID, optio
 			break
 		}
 	}
+	if inq.AllowText && strings.HasPrefix(optionID, "text:") {
+		optionName = strings.TrimSpace(strings.TrimPrefix(optionID, "text:"))
+		validOption = optionName != "" && len([]rune(optionName)) <= 2000
+	}
 	if !validOption {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("无效选项")
 	}
-	if optionName == "" {
-		for _, o := range inq.Options {
-			if o.OptionID == optionID {
-				optionName = o.Name
-				break
-			}
-		}
+	if s.commands == nil {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("工作站命令队列不可用")
 	}
-	if optionName == "" {
-		optionName = optionID
-	}
-
+	next := *inq
+	next.Status = "RESOLVED"
+	next.SelectedOptionID, next.SelectedOptionName = optionID, optionName
+	next.ResolvedBy, next.ResolvedVia, next.ResolvedAt = actor, via, time.Now().UTC()
 	if s.Persistent != nil {
-		next := *inq
-		next.Status = "RESOLVED"
-		next.SelectedOptionID = optionID
-		next.SelectedOptionName = optionName
-		next.ResolvedBy = actor
-		next.ResolvedAt = time.Now().UTC()
 		claimed, err := s.Persistent.ResolvePending(ctx, inq.ID, &next)
 		if err != nil || !claimed {
 			s.mu.Unlock()
 			return nil, fmt.Errorf("请示已处理或持久化不可用")
 		}
 	}
-	inq.Status = "RESOLVED"
-	inq.SelectedOptionID = optionID
-	inq.SelectedOptionName = optionName
-	inq.ResolvedBy = actor
-	inq.ResolvedVia = via
-	inq.ResolvedAt = time.Now().UTC()
-
-	if inq.ChatID != "" && s.byChat[inq.ChatID] == inq {
-		delete(s.byChat, inq.ChatID)
-	}
-	if inq.JobID != "" && s.byJob[inq.JobID] == inq {
-		delete(s.byJob, inq.JobID)
-	}
-	s.mu.Unlock()
-
-	// 1. 向工作站推送 COMMAND_TYPE_RESOLVE_INQUIRY 指令
-	if s.commands != nil && inq.WorkstationID != "" {
-		payload, _ := json.Marshal(map[string]any{
-			"inquiry_id":           inq.ID,
-			"selected_option_id":   optionID,
-			"selected_option_name": optionName,
-			"resolved_by":          actor,
-			"resolved_via":         via,
-		})
-		_, err := s.commands.PushCommand(inq.WorkstationID, aiev1.CommandType_COMMAND_TYPE_RESOLVE_INQUIRY, inq.EmployeeID, inq.JobID, string(payload))
-		if err != nil {
-			fmt.Printf("[Inquiry] ⚠️ 下发选项指令至工作站失败 (ws=%s, inq=%s): %v\n", inq.WorkstationID, inq.ID, err)
-		} else {
-			fmt.Printf("[Inquiry] 🚀 成功下发选项指令至工作站: ws=%s, inq=%s, option=%s(%s)\n", inq.WorkstationID, inq.ID, optionName, optionID)
+	meta := map[string]string{"inquiry_id": inq.ID, "option_id": optionID, "option_name": optionName, "by": actor, "via": via}
+	// A quick answer can finish the job as soon as the worker receives the command.
+	if err = s.transition(ctx, inq.JobID, job.StatusRunning, "inquiry_resolved", actor, meta); err == nil {
+		payload, _ := json.Marshal(map[string]string{"inquiry_id": inq.ID, "selected_option_id": optionID, "selected_option_name": optionName, "resolved_by": actor, "resolved_via": via})
+		cmd, pushErr := s.commands.PushCommand(inq.WorkstationID, aiev1.CommandType_COMMAND_TYPE_RESOLVE_INQUIRY, inq.EmployeeID, inq.JobID, string(payload))
+		// A non-nil command has already been queued, including for reconnect.
+		if pushErr != nil && cmd == nil {
+			rollbackErr := s.transition(ctx, inq.JobID, job.StatusWaitingApproval, "inquiry_retry", actor, meta)
+			err = errors.Join(pushErr, rollbackErr)
 		}
 	}
-
-	// 2. 任务状态机恢复为 RUNNING
-	if s.jobs != nil && inq.JobID != "" {
-		_, _ = s.jobs.Transition(ctx, inq.JobID, job.StatusRunning, "inquiry_resolved", actor, map[string]string{
-			"inquiry_id":  inq.ID,
-			"option_id":   optionID,
-			"option_name": optionName,
-			"via":         via,
-		})
-		_ = s.jobs.AppendEvent(ctx, inq.JobID, "INQUIRY_RESOLVED", map[string]string{
-			"inquiry_id":  inq.ID,
-			"option_id":   optionID,
-			"option_name": optionName,
-			"by":          actor,
-			"via":         via,
-		})
+	if err != nil {
+		if s.Persistent != nil {
+			err = errors.Join(err, s.Persistent.Put(ctx, inq.ID, inq))
+		}
+		s.mu.Unlock()
+		return nil, fmt.Errorf("未能下发选择：%w", err)
 	}
+	*inq = next
+	if s.byChat[inq.ChatID] == inq {
+		delete(s.byChat, inq.ChatID)
+	}
+	delete(s.byJob, inq.JobID)
+	resolved := *inq
+	s.mu.Unlock()
+	_ = s.jobs.AppendEvent(ctx, inq.JobID, "INQUIRY_RESOLVED", meta)
+	s.updateSubmittedCard(resolved)
 
-	return inq, nil
+	return &resolved, nil
 }
 
 // GetInquiry 获取指定 Inquiry
@@ -498,16 +566,16 @@ func matchOption(input string, options []InquiryOption) (InquiryOption, bool) {
 		}
 	}
 
-	// 3. 子串模糊匹配 (如 "选择允许", "拒绝执行")
-	for _, opt := range options {
-		if opt.Name != "" && (strings.Contains(clean, opt.Name) || strings.Contains(opt.Name, clean)) {
-			return opt, true
-		}
-		if opt.OptionID != "" && strings.Contains(lowerClean, strings.ToLower(opt.OptionID)) {
-			return opt, true
+	// Accept explicit choice wording, never interpret negation as approval.
+	for _, prefix := range []string{"我选择", "我选", "选择"} {
+		if value, ok := strings.CutPrefix(clean, prefix); ok {
+			for _, opt := range options {
+				if strings.TrimSpace(value) == opt.Name {
+					return opt, true
+				}
+			}
 		}
 	}
-
 	return InquiryOption{}, false
 }
 
@@ -522,6 +590,13 @@ func (s *Service) SetPersistentStore(ctx context.Context, data *statepg.Collecti
 		var inq Inquiry
 		if err = json.Unmarshal(b, &inq); err != nil {
 			return err
+		}
+		if inq.Status == "RESOLVED" {
+			s.inquiries[inq.ID] = &inq
+			if !inq.SubmittedCardUpdated {
+				s.updateSubmittedCard(inq)
+			}
+			continue
 		}
 		if inq.Status != "PENDING" || time.Since(inq.CreatedAt) > 10*time.Minute {
 			continue

@@ -605,6 +605,9 @@ func (d *Daemon) handleCommand(ctx context.Context, sess *grpcclient.Session, cm
 				if reply != "" {
 					d.stageJobArtifact(jobID, "result-partial.md", "md", []byte(reply))
 				}
+				if d.Runtime.SessionReady(sessID) {
+					_ = sess.EnqueueEvent(d.newEvent(jobID, sessID, empID, aiev1.EventType_EVENT_TYPE_SESSION_READY, `{"status":"READY"}`))
+				}
 				return
 			}
 			usage["status"] = "success"
@@ -701,7 +704,7 @@ func (d *Daemon) resolveInquiry(inquiryID, optionID string) {
 func (d *Daemon) handleAgentInquiry(ctx context.Context, jobID, empID string, inq acp.Inquiry) (string, error) {
 	sess := d.getActiveSession()
 	if sess == nil {
-		return inq.DefaultOptionID(), nil
+		return "", fmt.Errorf("工作站未连接，无法请求确认")
 	}
 	inquiryID := fmt.Sprintf("INQ-%s-%d", jobID, time.Now().UnixNano())
 	ch := make(chan string, 1)
@@ -721,21 +724,22 @@ func (d *Daemon) handleAgentInquiry(ctx context.Context, jobID, empID string, in
 		"job_id":      jobID,
 		"employee_id": empID,
 		"message":     inq.Message,
+		"allow_text":  inq.AllowText,
 		"options":     inq.Options,
 	})
 	ev := d.newEvent(jobID, inq.SessionID, empID, aiev1.EventType_EVENT_TYPE_JOB_INQUIRY, string(payload))
 	if err := sess.EnqueueEvent(ev); err != nil {
-		return inq.DefaultOptionID(), nil
+		return "", err
 	}
 
 	select {
 	case <-ctx.Done():
-		return inq.DefaultOptionID(), ctx.Err()
+		return "", ctx.Err()
 	case <-time.After(15 * time.Minute):
-		return inq.DefaultOptionID(), fmt.Errorf("询问 %s 等待用户超时", inquiryID)
+		return "", fmt.Errorf("询问 %s 等待用户超时", inquiryID)
 	case opt := <-ch:
 		if opt == "" {
-			return inq.DefaultOptionID(), nil
+			return "", fmt.Errorf("没有收到玩家选择")
 		}
 		return opt, nil
 	}
@@ -969,7 +973,7 @@ func (d *Daemon) installedProviders(ctx context.Context) []string {
 
 // promptWithMarkdownDefault 文本回复默认 Markdown，用户明确要求其他格式时仍以用户要求为准。
 func promptWithMarkdownDefault(prompt string) string {
-	const note = "【输出格式】文本回复与任务制品默认使用 Markdown（标题、列表、表格、代码块）。仅当用户明确要求纯文本、JSON、HTML 或其他格式时，才按该要求输出。"
+	const note = "执行类任务请实际操作并核验用户要求的结果，在最终回复中给出可核对的结果或未完成的原因。需要玩家选择时通过交互询问，等待答复后继续。\n【输出格式】文本回复与任务制品默认使用 Markdown（标题、列表、表格、代码块）。仅当用户明确要求纯文本、JSON、HTML 或其他格式时，才按该要求输出。"
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return note
