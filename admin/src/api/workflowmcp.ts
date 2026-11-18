@@ -38,6 +38,7 @@ export type KnowledgeDoc = {
 }
 
 export type MCPToken = {
+  service?: string
   id: string
   subject_type: string
   subject_id: string
@@ -45,6 +46,8 @@ export type MCPToken = {
   label: string
   created_at: string
   revoked_at?: string
+  expires_at?: string
+  last_used_at?: string
 }
 
 export async function listWorkflows() {

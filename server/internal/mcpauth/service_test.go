@@ -9,6 +9,28 @@ import (
 	"github.com/ai-employee-platform/server/internal/mcpauth"
 )
 
+func TestRevocationSurvivesStaleUsageUpdate(t *testing.T) {
+	ctx := context.Background()
+	store := mcpauth.NewMemoryStore()
+	svc := mcpauth.NewService(store)
+	issued, err := svc.Issue(ctx, mcpauth.SubjectExternalUser, "user", mcpauth.ScopeRead, "export", "user", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := store.GetByID(ctx, issued.Token.ID)
+	if err := svc.Revoke(ctx, issued.Token.ID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	stale.LastUsedAt = &now
+	if err := store.Update(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Validate(ctx, issued.Secret); err != mcpauth.ErrRevoked {
+		t.Fatal("a concurrent usage update revived a revoked token")
+	}
+}
+
 func TestTokenIssueAndValidate(t *testing.T) {
 	ctx := context.Background()
 	store := mcpauth.NewMemoryStore()

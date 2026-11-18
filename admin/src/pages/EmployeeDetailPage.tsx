@@ -26,6 +26,7 @@ import { StatusBadge } from '../components/StatusBadge'
 import { EntityName } from '../components/EntityName'
 import { IconAlertTriangle } from '../components/Icons'
 import { SearchableSelect } from '../components/SearchableSelect'
+import { AlertDialog } from '../components/AlertDialog'
 
 /** Provider 中文名在选项里按工作站上报动态生成。 */
 
@@ -118,6 +119,7 @@ export function EmployeeDetailPage() {
   const [selectedServerId, setSelectedServerId] = useState('')
   const [selectedCredId, setSelectedCredId] = useState('')
   const [mcpBindingSubmitting, setMcpBindingSubmitting] = useState(false)
+  const [mcpBindingError, setMcpBindingError] = useState('')
 
   const checkTotpStatus = () => {
     void apiGet<{ enabled: boolean }>('/auth/totp')
@@ -349,6 +351,8 @@ export function EmployeeDetailPage() {
     if (!id || !selectedServerId) return
     setMcpBindingSubmitting(true)
     setError('')
+    setMsg('')
+    setMcpBindingError('')
     try {
       await bindEmployeeMCP(id, {
         mcp_server_id: selectedServerId,
@@ -361,7 +365,7 @@ export function EmployeeDetailPage() {
       const bRes = await listEmployeeMCPBindings(id)
       setMcpBindings(bRes.items ?? [])
     } catch (err) {
-      setError(err instanceof Error ? err.message : '绑定 MCP 失败')
+      setMcpBindingError(err instanceof Error ? err.message : '绑定 MCP 失败')
     } finally {
       setMcpBindingSubmitting(false)
     }
@@ -1198,6 +1202,13 @@ export function EmployeeDetailPage() {
           </div>
         </div>
       ) : null}
+      <AlertDialog
+        open={!!mcpBindingError}
+        title="绑定 MCP 能力失败"
+        message={mcpBindingError}
+        variant="error"
+        onClose={() => setMcpBindingError('')}
+      />
     </section>
   )
 }

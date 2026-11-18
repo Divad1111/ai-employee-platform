@@ -1096,6 +1096,33 @@ button:disabled, .btn:disabled {
   gap: 0.6rem;
 }
 
+.alert-dialog-error {
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
+  border-radius: 16px;
+}
+
+.alert-dialog-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 12px;
+  color: #dc2626;
+  background: #fef2f2;
+}
+
+.alert-dialog-error .auto-modal-desc {
+  padding: 0.85rem 1rem;
+  border-radius: 10px;
+  background: #f8fafc;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+}
+
 /* 链接与单据代码样式 */
 a {
   color: var(--brand-600);
@@ -1314,6 +1341,25 @@ a:hover {
   display: flex;
   flex-direction: column;
   gap: 1.15rem;
+}
+
+.credential-modal-form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.credential-modal-form .modal-footer {
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.credential-modal-form .modal-footer .error {
+  flex-basis: 100%;
+  margin: 0;
+  max-height: 6rem;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
 }
 
 .modal-actions,

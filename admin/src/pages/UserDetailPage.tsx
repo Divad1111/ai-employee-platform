@@ -7,6 +7,8 @@ import { apiGet, apiPatch, apiPost } from '../api/client'
 import { roleDisplayName } from '../lib/rbacLabels'
 import { usePerm } from '../stores/permissions'
 import { clearSession } from '../stores/session'
+import { McpUserAccess } from './mcp/McpUserAccess'
+import { CollectorIdentity } from './collector/CollectorIdentity'
 import './UserDetailPage.css'
 
 type Detail = {
@@ -210,6 +212,11 @@ export function UserDetailPage({ self = false }: { self?: boolean }) {
         </div>
       </div>
 
+      {(isSelf || ((iAmSuper || myRoles.includes('ADMIN')) && canAll('user.update'))) &&
+        <McpUserAccess key={d.id} userId={d.id} isSelf={isSelf}
+          canManage={(iAmSuper || myRoles.includes('ADMIN')) && canAll('user.update') && (!targetIsSuper || iAmSuper)} />}
+
+      {isSelf && <CollectorIdentity />}
       {canResetPassword && <section className="panel" aria-labelledby="reset-password-title">
         <div className="panel-header">
           <div>

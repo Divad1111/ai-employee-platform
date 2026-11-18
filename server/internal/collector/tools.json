@@ -1,0 +1,1809 @@
+[
+  {
+    "name": "get_my_workload",
+    "description": "汇总本人配置的 Jira、飞书表格、多维表格和飞书项目的在办事项；基于最近成功采集快照。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "today",
+            "this_week",
+            "overdue",
+            "all"
+          ]
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "list_due_soon",
+    "description": "列出本人采集快照中未来 N 天内到期及已经逾期的事项；未指定 days 或为负数时默认 7 天。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "days": {
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "get_daily_brief",
+    "description": "今日简报：今天到期、已逾期、以及昨天至今的变更事件。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "list_sheet_targets",
+    "description": "列出 扫描目标 中配置的全部文档/工作表及其关注列。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "list_sheet_rows",
+    "description": "读取飞书表格行。默认从本人快照读取；refresh=true 或 only_mine=false 时实时读取，不改动扫描基线或发送通知。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sheet_id": {
+          "type": "string"
+        },
+        "only_mine": {
+          "type": "boolean"
+        },
+        "refresh": {
+          "type": "boolean"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "get_feishu_wiki_node",
+    "description": "解析飞书 Wiki/表格 URL（或 wiki token），返回节点元数据（标题、obj_type、obj_token 等）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "list_feishu_wiki_children",
+    "description": "列出 Wiki 知识空间下一层子节点。可传父节点 url（自动解析 space_id），或显式 space_id + parent_node_token。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "space_id": {
+          "type": "string"
+        },
+        "parent_node_token": {
+          "type": "string"
+        },
+        "page_size": {
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "discover_feishu_wiki_tree",
+    "description": "递归发现某 Wiki 目录下的文档/表格。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "obj_types": {
+          "type": "string"
+        },
+        "max_nodes": {
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "search_feishu_wiki",
+    "description": "Wiki 知识检索（供自动问答）。按问题匹配标题/正文/表格单元格，返回相关片段。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "question": {
+          "type": "string"
+        },
+        "root_url": {
+          "type": "string"
+        },
+        "include_configured": {
+          "type": "boolean"
+        },
+        "read_content": {
+          "type": "boolean"
+        },
+        "include_sheets": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "max_nodes": {
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "question"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "list_feishu_wiki_docs",
+    "description": "列出后台配置的 Wiki 文档与搜索目录；refresh=true 时实时补全标题与类型。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "refresh": {
+          "type": "boolean"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "read_feishu_wiki_doc",
+    "description": "按 URL 或 wiki.yaml 中名称读取 Wiki 文档正文，并可附带画板内容。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "include_whiteboards": {
+          "type": "boolean"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "read_feishu_sheet",
+    "description": "按 URL 或 扫描目标 中的文档/工作表名称读取飞书表格行。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "only_mine": {
+          "type": "boolean"
+        },
+        "refresh": {
+          "type": "boolean"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "read_feishu_sheet_metainfo",
+    "description": "读取飞书电子表格布局元信息（合并单元格、冻结行列、各 sheet 尺寸）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "spreadsheet_token": {
+          "type": "string"
+        },
+        "sheet_id": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "list_feishu_sheet_tabs",
+    "description": "列出飞书电子表格工作簿内全部工作表 Tab。url 与 spreadsheet_token 二选一；url 支持 wiki/sheets 链接。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "spreadsheet_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "list_recent_events",
+    "description": "列出 个人采集记录 中最近入库的变更事件。source 可选 jira/sheet/meego/bitable/feishu_im。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "since": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "whoami",
+    "description": "审查当前 平台用户及其配置完整度（token 掩码显示）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "list_people",
+    "description": "列出所有已配置 person 的配置完整度体检（敏感字段掩码）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "list_api_access_logs",
+    "description": "查询本人 MCP 调用审计记录。day 默认按个人时区取今天；为保护用户隔离，only_me=false 也不会返回他人的日志。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "day": {
+          "type": "string"
+        },
+        "who": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "only_me": {
+          "type": "boolean"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "get_collector_status",
+    "description": "查看采集器健康状态：游标、快照时间、OAuth、事件计数。用于判断数据是否新鲜。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "send_feishu_message",
+    "description": "给飞书用户发文本消息（应用机器人私聊）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "to_person": {
+          "type": "string"
+        },
+        "open_id": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "send_feishu_card",
+    "description": "发送飞书交互卡片（标题+正文，可选跳转按钮）。可私聊或群聊。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "to_person": {
+          "type": "string"
+        },
+        "open_id": {
+          "type": "string"
+        },
+        "chat_id": {
+          "type": "string"
+        },
+        "button_text": {
+          "type": "string"
+        },
+        "button_url": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "send_feishu_group_message",
+    "description": "向指定群 chat_id 发送文本（应用机器人需在群内）。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chat_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chat_id",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "reply_feishu_message",
+    "description": "回复某条飞书消息（话题/线程）。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "message_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message_id",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "send_feishu_image",
+    "description": "上传本地图片并用机器人发送。image_path 为容器/主机可读路径。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "image_path": {
+          "type": "string"
+        },
+        "to_person": {
+          "type": "string"
+        },
+        "open_id": {
+          "type": "string"
+        },
+        "chat_id": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "file_base64": {
+          "type": "string",
+          "description": "上传文件的 Base64 内容；不会读取服务端或客户端磁盘路径。"
+        },
+        "file_name": {
+          "type": "string"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_base64",
+        "file_name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "send_feishu_file",
+    "description": "上传本地文件并用机器人发送。file_type 常见: opus/mp4/pdf/doc/xls/ppt/stream。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string"
+        },
+        "to_person": {
+          "type": "string"
+        },
+        "open_id": {
+          "type": "string"
+        },
+        "chat_id": {
+          "type": "string"
+        },
+        "file_type": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "file_base64": {
+          "type": "string",
+          "description": "上传文件的 Base64 内容；不会读取服务端或客户端磁盘路径。"
+        },
+        "file_name": {
+          "type": "string"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_base64",
+        "file_name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "search_feishu_user",
+    "description": "按关键字搜索同事，或用邮箱/手机 batch_get_id 解析 open_id。emails/mobiles 用逗号分隔。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "emails": {
+          "type": "string"
+        },
+        "mobiles": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "list_feishu_busy",
+    "description": "查询忙闲。time_min/time_max 为 RFC3339；user_open_ids 逗号分隔 open_id。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "time_min": {
+          "type": "string"
+        },
+        "time_max": {
+          "type": "string"
+        },
+        "user_open_ids": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "time_min",
+        "time_max",
+        "user_open_ids"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "create_feishu_event",
+    "description": "创建飞书日程（秒级时间戳字符串）。可邀请 attendee_open_ids（逗号分隔）。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "start_timestamp": {
+          "type": "string"
+        },
+        "end_timestamp": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "calendar_id": {
+          "type": "string"
+        },
+        "attendee_open_ids": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary",
+        "start_timestamp",
+        "end_timestamp"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "list_feishu_tasks",
+    "description": "列出飞书任务（应用可见范围）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "page_size": {
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "create_feishu_task",
+    "description": "创建飞书任务。assignee_open_ids 逗号分隔。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "due_timestamp": {
+          "type": "string"
+        },
+        "assignee_open_ids": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "append_feishu_docx",
+    "description": "在飞书新版文档末尾追加一段纯文本。document_id 一般为 docx obj_token。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "document_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "document_id",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "write_feishu_sheet",
+    "description": "写飞书电子表格。values_json 为二维数组 JSON，如 [[\"a\",\"b\"],[\"c\",\"d\"]]。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "spreadsheet_token": {
+          "type": "string"
+        },
+        "range_a1": {
+          "type": "string"
+        },
+        "values_json": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "spreadsheet_token",
+        "range_a1",
+        "values_json"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "write_feishu_sheet_styles",
+    "description": "批量设置飞书电子表格单元格样式（styles_batch_update）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "spreadsheet_token": {
+          "type": "string"
+        },
+        "styles_json": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "spreadsheet_token",
+        "styles_json"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "merge_feishu_sheet_cells",
+    "description": "合并飞书电子表格单元格。merge_type: MERGE_ALL / MERGE_ROWS / MERGE_COLUMNS。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "spreadsheet_token": {
+          "type": "string"
+        },
+        "range_a1": {
+          "type": "string"
+        },
+        "merge_type": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "spreadsheet_token",
+        "range_a1"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "unmerge_feishu_sheet_cells",
+    "description": "拆分飞书电子表格已合并的单元格。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "spreadsheet_token": {
+          "type": "string"
+        },
+        "range_a1": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "spreadsheet_token",
+        "range_a1"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "create_feishu_sheet_tab",
+    "description": "在工作簿中新增工作表 Tab。spreadsheet_token 与 url 二选一。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "spreadsheet_token": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "delete_feishu_sheet_tab",
+    "description": "删除工作簿内指定 sheet_id 的工作表 Tab。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sheet_id": {
+          "type": "string"
+        },
+        "spreadsheet_token": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sheet_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true
+    }
+  },
+  {
+    "name": "rename_feishu_sheet_tab",
+    "description": "重命名工作表 Tab。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sheet_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "spreadsheet_token": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sheet_id",
+        "title"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "create_feishu_wiki_node",
+    "description": "在 Wiki 知识空间指定父节点下创建子节点（docx/sheet 等）。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "space_id": {
+          "type": "string"
+        },
+        "parent_node_token": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "obj_type": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "space_id",
+        "parent_node_token",
+        "title"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "move_feishu_wiki_node",
+    "description": "移动 Wiki 节点到另一父节点。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "space_id": {
+          "type": "string"
+        },
+        "node_token": {
+          "type": "string"
+        },
+        "target_parent_token": {
+          "type": "string"
+        },
+        "target_space_id": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "space_id",
+        "node_token",
+        "target_parent_token"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "update_feishu_wiki_title",
+    "description": "更新 Wiki 节点标题。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "space_id": {
+          "type": "string"
+        },
+        "node_token": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "space_id",
+        "node_token",
+        "title"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "list_bitable_records",
+    "description": "列出多维表格记录。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "app_token": {
+          "type": "string"
+        },
+        "table_id": {
+          "type": "string"
+        },
+        "page_size": {
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "app_token",
+        "table_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "create_bitable_record",
+    "description": "新增多维表记录。fields_json 为字段名到值的 JSON 对象。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "app_token": {
+          "type": "string"
+        },
+        "table_id": {
+          "type": "string"
+        },
+        "fields_json": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "app_token",
+        "table_id",
+        "fields_json"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "update_bitable_record",
+    "description": "更新多维表记录。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "app_token": {
+          "type": "string"
+        },
+        "table_id": {
+          "type": "string"
+        },
+        "record_id": {
+          "type": "string"
+        },
+        "fields_json": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "app_token",
+        "table_id",
+        "record_id",
+        "fields_json"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "add_feishu_doc_comment",
+    "description": "给云文档加评论。file_type 常见 docx/sheet/bitable/file。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file_token": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "file_type": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_token",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "create_feishu_approval",
+    "description": "发起飞书审批实例。form_json 须符合审批定义；默认用当前 people 的 open_id。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "approval_code": {
+          "type": "string"
+        },
+        "form_json": {
+          "type": "string"
+        },
+        "user_open_id": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "approval_code",
+        "form_json"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  },
+  {
+    "name": "create_feishu_meeting",
+    "description": "预约飞书视频会议（秒级时间戳，end_timestamp 为预约有效期）。不创建日历日程，start_timestamp 仅作预览意图；如需安排开始时间请另用 create_feishu_event。需二次确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string"
+        },
+        "start_timestamp": {
+          "type": "string"
+        },
+        "end_timestamp": {
+          "type": "string"
+        },
+        "owner_open_id": {
+          "type": "string"
+        },
+        "confirm_token": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string",
+          "enum": [
+            "user",
+            "app"
+          ],
+          "description": "默认 user，使用本人飞书授权；仅显式 app 才以应用身份执行。"
+        },
+        "page_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "topic",
+        "start_timestamp",
+        "end_timestamp"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    }
+  }
+]

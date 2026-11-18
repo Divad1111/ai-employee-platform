@@ -16,10 +16,16 @@ type memoryStore struct {
 func NewMemoryStore() Store {
 	return &memoryStore{
 		servers: map[string]*MCPServer{
+			"mcp-collector": {
+				ID: "mcp-collector", Name: "personal-work-collector",
+				Description: "个人工作采集、飞书内容检索与操作",
+				ServerType:  ServerTypeBuiltin, Transport: TransportHTTP,
+				Endpoint: "/mcp/collector", Status: StatusActive,
+			},
 			"mcp-workflow": {
 				ID: "mcp-workflow", Name: "workflow-mcp",
 				Description: "系统内置工作流、技能包与企业知识库 MCP 服务",
-				ServerType: ServerTypeBuiltin, Transport: TransportHTTP,
+				ServerType:  ServerTypeBuiltin, Transport: TransportHTTP,
 				Endpoint: "/mcp", Status: StatusActive,
 			},
 		},

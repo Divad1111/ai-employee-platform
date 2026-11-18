@@ -1,4 +1,45 @@
 import { apiDelete, apiGet, apiPost, apiPut } from './client'
+import type { MCPToken } from './workflowmcp'
+
+export type MCPExportResult = {
+  filename: string
+  content: string
+  server_count: number
+  token: MCPToken | null
+  warnings?: string[] | null
+}
+
+export type ExternalMCPPolicy = { user_id: string; can_write: boolean; collector_can_write: boolean }
+
+export function getExternalMCPPolicy(userId?: string) {
+  return apiGet<ExternalMCPPolicy>(userId ? `/users/${encodeURIComponent(userId)}/mcp-policy` : '/me/mcp-policy')
+}
+
+export function setExternalMCPPolicy(userId: string, canWrite: boolean, service = 'workflow-mcp') {
+  return apiPut<ExternalMCPPolicy>(`/users/${encodeURIComponent(userId)}/mcp-policy`, { can_write: canWrite, service })
+}
+
+export function createExternalMCPToken(format: 'json' | 'codex', scope: 'READ' | 'WRITE', label: string, services?: { service: string; scope: 'READ' | 'WRITE' }[]) {
+  return apiPost<MCPExportResult>('/me/mcp-tokens', { format, scope, label, services })
+}
+
+export function revokeOwnExternalMCPToken(id: string) {
+  return apiDelete(`/me/mcp-tokens/${encodeURIComponent(id)}`)
+}
+
+export function exportMCPServers(format: 'json' | 'codex', scope: 'READ' | 'WRITE', collectorScope: 'READ' | 'WRITE' = 'READ') {
+  return apiPost<{
+    filename: string
+    content: string
+    server_count: number
+    token: MCPToken | null
+    warnings: string[] | null
+  }>('/mcp-servers/export', { format, scope, collector_scope: collectorScope })
+}
+
+export function listMCPExportTokens() {
+  return apiGet<{ items: MCPToken[] | null }>('/me/mcp-tokens')
+}
 
 export type MCPServer = {
   id: string

@@ -5,12 +5,57 @@ import (
 	"errors"
 	"github.com/ai-employee-platform/server/internal/audit"
 	"github.com/ai-employee-platform/server/internal/employee"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ai-employee-platform/server/internal/mcp"
+	"github.com/ai-employee-platform/server/internal/mcpauth"
 	"github.com/ai-employee-platform/server/internal/secret"
 )
+
+func TestBuiltinDispatchUsesSeparateServiceTokens(t *testing.T) {
+	ctx := context.Background()
+	registry := mcp.NewService(mcp.NewMemoryStore(), nil)
+	employees := employee.NewService(employee.NewMemoryStore(), audit.NewMemory(), nil)
+	e, err := employees.Create(ctx, employee.CreateInput{Name: "collector", OwnerUserID: "owner"}, "owner", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := mcpauth.NewService(mcpauth.NewMemoryStore())
+	s := &Service{MCP: registry, Employees: employees, MCPAuth: tokens, MCPPublicURL: "https://platform.example/mcp"}
+	for _, id := range []string{"mcp-workflow", "mcp-collector"} {
+		if _, err := registry.BindEmployee(ctx, e.ID, mcp.BindEmployeeInput{MCPServerID: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := s.buildStartJobPayload(ctx, e.ID, "hello", "workspace", "path", "")
+	if err != nil || len(first.McpServers) != 2 {
+		t.Fatalf("dispatch: %v %v", first, err)
+	}
+	second, err := s.buildStartJobPayload(ctx, e.ID, "hello", "workspace", "path", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]string{}
+	for i, spec := range first.McpServers {
+		raw := strings.TrimPrefix(spec.Headers["Authorization"], "Bearer ")
+		token, err := tokens.Validate(ctx, raw)
+		if err != nil || token.Service != spec.Name || token.SubjectID != e.ID || token.Scope != mcpauth.ScopeRead {
+			t.Fatalf("wrong service token: %v %v", token, err)
+		}
+		if second.McpServers[i].Headers["Authorization"] != spec.Headers["Authorization"] {
+			t.Fatal("session token changed unnecessarily")
+		}
+		if spec.Name == mcpauth.Collector && spec.Url != "https://platform.example/mcp/collector" {
+			t.Fatal(spec.Url)
+		}
+		seen[spec.Name] = raw
+	}
+	if seen[mcpauth.Workflow] == seen[mcpauth.Collector] {
+		t.Fatal("service audiences share token")
+	}
+}
 
 func TestExternalMCPAuthenticationDispatch(t *testing.T) {
 	ctx := context.Background()

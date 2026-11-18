@@ -31,6 +31,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/backup"
 	backupdb "github.com/ai-employee-platform/server/internal/backup/database"
 	"github.com/ai-employee-platform/server/internal/certca"
+	"github.com/ai-employee-platform/server/internal/collector"
 	"github.com/ai-employee-platform/server/internal/config"
 	"github.com/ai-employee-platform/server/internal/database"
 	"github.com/ai-employee-platform/server/internal/employee"
@@ -574,6 +575,30 @@ func main() {
 	wfSvc := workflowmcp.NewService(wfStore)
 	mcpAuthSvc := mcpauth.NewService(mcpTokStore)
 	mcpSvc := mcp.NewService(mcpStore, secretMgr)
+	var collectorStore collector.Store = collector.NewMemoryStore()
+	if pgSQL != nil {
+		collectorStore = collector.NewPostgresStore(pgSQL)
+	}
+	collectorSvc := collector.NewService(collectorStore, secretMgr)
+	collectorSvc.PlatformApp = func() (string, string, error) {
+		c := feishuSvc.GetConfigPublic()
+		if !c.Enabled {
+			return "", "", fmt.Errorf("平台飞书应用未启用")
+		}
+		secret, err := feishuSvc.GetAppSecret()
+		return c.AppID, secret, err
+	}
+	collectorSvc.UserActive = func(ctx context.Context, id string) bool {
+		u, err := users.FindByID(ctx, id)
+		return err == nil && u != nil && u.Status == auth.StatusActive
+	}
+	collectorSvc.Audit = func(ctx context.Context, userID, tool, result string) {
+		auditor.Log(ctx, "USER", userID, "collector.tool", result, "", map[string]string{"tool": tool})
+	}
+	feishuSvc.SetEventObserver(func(ctx context.Context, ev feishu.IncomingEvent) {
+		collectorSvc.ObserveFeishuEvent(ctx, ev.ChatID, ev.MessageID)
+	})
+	go collectorSvc.Run(sweepCtx)
 
 	bridge := &feishu.Bridge{
 		AuthorizeUser: func(ctx context.Context, id string) error {
@@ -603,7 +628,10 @@ func main() {
 	if cfg.PublicServerURL != "" {
 		defaultMCPURL = strings.TrimRight(cfg.PublicServerURL, "/") + "/mcp"
 	}
-	mcpURL := getenv("AIE_MCP_PUBLIC_URL", defaultMCPURL)
+	mcpURL := cfg.MCPPublicURL
+	if mcpURL == "" {
+		mcpURL = defaultMCPURL
+	}
 	if strings.EqualFold(cfg.Env, "production") {
 		endpoint, err := url.Parse(mcpURL)
 		if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" || endpoint.User != nil {
@@ -702,6 +730,7 @@ func main() {
 		WorkflowMCP:     wfSvc,
 		MCPAuth:         mcpAuthSvc,
 		MCP:             mcpSvc,
+		Collector:       collectorSvc,
 		SkillSyncer:     sched,
 		Automation:      autoSvc,
 		WSMembers:       wsMembers,
@@ -711,9 +740,39 @@ func main() {
 		Infrastructure:  infrastructureSvc,
 	})
 	mcpSrv := &mcpserver.Server{WF: wfSvc, MCPAuth: mcpAuthSvc, Auth: authSvc, Syncer: sched}
+	resolveEmployee := func(ctx context.Context, id, service string) (string, []string, []string, error) {
+		e, err := empSvc.Get(ctx, id)
+		if err != nil || e == nil || e.Status == employee.StatusDisabled || !collectorSvc.UserActive(ctx, e.OwnerUserID) {
+			return "", nil, nil, auth.ErrForbidden
+		}
+		bindings, err := mcpSvc.ListBindingsByEmployee(ctx, id)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		for _, binding := range bindings {
+			if b, ok := mcpauth.FindBuiltin(binding.MCPServerID); ok && b.Name == service && binding.Enabled {
+				return e.OwnerUserID, binding.AllowedTools, binding.DeniedTools, nil
+			}
+		}
+		if service == mcpauth.Workflow && len(bindings) == 0 {
+			return e.OwnerUserID, nil, nil, nil
+		}
+		return "", nil, nil, auth.ErrForbidden
+	}
+	enabledBuiltin := func(ctx context.Context, service string) bool {
+		b, ok := mcpauth.FindBuiltin(service)
+		if !ok {
+			return false
+		}
+		srv, err := mcpSvc.GetServer(ctx, b.ID)
+		return err == nil && srv.Status == mcp.StatusActive
+	}
+	mcpSrv.ResolveEmployee, mcpSrv.Enabled = resolveEmployee, enabledBuiltin
+	collectorMCP := &mcpserver.Server{MCPAuth: mcpAuthSvc, Auth: authSvc, Provider: &collector.Provider{Service: collectorSvc}, ResolveEmployee: resolveEmployee, Enabled: enabledBuiltin}
 	mux := http.NewServeMux()
 	mux.Handle("/", httpHandler)
 	mux.Handle("/mcp", mcpSrv.Handler())
+	mux.Handle("/mcp/collector", collectorMCP.Handler())
 	httpSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: api.SecureHTTP(mux, cfg),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 120 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	go func() {

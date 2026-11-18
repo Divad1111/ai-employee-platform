@@ -17,6 +17,7 @@ import {
 } from '../../api/mcp'
 import { PageFeatureGuide } from '../../components/PageFeatureGuide'
 import { StatusBadge } from '../../components/StatusBadge'
+import { McpExportActions } from './McpExportActions'
 import {
   IconKey,
   IconPlug,
@@ -55,9 +56,12 @@ export function McpServersPage() {
   const [serverTransport, setServerTransport] = useState<'http' | 'sse' | 'stdio'>('http')
   const [serverEndpoint, setServerEndpoint] = useState('')
   const [serverHeaders, setServerHeaders] = useState('')
+  const [serverExportCredential, setServerExportCredential] = useState('auto')
 
   // Credential Modal
   const [showCredModal, setShowCredModal] = useState(false)
+  const [credError, setCredError] = useState('')
+  const [credSaving, setCredSaving] = useState(false)
   const [editingCred, setEditingCred] = useState<Credential | null>(null)
   const [credName, setCredName] = useState('')
   const [credOwnerType, setCredOwnerType] = useState<'USER' | 'ORGANIZATION' | 'SERVICE_ACCOUNT'>('USER')
@@ -109,6 +113,7 @@ export function McpServersPage() {
     setServerTransport('http')
     setServerEndpoint('')
     setServerHeaders('')
+    setServerExportCredential('auto')
     setShowServerModal(true)
   }
 
@@ -120,6 +125,8 @@ export function McpServersPage() {
     setServerEndpoint(s.endpoint || '')
     const h = s.config?.headers ? JSON.stringify(s.config.headers, null, 2) : ''
     setServerHeaders(h)
+    setServerExportCredential(s.config && Object.hasOwn(s.config, 'export_credential_id')
+      ? (s.config.export_credential_id || 'none') : 'auto')
     setShowServerModal(true)
   }
 
@@ -136,6 +143,9 @@ export function McpServersPage() {
         return
       }
     }
+    const config: MCPServer['config'] = { ...editingServer?.config, headers: headersObj || {} }
+    if (serverExportCredential === 'auto') delete config.export_credential_id
+    else config.export_credential_id = serverExportCredential === 'none' ? '' : serverExportCredential
     try {
       if (editingServer) {
         await updateMCPServer(editingServer.id, {
@@ -143,7 +153,7 @@ export function McpServersPage() {
           description: serverDesc,
           transport: serverTransport,
           endpoint: serverEndpoint,
-          config: headersObj ? { headers: headersObj } : {},
+          config,
         })
         setMsg(`MCP 服务 [${serverName}] 更新成功`)
       } else {
@@ -152,7 +162,7 @@ export function McpServersPage() {
           description: serverDesc,
           transport: serverTransport,
           endpoint: serverEndpoint,
-          config: headersObj ? { headers: headersObj } : {},
+          config,
         })
         setMsg(`MCP 服务 [${serverName}] 创建成功`)
       }
@@ -176,6 +186,7 @@ export function McpServersPage() {
   }
 
   function openCreateCred() {
+    setCredError('')
     const currentUser = getUser()
     setEditingCred(null)
     setCredName('')
@@ -193,6 +204,7 @@ export function McpServersPage() {
   }
 
   function openEditCred(c: Credential) {
+    setCredError('')
     setEditingCred(c)
     setCredName(c.credential_name)
     setCredOwnerType(c.owner_type)
@@ -210,6 +222,8 @@ export function McpServersPage() {
 
   async function handleSaveCred(e: FormEvent) {
     e.preventDefault()
+    if (credSaving) return
+    setCredError('')
     setError('')
     setMsg('')
     const currentUser = getUser()
@@ -232,6 +246,7 @@ export function McpServersPage() {
       if (credRawHeader) metadata.header_prefix = ''
       else if (credHeaderPrefix.trim()) metadata.header_prefix = credHeaderPrefix.trim()
     }
+    setCredSaving(true)
     try {
       if (editingCred) {
         await updateCredential(editingCred.id, {
@@ -246,7 +261,7 @@ export function McpServersPage() {
         setMsg(`凭证 [${credName}] 更新成功`)
       } else {
         if (!credSecret.trim()) {
-          setError('新建凭证必须填写密钥/Token')
+          setCredError('新建凭证必须填写密钥/Token')
           return
         }
         await createCredential({
@@ -263,7 +278,9 @@ export function McpServersPage() {
       setShowCredModal(false)
       await loadData()
     } catch (err: any) {
-      setError(err.message || String(err))
+      setCredError(err.message || String(err))
+    } finally {
+      setCredSaving(false)
     }
   }
 
@@ -324,7 +341,7 @@ export function McpServersPage() {
           {
             step: '2',
             title: '身份凭证安全存储',
-            desc: '所有 Token / OAuth 凭据经 Vault 安全隔离加密，仅在向工作站分发短期会话时解密注入，普通日志恒为脱敏。',
+            desc: 'Token / OAuth 凭据经 Vault 加密，在工作站分发或本人明确导出时解密使用，普通查询和日志不返回明文。',
             tag: '凭证隔离',
           },
           {
@@ -364,10 +381,14 @@ export function McpServersPage() {
       {tab === 'servers' ? (
         <div className="panel">
           <div className="panel-header">
-            <div>
+            <div style={{ flex: '1 1 240px', minWidth: 0 }}>
               <h2>已注册的 MCP 服务</h2>
               <p>数字员工在执行任务时，可按需动态加载并调用这些服务暴露的工具接口</p>
+              {canAll('workflow.grant') && canAll('workflow.read') && (
+                <p>导出全部已注册服务及连接凭证；内置服务默认签发 90 天只读授权。请仅将文件交给获授权的使用者。</p>
+              )}
             </div>
+            <McpExportActions disabled={loading || servers.length === 0} onMessage={setMsg} onError={setError} />
           </div>
 
           <div className="table-wrapper">
@@ -460,7 +481,7 @@ export function McpServersPage() {
                         <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6, whiteSpace: 'nowrap' }}>
                           {isBuiltin ? (
                             <Link
-                              to="/mcp-servers/workflow-mcp"
+                              to={s.id === 'mcp-collector' ? '/mcp-servers/personal-work-collector' : '/mcp-servers/workflow-mcp'}
                               className="btn-primary btn-sm"
                               style={{ display: 'inline-flex', alignItems: 'center', gap: 5, textDecoration: 'none', whiteSpace: 'nowrap', flexShrink: 0 }}
                             >
@@ -727,6 +748,25 @@ export function McpServersPage() {
                   />
                   <div className="form-hint">JSON 键值对格式，在与外部 MCP 服务握手连接时由网关自动携带</div>
                 </div>
+                <div className="modal-form-group">
+                  <label htmlFor="mcp-export-credential">导出使用的身份凭证</label>
+                  <select id="mcp-export-credential" value={serverExportCredential}
+                    onChange={event => setServerExportCredential(event.target.value)}>
+                    <option value="auto">自动使用本人已绑定的唯一凭证</option>
+                    <option value="none">仅使用服务配置中的请求头 / 环境变量</option>
+                    {credentials.filter(credential => credential.owner_type === 'USER'
+                      ? credential.owner_id === getUser()?.id
+                      : credential.created_by === getUser()?.id).map(credential => (
+                      <option key={credential.id} value={credential.id}>{credential.credential_name}</option>
+                    ))}
+                    {!['auto', 'none'].includes(serverExportCredential) && !credentials.some(credential =>
+                      credential.id === serverExportCredential && (credential.owner_type === 'USER'
+                        ? credential.owner_id === getUser()?.id : credential.created_by === getUser()?.id)) && (
+                      <option value={serverExportCredential}>当前凭证不可用，请重新选择</option>
+                    )}
+                  </select>
+                  <div className="form-hint">仅用于外部导出，凭证会写入下载文件。多个绑定身份时请明确选择；第三方服务的访问权限由该凭证决定。</div>
+                </div>
               </div>
 
               <div className="modal-footer">
@@ -755,12 +795,13 @@ export function McpServersPage() {
                 type="button"
                 className="modal-close-btn"
                 onClick={() => setShowCredModal(false)}
+                disabled={credSaving}
                 title="关闭"
               >
                 ✕
               </button>
             </div>
-            <form onSubmit={handleSaveCred}>
+            <form className="credential-modal-form" onSubmit={handleSaveCred}>
               <div className="modal-body">
                 <div className="modal-form-group">
                   <label>
@@ -943,11 +984,12 @@ export function McpServersPage() {
               </div>
 
               <div className="modal-footer">
-                <button type="button" className="btn-ghost" onClick={() => setShowCredModal(false)}>
+                {credError && <p className="error" role="alert">{credError}</p>}
+                <button type="button" className="btn-ghost" onClick={() => setShowCredModal(false)} disabled={credSaving}>
                   取消
                 </button>
-                <button type="submit" className="btn-primary">
-                  {editingCred ? '保存凭证' : '确认录入'}
+                <button type="submit" className="btn-primary" disabled={credSaving}>
+                  {credSaving ? '正在保存…' : editingCred ? '保存凭证' : '确认录入'}
                 </button>
               </div>
             </form>

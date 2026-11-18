@@ -16,7 +16,7 @@ var (
 	ErrCredentialSecretMissing = errors.New("凭证密钥不可用")
 )
 
-// Authentication 仅供运行时下发使用，不得输出到普通日志或管理 API。
+// Authentication 仅供运行时下发和显式授权导出使用，不得输出到日志或普通查询 API。
 type Authentication struct {
 	Headers map[string]string `json:"-"`
 	Env     map[string]string `json:"-"`
@@ -25,14 +25,25 @@ type Authentication struct {
 // ResolveAuthentication 根据凭证类型和 metadata 生成 HTTP 头或 STDIO 环境变量。
 // 旧凭证未配置 metadata 时保留 Bearer 行为；Token、Basic 和自定义头显式适配。
 func (s *Service) ResolveAuthentication(ctx context.Context, credentialID, transport string) (*Authentication, error) {
+	return s.resolveAuthentication(ctx, credentialID, transport, "SYSTEM", "scheduler", "mcp_dispatch")
+}
+
+func (s *Service) resolveAuthentication(ctx context.Context, credentialID, transport, actorType, actorID, purpose string) (*Authentication, error) {
 	cred, err := s.usableCredential(ctx, credentialID)
 	if err != nil {
 		return nil, err
 	}
+	// Export must check ownership on the same credential snapshot that is
+	// decrypted, even if ownership changed after selecting a registry binding.
+	if actorType == "USER" && (actorID == "" ||
+		(cred.OwnerType == OwnerTypeUser && cred.OwnerID != actorID) ||
+		(cred.OwnerType != OwnerTypeUser && cred.CreatedBy != actorID)) {
+		return nil, errors.New("无权导出其他用户的凭证")
+	}
 	if err := validateAuthConfig(cred.AuthType, cred.Metadata); err != nil {
 		return nil, err
 	}
-	value, err := s.credentialSecret(ctx, cred)
+	value, err := s.credentialSecretFor(ctx, cred, actorType, actorID, purpose)
 	if err != nil {
 		return nil, err
 	}
@@ -100,10 +111,14 @@ func (s *Service) usableCredential(ctx context.Context, id string) (*Credential,
 }
 
 func (s *Service) credentialSecret(ctx context.Context, cred *Credential) (string, error) {
+	return s.credentialSecretFor(ctx, cred, "SYSTEM", "scheduler", "mcp_dispatch")
+}
+
+func (s *Service) credentialSecretFor(ctx context.Context, cred *Credential, actorType, actorID, purpose string) (string, error) {
 	if cred.SecretRef == "" || s.secretMgr == nil {
 		return "", ErrCredentialSecretMissing
 	}
-	value, err := s.secretMgr.Access(ctx, cred.SecretRef, "SYSTEM", "scheduler", "", "mcp_dispatch")
+	value, err := s.secretMgr.Access(ctx, cred.SecretRef, actorType, actorID, "", purpose)
 	if err != nil {
 		return "", err
 	}

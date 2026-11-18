@@ -19,6 +19,7 @@ import { SetupPage } from '../pages/SetupPage'
 import { SessionsPage } from '../pages/SessionsPage'
 import { McpServersPage } from '../pages/mcp/McpServersPage'
 import { WorkflowMcpPage } from '../pages/workflow/WorkflowMcpPage'
+import { CollectorPage } from '../pages/collector/CollectorPage'
 import { WorkstationsPage } from '../pages/WorkstationsPage'
 import { PVEPage } from '../pages/infrastructure/PVEPage'
 import { HostDetailPage } from '../pages/infrastructure/HostDetailPage'
@@ -70,6 +71,7 @@ export function AppRouter() {
             <Route path="/feishu" element={<FeishuPage />} />
             <Route path="/mcp-servers" element={<McpServersPage />} />
             <Route path="/mcp-servers/workflow-mcp" element={<WorkflowMcpPage />} />
+            <Route path="/mcp-servers/personal-work-collector" element={<CollectorPage />} />
             <Route path="/workflows" element={<Navigate to="/mcp-servers/workflow-mcp" replace />} />
             <Route path="/skills" element={<Navigate to="/mcp-servers/workflow-mcp" replace />} />
             <Route path="/knowledge" element={<Navigate to="/mcp-servers/workflow-mcp" replace />} />

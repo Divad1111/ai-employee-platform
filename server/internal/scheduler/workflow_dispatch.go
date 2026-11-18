@@ -134,12 +134,23 @@ func (s *Service) buildStartJobPayload(ctx context.Context, employeeID, prompt, 
 				if !b.Enabled {
 					continue
 				}
-				if b.MCPServerID == "mcp-workflow" || strings.EqualFold(b.MCPServerName, "workflow-mcp") {
-					hasWorkflowMCP = true
-					continue
-				}
 				srv, err := s.MCP.GetServer(ctx, b.MCPServerID)
 				if err != nil || srv.Status != mcp.StatusActive {
+					continue
+				}
+				if builtin, ok := mcpauth.FindBuiltin(srv.ID); ok {
+					if builtin.Name == mcpauth.Workflow {
+						hasWorkflowMCP = true
+						continue
+					}
+					secret, err := s.sessionMCPSecretFor(ctx, employeeID, builtin.Name)
+					if err != nil {
+						return nil, err
+					}
+					start.McpServers = append(start.McpServers, &aiev1.MCPServerSpec{
+						Name: builtin.Name, Type: "http", Url: mcpauth.Endpoint(s.MCPPublicURL, builtin.Name),
+						Headers: map[string]string{"Authorization": "Bearer " + secret},
+					})
 					continue
 				}
 				spec := &aiev1.MCPServerSpec{
@@ -241,6 +252,10 @@ func (s *Service) buildStartJobPayload(ctx context.Context, employeeID, prompt, 
 // ACP sessions receive MCP servers only at session creation, so issuing a new
 // credential for every job would otherwise discard the agent context.
 func (s *Service) sessionMCPSecret(ctx context.Context, employeeID string) (string, error) {
+	return s.sessionMCPSecretFor(ctx, employeeID, mcpauth.Workflow)
+}
+
+func (s *Service) sessionMCPSecretFor(ctx context.Context, employeeID, service string) (string, error) {
 	if s.MCPAuth == nil {
 		return "", fmt.Errorf("MCP token service is unavailable")
 	}
@@ -250,16 +265,19 @@ func (s *Service) sessionMCPSecret(ctx context.Context, employeeID string) (stri
 			generation = e.SessionGeneration
 		}
 	}
-	key := fmt.Sprintf("%s:%d", employeeID, generation)
+	key := fmt.Sprintf("%s:%d:%s", employeeID, generation, service)
 	s.mcpTokenMu.Lock()
 	defer s.mcpTokenMu.Unlock()
+	if s.mcpTokens == nil {
+		s.mcpTokens = map[string]sessionMCPToken{}
+	}
 	if cached, ok := s.mcpTokens[key]; ok && (cached.expiresAt.IsZero() || time.Until(cached.expiresAt) > time.Hour) {
 		return cached.secret, nil
 	}
 	// The read-only token is deliberately non-expiring. ACP accepts MCP headers
 	// only when the session starts; session generation changes rotate it, and
 	// the token remains explicitly revocable through MCP token management.
-	issued, err := s.MCPAuth.Issue(ctx, mcpauth.SubjectEmployee, employeeID,
+	issued, err := s.MCPAuth.IssueFor(ctx, service, mcpauth.SubjectEmployee, employeeID,
 		mcpauth.ScopeRead, "employee-session", "scheduler", 0)
 	if err != nil || issued == nil {
 		return "", err

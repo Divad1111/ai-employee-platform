@@ -29,6 +29,8 @@ type Config struct {
 	PublicGRPCPort string
 	// PublicServerURL 外部完整访问地址（如 http://192.168.1.100:9080，可选）
 	PublicServerURL string
+	// MCPPublicURL 显式配置的外部 MCP 地址；留空时从公共服务地址或导出请求推导。
+	MCPPublicURL string
 }
 
 // Load 从环境变量加载配置，缺省启用生产安全要求。
@@ -50,6 +52,7 @@ func Load() (*Config, error) {
 	cfg.PublicHTTPPort = httpPort
 	cfg.PublicGRPCPort = getenv("AIE_GRPC_PORT", "9090")
 	cfg.PublicServerURL = getenv("AIE_PUBLIC_SERVER_URL", "")
+	cfg.MCPPublicURL = getenv("AIE_MCP_PUBLIC_URL", "")
 	cfg.RequireAdminMFA = strings.EqualFold(cfg.Env, "production") || getenv("AIE_REQUIRE_ADMIN_MFA", "0") == "1"
 	for _, raw := range strings.Split(os.Getenv("AIE_TRUSTED_PROXIES"), ",") {
 		raw = strings.TrimSpace(raw)

@@ -1,5 +1,5 @@
 // Package mcpauth 管理「工作流MCP」专用 Token（aiemcp_ 前缀）。
-// 支持 EMPLOYEE/READ（Scope 过滤只读）与 USER/ADMIN（走 RBAC）两种主体。
+// 支持 EMPLOYEE（工作流授权过滤）、USER（走 RBAC）与 EXTERNAL_USER（显式外部授权）。
 package mcpauth
 
 import (
@@ -21,8 +21,12 @@ const (
 
 	SubjectEmployee = "EMPLOYEE"
 	SubjectUser     = "USER"
+	// SubjectExternalUser is delegated through an authenticated management session.
+	// It is accepted only by the MCP endpoint, never as a management session.
+	SubjectExternalUser = "EXTERNAL_USER"
 
 	ScopeRead  = "READ"
+	ScopeWrite = "WRITE"
 	ScopeAdmin = "ADMIN"
 )
 
@@ -36,6 +40,7 @@ var (
 // Token MCP Token 元数据（不含明文）。
 type Token struct {
 	ID          string     `json:"id"`
+	Service     string     `json:"service"`
 	TokenHash   string     `json:"-"`
 	SubjectType string     `json:"subject_type"`
 	SubjectID   string     `json:"subject_id"`
@@ -62,6 +67,9 @@ type Store interface {
 	ListBySubject(ctx context.Context, subjectType, subjectID string) ([]*Token, error)
 	Update(ctx context.Context, t *Token) error
 	Delete(ctx context.Context, id string) error
+	GetExternalPolicy(ctx context.Context, userID string) (*ExternalPolicy, error)
+	SetExternalPolicy(ctx context.Context, policy *ExternalPolicy) error
+	SetExternalServicePolicy(ctx context.Context, userID, service string, canWrite bool, actorID string) (*ExternalPolicy, error)
 }
 
 // Service Token 业务服务。
@@ -76,8 +84,27 @@ func NewService(store Store) *Service {
 
 // Issue 签发 Token。
 func (s *Service) Issue(ctx context.Context, subjectType, subjectID, scope, label, createdBy string, expiresIn time.Duration) (*IssueResult, error) {
-	if subjectType != SubjectEmployee && subjectType != SubjectUser {
+	return s.IssueFor(ctx, Workflow, subjectType, subjectID, scope, label, createdBy, expiresIn)
+}
+
+func (s *Service) IssueFor(ctx context.Context, service, subjectType, subjectID, scope, label, createdBy string, expiresIn time.Duration) (*IssueResult, error) {
+	if _, ok := FindBuiltin(service); !ok || (service != Workflow && service != Collector) {
+		return nil, fmt.Errorf("%w: service", ErrInvalidToken)
+	}
+	if subjectType != SubjectEmployee && subjectType != SubjectUser && subjectType != SubjectExternalUser {
 		return nil, fmt.Errorf("%w: subject_type", ErrInvalidToken)
+	}
+	if subjectType == SubjectExternalUser && (subjectID == "" || createdBy != subjectID || expiresIn <= 0 || (scope != ScopeRead && scope != ScopeWrite)) {
+		return nil, fmt.Errorf("%w: external authorization", ErrInvalidToken)
+	}
+	if subjectType == SubjectExternalUser && scope == ScopeWrite {
+		policy, err := s.ExternalPolicy(ctx, subjectID)
+		if err != nil {
+			return nil, err
+		}
+		if !policy.CanWriteService(service) {
+			return nil, fmt.Errorf("%w: 未获管理员授予外部 MCP 写权限", ErrInvalidToken)
+		}
 	}
 	if scope == "" {
 		if subjectType == SubjectEmployee {
@@ -92,6 +119,7 @@ func (s *Service) Issue(ctx context.Context, subjectType, subjectID, scope, labe
 	}
 	now := time.Now().UTC()
 	t := &Token{
+		Service:     service,
 		ID:          idgen.New("MCP"),
 		TokenHash:   hash,
 		SubjectType: subjectType,
@@ -182,16 +210,18 @@ func hashToken(raw string) string {
 
 // MemoryStore 内存 Token 存储。
 type MemoryStore struct {
-	mu     sync.RWMutex
-	byID   map[string]*Token
-	byHash map[string]*Token
+	mu       sync.RWMutex
+	byID     map[string]*Token
+	byHash   map[string]*Token
+	policies map[string]*ExternalPolicy
 }
 
 // NewMemoryStore 创建空存储。
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		byID:   map[string]*Token{},
-		byHash: map[string]*Token{},
+		byID:     map[string]*Token{},
+		byHash:   map[string]*Token{},
+		policies: map[string]*ExternalPolicy{},
 	}
 }
 
@@ -246,6 +276,11 @@ func (m *MemoryStore) Update(_ context.Context, t *Token) error {
 		return ErrNotFound
 	}
 	cp := *t
+	// A validation request that started before Revoke must never revive a token
+	// when it records last_used_at with an older snapshot.
+	if m.byID[t.ID].RevokedAt != nil {
+		cp.RevokedAt = m.byID[t.ID].RevokedAt
+	}
 	m.byID[t.ID] = &cp
 	m.byHash[t.TokenHash] = &cp
 	return nil

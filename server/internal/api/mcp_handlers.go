@@ -212,6 +212,12 @@ func (d Deps) handleUpdateCredential(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 	in.CreatedBy = sess.UserID
+	if !d.scopeAll(r, sess, "workflow.write") &&
+		((in.OwnerType != "" && strings.ToUpper(strings.TrimSpace(in.OwnerType)) != cur.OwnerType) ||
+			(in.OwnerID != "" && strings.TrimSpace(in.OwnerID) != cur.OwnerID)) {
+		writeErr(w, http.StatusForbidden, "无权变更凭证归属")
+		return
+	}
 	c, err := d.MCP.UpdateCredential(r.Context(), id, in)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())

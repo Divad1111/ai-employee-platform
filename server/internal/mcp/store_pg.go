@@ -259,12 +259,13 @@ func (s *pgStore) UpdateCredential(ctx context.Context, c *Credential) error {
 	query := `
 		UPDATE credentials
 		SET credential_name = $2, provider = $3, auth_type = $4, secret_ref = $5,
-		    masked_value = $6, expires_at = $7, metadata = $8, status = $9, updated_at = NOW()
+		    masked_value = $6, expires_at = $7, metadata = $8, status = $9,
+		    owner_type = $10, owner_id = $11, updated_at = NOW()
 		WHERE id = $1
 	`
 	res, err := s.db.ExecContext(ctx, query,
 		c.ID, c.CredentialName, c.Provider, c.AuthType, c.SecretRef,
-		c.MaskedValue, c.ExpiresAt, metaRaw, c.Status,
+		c.MaskedValue, c.ExpiresAt, metaRaw, c.Status, c.OwnerType, c.OwnerID,
 	)
 	if err != nil {
 		return err

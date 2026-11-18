@@ -25,6 +25,7 @@ import (
 	"github.com/ai-employee-platform/server/internal/automation"
 	"github.com/ai-employee-platform/server/internal/backup"
 	"github.com/ai-employee-platform/server/internal/certca"
+	"github.com/ai-employee-platform/server/internal/collector"
 	"github.com/ai-employee-platform/server/internal/config"
 	"github.com/ai-employee-platform/server/internal/employee"
 
@@ -83,6 +84,7 @@ type Deps struct {
 	WorkflowMCP     *workflowmcp.Service
 	MCPAuth         *mcpauth.Service
 	MCP             *mcp.Service
+	Collector       *collector.Service
 	SkillSyncer     SkillSyncer
 	Automation      *automation.Service
 	WSMembers       wsmember.Store
@@ -101,6 +103,7 @@ type SkillSyncer interface {
 func NewRouter(d Deps) http.Handler {
 	mux := http.NewServeMux()
 	d.infrastructureRoutes(mux)
+	d.collectorRoutes(mux)
 	mux.HandleFunc("GET /api/integrations/workstation/jobs/{id}/inputs/{hash}", d.handleWorkstationJobInput)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -253,6 +256,14 @@ func NewRouter(d Deps) http.Handler {
 
 	// 多用户 MCP Server、凭证库与员工绑定管理 (§5, §6, §7)
 	mux.HandleFunc("GET /api/mcp-servers", d.requirePerm("workflow.read", d.handleListMCPServers))
+	mux.HandleFunc("POST /api/mcp-servers/export", d.requirePerm("workflow.grant", d.onlyAll("workflow.grant", d.handleExportMCPServers)))
+	mux.HandleFunc("GET /api/mcp-servers/export-tokens", d.requireExternalMCPSession(d.handleListMCPExportTokens))
+	mux.HandleFunc("GET /api/me/mcp-policy", d.requireExternalMCPSession(d.handleGetExternalMCPPolicy))
+	mux.HandleFunc("GET /api/me/mcp-tokens", d.requireExternalMCPSession(d.handleListMCPExportTokens))
+	mux.HandleFunc("POST /api/me/mcp-tokens", d.requireExternalMCPSession(d.handleCreateExternalMCPToken))
+	mux.HandleFunc("DELETE /api/me/mcp-tokens/{id}", d.requireExternalMCPSession(d.handleRevokeOwnExternalMCPToken))
+	mux.HandleFunc("GET /api/users/{id}/mcp-policy", d.requireExternalMCPSession(d.handleGetExternalMCPPolicy))
+	mux.HandleFunc("PUT /api/users/{id}/mcp-policy", d.requireExternalMCPSession(d.handleSetExternalMCPPolicy))
 	mux.HandleFunc("POST /api/mcp-servers", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleCreateMCPServer)))
 	mux.HandleFunc("GET /api/mcp-servers/{id}", d.requirePerm("workflow.read", d.handleGetMCPServer))
 	mux.HandleFunc("PUT /api/mcp-servers/{id}", d.requirePerm("workflow.write", d.onlyAll("workflow.write", d.handleUpdateMCPServer)))

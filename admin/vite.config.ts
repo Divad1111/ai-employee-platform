@@ -27,6 +27,10 @@ export default defineConfig({
         changeOrigin: false,
         ws: true,
       },
+      '^/mcp(?:/|\\?|$)': {
+        target: process.env.AIE_DEV_API_TARGET || 'http://127.0.0.1:8080',
+        changeOrigin: false,
+      },
     },
   },
 })

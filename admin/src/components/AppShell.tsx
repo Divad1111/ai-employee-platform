@@ -74,7 +74,8 @@ const navSections: NavSection[] = [
   {
     title: '能力与协同扩展',
     items: [
-      { to: '/mcp-servers', label: 'MCP 服务管理', icon: IconPlug, perm: 'workflow.read' },
+      { to: '/mcp-servers', label: 'MCP 服务管理', icon: IconPlug, perm: 'workflow.read', end: true },
+      { to: '/mcp-servers/personal-work-collector', label: '工作采集中心', icon: IconFileText },
       { to: '/software', label: '软件管理', icon: IconPackage, perm: 'infra.read', allScope: true },
       { to: '/infrastructure/deployments', label: '部署任务', icon: IconClock, perm: 'infra.read', allScope: true },
       // 飞书应用配置属系统集成，需 system.write
@@ -172,7 +173,7 @@ export function AppShell() {
     nav('/login', { replace: true })
   }
 
-  const activeNav = allNavItems.find((n) =>
+  const activeNav = [...allNavItems].sort((a, b) => b.to.length - a.to.length).find((n) =>
     n.end ? location.pathname === n.to : location.pathname.startsWith(n.to) && n.to !== '/'
   )
   const currentTitle = location.pathname === '/profile' ? '个人设置' : activeNav?.label || '控制中心'

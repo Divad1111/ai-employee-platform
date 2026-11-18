@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ai-employee-platform/server/internal/idgen"
+	"github.com/ai-employee-platform/server/internal/mcpauth"
 	"github.com/ai-employee-platform/server/internal/secret"
 )
 
@@ -69,6 +70,12 @@ func (s *Service) CreateServer(ctx context.Context, in CreateServerInput) (*MCPS
 	if id == "" {
 		id = "mcp-" + randomHex(4)
 	}
+	if _, reserved := mcpauth.FindBuiltin(id); reserved {
+		return nil, errors.New("内置服务 ID 不可用于自定义服务")
+	}
+	if _, reserved := mcpauth.FindBuiltin(name); reserved {
+		return nil, errors.New("内置服务名称不可用于自定义服务")
+	}
 	status := strings.ToLower(strings.TrimSpace(in.Status))
 	if status == "" {
 		status = StatusActive
@@ -96,6 +103,19 @@ func (s *Service) UpdateServer(ctx context.Context, id string, in CreateServerIn
 	srv, err := s.store.GetServer(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if srv.ServerType == ServerTypeBuiltin {
+		if in.Status != "" && in.Status != StatusActive && in.Status != StatusDisabled {
+			return nil, errors.New("无效服务状态")
+		}
+		if in.Status != "" {
+			srv.Status = in.Status
+		}
+		srv.UpdatedAt = time.Now()
+		return srv, s.store.UpdateServer(ctx, srv)
+	}
+	if _, reserved := mcpauth.FindBuiltin(in.Name); reserved {
+		return nil, errors.New("内置服务名称不可用于自定义服务")
 	}
 	if in.Name != "" {
 		srv.Name = strings.TrimSpace(in.Name)
@@ -208,8 +228,27 @@ func (s *Service) UpdateCredential(ctx context.Context, id string, in CreateCred
 	if err != nil {
 		return nil, err
 	}
+	if in.OwnerType != "" {
+		ownerType := strings.ToUpper(strings.TrimSpace(in.OwnerType))
+		switch ownerType {
+		case OwnerTypeUser, OwnerTypeOrganization, OwnerTypeServiceAccount:
+			cred.OwnerType = ownerType
+		default:
+			return nil, errors.New("不支持的凭证归属类型")
+		}
+	}
+	if in.OwnerID != "" {
+		ownerID := strings.TrimSpace(in.OwnerID)
+		if ownerID == "" {
+			return nil, errors.New("凭证归属标识不能为空")
+		}
+		cred.OwnerID = ownerID
+	}
 	if in.CredentialName != "" {
 		cred.CredentialName = strings.TrimSpace(in.CredentialName)
+		if cred.CredentialName == "" {
+			return nil, errors.New("凭证名称不能为空")
+		}
 	}
 	if in.Provider != "" {
 		cred.Provider = strings.ToLower(strings.TrimSpace(in.Provider))
@@ -230,12 +269,15 @@ func (s *Service) UpdateCredential(ctx context.Context, id string, in CreateCred
 		cred.MaskedValue = maskSecret(val)
 		if s.secretMgr != nil {
 			if cred.SecretRef != "" {
-				_, _ = s.secretMgr.Rotate(ctx, cred.SecretRef, val, in.CreatedBy, "")
+				if _, err := s.secretMgr.Rotate(ctx, cred.SecretRef, val, in.CreatedBy, ""); err != nil {
+					return nil, errors.New("更新凭证密钥失败，请重试")
+				}
 			} else {
 				meta, err := s.secretMgr.Put(ctx, cred.CredentialName, val, in.CreatedBy, "", "MCP 凭证")
-				if err == nil && meta.ID != "" {
-					cred.SecretRef = meta.ID
+				if err != nil || meta.ID == "" {
+					return nil, errors.New("保存凭证密钥失败，请重试")
 				}
+				cred.SecretRef = meta.ID
 			}
 		}
 	}

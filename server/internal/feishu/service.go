@@ -153,6 +153,7 @@ type Service struct {
 	byOpenID       map[string][]string // open_id → 可绑定多个数字员工
 	AuthorizeActor func(context.Context, string, string) error
 	ClaimEvent     func(context.Context, string, time.Duration) (bool, error)
+	eventObserver  func(context.Context, IncomingEvent)
 	seenEvent      map[string]time.Time
 	Sender         Sender
 	Jobs           JobCreator
@@ -1309,6 +1310,12 @@ func (s *Service) EmployeeHasOpenID(employeeID, openID string) bool {
 //  1. 必须显式 @别名 / EMP-xxx / /emp 才能派单（不做 open_id / chat_id / 唯一绑定兜底）；
 //  2. 群聊里出现了 @、/emp 或 EMP- 但没对上员工：回复格式提示；完全不像呼叫则静默；
 //  3. 私聊未点名员工：回复「请@对应员工执行」，不创建任务。
+func (s *Service) SetEventObserver(observer func(context.Context, IncomingEvent)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.eventObserver = observer
+}
+
 func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID string, duplicate bool, err error) {
 	if s.ClaimEvent != nil && ev.EventID != "" {
 		accepted, err := s.ClaimEvent(ctx, "event:"+ev.EventID, 24*time.Hour)
@@ -1321,6 +1328,12 @@ func (s *Service) HandleMessage(ctx context.Context, ev IncomingEvent) (jobID st
 	}
 	if s.Dedupe(ev.EventID) {
 		return "", true, nil
+	}
+	s.mu.RLock()
+	observer := s.eventObserver
+	s.mu.RUnlock()
+	if observer != nil {
+		observer(ctx, ev)
 	}
 	if len(ev.Attachments) > 0 && (ev.MessageType == "image" || ev.MessageType == "file") {
 		stageErr := s.stageAttachments(ev)
